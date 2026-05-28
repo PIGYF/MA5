@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+
+# Generated reports, scans, and local cache files
+reports/
+nasdaq_screener_cache.json
+server.out.log
+server.err.log
+*_report.html
+*_equity.csv
+*_trades.csv
+next_b_candidates.*
+test_next_b.*
+ratchet_evaluation.csv
+equity.csv
+trades.csv
+yfinance_*.csv
+yfinance_test_*.csv
+
+# Local editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

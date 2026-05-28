@@ -1,0 +1,299 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import html
+from dataclasses import dataclass
+from datetime import date, timedelta
+from pathlib import Path
+
+from backtest import Bar, fetch_bars, rolling_sma, rolling_sum
+
+
+DEFAULT_SYMBOLS = [
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "TSLA", "AVGO", "AMD",
+    "NFLX", "PLTR", "COIN", "MSTR", "SMCI", "ARM", "CRWD", "NET", "DDOG", "SNOW",
+    "SHOP", "SQ", "HOOD", "RBLX", "UBER", "ABNB", "DASH", "APP", "SOFI", "ROKU",
+    "ASTS", "RKLB", "IONQ", "OKLO", "VRT", "DELL", "MU", "MRVL", "TSM", "ASML",
+    "QCOM", "AMAT", "LRCX", "KLAC", "PANW", "ZS", "MDB", "TEAM", "NOW", "ORCL",
+    "CRM", "ADBE", "INTC", "IBM", "TXN", "ADI", "NIO", "LI", "XPEV", "BABA",
+    "PDD", "JD", "SE", "MELI", "CELH", "ELF", "CAVA", "HIMS", "WING", "CMG",
+    "LLY", "NVO", "ISRG", "VRTX", "REGN", "VRTX", "MRNA", "CRSP", "BEAM", "RXRX",
+    "QQQ", "SPY", "IWM", "TQQQ", "SOXL", "ARKK",
+]
+
+
+@dataclass
+class SignalResult:
+    symbol: str
+    signal_date: str
+    close: float
+    ma: float
+    dist_to_ma_pct: float
+    volume: float
+    vol_ma: float
+    volume_ratio: float
+    massive_count_7d: int
+    signal_type: str
+    avg_dollar_volume_20d: float
+    company_name: str = ""
+    market_cap: float = 0.0
+    country: str = ""
+    sector: str = ""
+    industry: str = ""
+    asset_type: str = ""
+    second_stage_rating: str = ""
+    second_stage_score_total: int = 0
+    catalyst_label: str = ""
+    catalyst_score: int = 0
+    catalyst_yahoo_url: str = ""
+    catalyst_google_url: str = ""
+    sector_label: str = ""
+    sector_score: int = 0
+    sector_peer_count: int = 0
+    industry_peer_count: int = 0
+    space_label: str = ""
+    space_score: int = 0
+    distance_52w_high_pct: float = 0.0
+    above_200ma: str = ""
+    distance_200ma_pct: float = 0.0
+    nearest_resistance_pct: float = 0.0
+    candle_label: str = ""
+    candle_score: int = 0
+    day_change_pct: float = 0.0
+    close_position_pct: float = 0.0
+    upper_shadow_body_ratio: float = 0.0
+
+
+def unique_symbols(symbols: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for symbol in symbols:
+        clean = symbol.strip().upper()
+        if clean and clean not in seen:
+            seen.add(clean)
+            result.append(clean)
+    return result
+
+
+def load_symbols(path: Path | None) -> list[str]:
+    if path is None:
+        return unique_symbols(DEFAULT_SYMBOLS)
+    text = path.read_text(encoding="utf-8-sig")
+    symbols = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        symbols.append(line.split(",")[0])
+    return unique_symbols(symbols)
+
+
+def latest_b_signal(
+    symbol: str,
+    bars: list[Bar],
+    ma_length: int,
+    vol_length: int,
+    vol_multiplier: float,
+    reentry_pct: float,
+    min_price: float,
+    min_avg_dollar_volume: float,
+) -> SignalResult | None:
+    result, _ = latest_b_signal_with_reason(
+        symbol,
+        bars,
+        ma_length,
+        vol_length,
+        vol_multiplier,
+        reentry_pct,
+        min_price,
+        min_avg_dollar_volume,
+    )
+    return result
+
+
+def latest_b_signal_with_reason(
+    symbol: str,
+    bars: list[Bar],
+    ma_length: int,
+    vol_length: int,
+    vol_multiplier: float,
+    reentry_pct: float,
+    min_price: float,
+    min_avg_dollar_volume: float,
+) -> tuple[SignalResult | None, str]:
+    if len(bars) < max(ma_length, vol_length) + 10:
+        return None, f"数据不足：需要至少 {max(ma_length, vol_length) + 10} 根日K，当前 {len(bars)} 根"
+
+    closes = [bar.close for bar in bars]
+    volumes = [bar.volume for bar in bars]
+    ma = rolling_sma(closes, ma_length)
+    vol_ma = rolling_sma(volumes, vol_length)
+    is_vol_high = [
+        vol_ma[i] is not None and bars[i].volume > vol_ma[i] for i in range(len(bars))
+    ]
+    is_massive_vol = [
+        vol_ma[i] is not None and bars[i].volume >= vol_ma[i] * vol_multiplier
+        for i in range(len(bars))
+    ]
+    massive_counts = rolling_sum([1 if value else 0 for value in is_massive_vol], 7)
+
+    i = len(bars) - 1
+    bar = bars[i]
+    if bar.close < min_price:
+        return None, f"价格过滤：最新收盘 {bar.close:.2f} 低于最低价格 {min_price:.2f}"
+    if ma[i] is None or vol_ma[i] is None or massive_counts[i] is None:
+        return None, "指标数据不足：均线/均量/7日巨量窗口尚未形成"
+
+    avg_dollar_volume = sum(b.close * b.volume for b in bars[-20:]) / min(20, len(bars))
+    if avg_dollar_volume < min_avg_dollar_volume:
+        return None, f"成交额过滤：20日均成交额 {avg_dollar_volume / 1_000_000:.1f}M 低于阈值 {min_avg_dollar_volume / 1_000_000:.1f}M"
+
+    ma_is_rising = ma[i - 1] is not None and ma[i] > ma[i - 1]
+    vol_3_days_high = i >= 2 and is_vol_high[i] and is_vol_high[i - 1] and is_vol_high[i - 2]
+    has_massive_vol = 1 <= massive_counts[i] <= 2
+    price_above_ma = bar.close > ma[i]
+    initial_buy = price_above_ma and vol_3_days_high and has_massive_vol and ma_is_rising
+
+    dist_to_ma = abs(bar.close - ma[i]) / ma[i]
+    reentry_buy = (
+        is_massive_vol[i]
+        and price_above_ma
+        and dist_to_ma <= reentry_pct / 100
+        and bar.close > bar.open
+        and ma_is_rising
+    )
+
+    if not (initial_buy or reentry_buy):
+        failed = []
+        if not price_above_ma:
+            failed.append("收盘价未站上MA")
+        if not ma_is_rising:
+            failed.append("MA未向上")
+        if not vol_3_days_high:
+            failed.append("未连续3天放量")
+        if not has_massive_vol:
+            failed.append(f"7日巨量次数为 {int(massive_counts[i])}，不在1到2次")
+        if not is_massive_vol[i]:
+            failed.append("当日不是巨量")
+        if dist_to_ma > reentry_pct / 100:
+            failed.append(f"距MA {dist_to_ma * 100:.2f}% 超过反抽距离 {reentry_pct:.2f}%")
+        if bar.close <= bar.open:
+            failed.append("当日不是阳线")
+        return None, "未出现B点：" + "；".join(failed)
+
+    if initial_buy and reentry_buy:
+        signal_type = "initial+reentry"
+    elif initial_buy:
+        signal_type = "initial"
+    else:
+        signal_type = "reentry"
+
+    return SignalResult(
+        symbol=symbol,
+        signal_date=bar.date,
+        close=bar.close,
+        ma=ma[i],
+        dist_to_ma_pct=dist_to_ma * 100,
+        volume=bar.volume,
+        vol_ma=vol_ma[i],
+        volume_ratio=bar.volume / vol_ma[i],
+        massive_count_7d=int(massive_counts[i]),
+        signal_type=signal_type,
+        avg_dollar_volume_20d=avg_dollar_volume,
+    ), "符合B点"
+
+
+def write_html(path: Path, rows: list[SignalResult], end: str) -> None:
+    table_rows = "\n".join(
+        f"<tr><td>{html.escape(r.symbol)}</td><td>{html.escape(r.company_name or '-')}</td><td>{r.market_cap / 1_000_000_000:.2f}B</td>"
+        f"<td>{html.escape(r.country or '-')}</td><td>{html.escape(r.sector or '-')}</td><td>{html.escape(r.industry or '-')}</td><td>{html.escape(r.asset_type or '-')}</td>"
+        f"<td>{html.escape(r.signal_date)}</td><td>{html.escape(r.signal_type)}</td>"
+        f"<td>{r.close:.2f}</td><td>{r.ma:.2f}</td><td>{r.dist_to_ma_pct:.2f}%</td>"
+        f"<td>{r.volume_ratio:.2f}x</td><td>{r.massive_count_7d}</td>"
+        f"<td>{r.avg_dollar_volume_20d / 1_000_000:.1f}M</td></tr>"
+        for r in rows
+    )
+    if not table_rows:
+        table_rows = '<tr><td colspan="15" class="empty">No candidates found.</td></tr>'
+    path.write_text(
+        f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>Next B Screener</title>
+<style>
+body {{ font-family: Arial, "Microsoft YaHei", sans-serif; background: #f4f6f8; color: #1f2933; margin: 0; padding: 24px; }}
+main {{ max-width: 1360px; margin: 0 auto; }}
+h1 {{ font-size: 24px; margin: 0 0 8px; }}
+p {{ color: #607080; }}
+table {{ width: 100%; border-collapse: collapse; background: white; border: 1px solid #dde3ea; border-radius: 8px; overflow: hidden; }}
+th, td {{ padding: 10px 12px; border-bottom: 1px solid #edf1f5; text-align: right; font-size: 13px; }}
+th {{ background: #f8fafc; color: #475569; }}
+th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5), th:nth-child(6), td:nth-child(6), th:nth-child(7), td:nth-child(7) {{ text-align: left; }}
+.empty {{ text-align: center; color: #607080; }}
+</style></head><body><main>
+<h1>下一交易日 B 点候选</h1>
+<p>筛选口径：最新已完成日 K 在 {end} 附近出现 B 信号，因此下一交易日开盘才是策略买入点。</p>
+<table><thead><tr><th>Symbol</th><th>Company</th><th>Mkt Cap</th><th>Country</th><th>Sector</th><th>Industry</th><th>Asset</th><th>Signal Date</th><th>Signal</th><th>Close</th><th>MA</th><th>Dist</th><th>Vol Ratio</th><th>Massive 7D</th><th>20D $Vol</th></tr></thead>
+<tbody>{table_rows}</tbody></table>
+</main></body></html>""",
+        encoding="utf-8",
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="扫描最新日 K 出现 B 信号、下一交易日可执行的美股")
+    parser.add_argument("--universe", type=Path, help="股票池 CSV/TXT，每行第一个字段为代码")
+    parser.add_argument("--symbols", help="逗号分隔股票代码，会覆盖默认股票池")
+    parser.add_argument("--start", default=(date.today() - timedelta(days=420)).isoformat())
+    parser.add_argument("--end", default=date.today().isoformat())
+    parser.add_argument("--ma-length", type=int, default=5)
+    parser.add_argument("--vol-length", type=int, default=20)
+    parser.add_argument("--vol-multiplier", type=float, default=1.45)
+    parser.add_argument("--reentry-pct", type=float, default=4.5)
+    parser.add_argument("--min-price", type=float, default=5)
+    parser.add_argument("--min-avg-dollar-volume", type=float, default=20_000_000)
+    parser.add_argument("--csv-out", type=Path, default=Path("next_b_candidates.csv"))
+    parser.add_argument("--html-out", type=Path, default=Path("next_b_candidates.html"))
+    args = parser.parse_args()
+
+    symbols = unique_symbols(args.symbols.split(",")) if args.symbols else load_symbols(args.universe)
+    rows = []
+    errors = []
+    for symbol in symbols:
+        try:
+            bars = fetch_bars("yfinance", symbol, args.start, args.end, "qfq", None)
+            result = latest_b_signal(
+                symbol,
+                bars,
+                args.ma_length,
+                args.vol_length,
+                args.vol_multiplier,
+                args.reentry_pct,
+                args.min_price,
+                args.min_avg_dollar_volume,
+            )
+            if result:
+                rows.append(result)
+        except Exception as exc:
+            errors.append((symbol, str(exc)))
+
+    rows.sort(key=lambda row: row.avg_dollar_volume_20d, reverse=True)
+    with args.csv_out.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(SignalResult.__dataclass_fields__.keys()))
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row.__dict__)
+    write_html(args.html_out, rows, args.end)
+
+    print(f"Scanned: {len(symbols)}")
+    print(f"Candidates: {len(rows)}")
+    print(f"Errors: {len(errors)}")
+    for row in rows:
+        print(
+            f"{row.symbol}: {row.signal_date} {row.signal_type}, "
+            f"close={row.close:.2f}, vol={row.volume_ratio:.2f}x, dist={row.dist_to_ma_pct:.2f}%"
+        )
+    print(f"CSV: {args.csv_out.resolve()}")
+    print(f"HTML: {args.html_out.resolve()}")
+
+
+if __name__ == "__main__":
+    main()
