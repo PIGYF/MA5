@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MA5 Strategy Hub</title>
+%%HEAD_ASSETS%%
+<style>%%INLINE_STYLES%%</style>
+</head>
+<body class="auth-shell">
+<main class="auth-shell">
+  <div class="container py-4 py-lg-5">
+    <div class="row g-4 align-items-center justify-content-center auth-grid">
+      <div class="col-lg-6 d-none d-lg-block">
+        <section class="hero-panel">
+          <span class="hero-badge"><i class="bi bi-stars"></i> Secure Workspace</span>
+          <h1 class="display-5 fw-semibold mt-4 mb-3">MA5 Strategy Hub</h1>
+          <p class="hero-copy mb-0">统一、安全、克制的访问入口，帮助你以更稳定的方式进入策略工作台，专注回测、筛选与研究判断。</p>
+
+          <div class="feature-list">
+            <div class="feature-item">
+              <span class="feature-icon"><i class="bi bi-shield-check"></i></span>
+              <div>
+                <div class="feature-title">安全访问控制</div>
+                <p class="feature-text">进入工作台前先完成身份验证，降低直接暴露内部服务的风险。</p>
+              </div>
+            </div>
+            <div class="feature-item">
+              <span class="feature-icon"><i class="bi bi-grid-1x2"></i></span>
+              <div>
+                <div class="feature-title">统一工作入口</div>
+                <p class="feature-text">用一个入口管理访问流程，保留原有业务页面与操作习惯，不增加额外学习成本。</p>
+              </div>
+            </div>
+            <div class="feature-item">
+              <span class="feature-icon"><i class="bi bi-graph-up-arrow"></i></span>
+              <div>
+                <div class="feature-title">专注策略研究</div>
+                <p class="feature-text">减少非必要信息暴露，让界面回到清晰、克制、面向产出的工作状态。</p>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div class="col-12 col-lg-5 col-xl-4">
+        <div class="card login-card border-0">
+          <div class="card-body p-4 p-lg-5">
+            <div class="brand-mark">MA5</div>
+            <p class="eyebrow">Strategy Hub</p>
+            <h2 class="login-title mb-2">欢迎回来</h2>
+            <p class="login-subtitle mb-4">请输入访问密码，继续进入你的策略工作台。</p>
+
+            %%MESSAGE_BLOCK%%
+
+            <form action="/login" method="post" class="mt-2">
+              <input type="hidden" name="next" value="%%NEXT_PATH%%" />
+
+              <label class="form-label mb-2" for="password">访问密码</label>
+              <div class="input-group password-group mb-4">
+                <span class="input-group-text"><i class="bi bi-key"></i></span>
+                <input id="password" class="form-control" type="password" name="password" placeholder="请输入访问密码" autocomplete="current-password" autofocus />
+                <button class="btn" type="button" id="togglePassword" aria-label="显示或隐藏密码">
+                  <i class="bi bi-eye"></i>
+                </button>
+              </div>
+
+              <div class="d-grid">
+                <button class="btn login-btn btn-lg" type="submit">进入工作台</button>
+              </div>
+            </form>
+
+            <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mt-4 pt-3 border-top">
+              <span class="trust-note"><span class="trust-dot"></span>安全访问已启用</span>
+              <span class="small text-secondary">Private Access</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+<script>
+  const toggleButton = document.getElementById('togglePassword');
+  const passwordInput = document.getElementById('password');
+  if (toggleButton && passwordInput) {
+    toggleButton.addEventListener('click', () => {
+      const isPassword = passwordInput.type === 'password';
+      passwordInput.type = isPassword ? 'text' : 'password';
+      toggleButton.innerHTML = isPassword ? '<i class="bi bi-eye-slash"></i>' : '<i class="bi bi-eye"></i>';
+    });
+  }
+</script>
+</body>
+</html>

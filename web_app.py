@@ -4,7 +4,6 @@ import csv
 import html
 import json
 import re
-import subprocess
 import threading
 import time
 import uuid
@@ -13,6 +12,7 @@ from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.request import Request, urlopen
 
 from backtest import Bar, backtest, fetch_bars, make_report, rolling_sma, summarize, write_equity, write_trades
 from scan_next_b import SignalResult, latest_b_signal, load_symbols, unique_symbols, write_html
@@ -591,26 +591,19 @@ def fetch_nasdaq_screener_rows() -> list[dict[str, object]]:
         if age < NASDAQ_CACHE_SECONDS:
             return json.loads(NASDAQ_CACHE_PATH.read_text(encoding="utf-8"))
 
-    ps = r"""
-$headers=@{
-  'User-Agent'='Mozilla/5.0';
-  'Accept'='application/json, text/plain, */*';
-  'Origin'='https://www.nasdaq.com';
-  'Referer'='https://www.nasdaq.com/market-activity/stocks/screener'
-}
-$url='https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true'
-$r=Invoke-WebRequest -Uri $url -Headers $headers -UseBasicParsing -TimeoutSec 60
-$r.Content
-"""
-    completed = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", ps],
-        cwd=str(ROOT),
-        text=True,
-        capture_output=True,
-        timeout=90,
-        check=True,
+    request = Request(
+        "https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true",
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json, text/plain, */*",
+            "Origin": "https://www.nasdaq.com",
+            "Referer": "https://www.nasdaq.com/market-activity/stocks/screener",
+        },
     )
-    payload = json.loads(completed.stdout)
+
+    with urlopen(request, timeout=60) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
     rows = payload.get("data", {}).get("rows", [])
     NASDAQ_CACHE_PATH.write_text(json.dumps(rows), encoding="utf-8")
     return rows

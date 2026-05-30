@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+*.zip
 
 # Generated reports, scans, and local cache files
 reports/
@@ -19,6 +20,7 @@ yfinance_test_*.csv
 
 # Local editor / OS noise
 .vscode/
+.vs/
 .idea/
 Thumbs.db
 Desktop.ini
