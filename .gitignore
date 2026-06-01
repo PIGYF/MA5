@@ -1,12 +1,15 @@
 __pycache__/
 *.pyc
 *.zip
+.venv/
 
 # Generated reports, scans, and local cache files
 reports/
 nasdaq_screener_cache.json
 server.out.log
 server.err.log
+deploy/logs/
+deploy/state/
 *_report.html
 *_equity.csv
 *_trades.csv

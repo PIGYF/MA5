@@ -49,8 +49,11 @@ trap 'on_error $LINENO' ERR
 
 [[ -d "${REPO_DIR}/.git" ]]
 
-if [[ -n "$(git -C "${REPO_DIR}" status --porcelain)" ]]; then
+DIRTY_STATUS="$(git -C "${REPO_DIR}" status --porcelain)"
+if [[ -n "${DIRTY_STATUS}" ]]; then
   echo "[ERROR] 工作区存在未提交改动，自动部署已停止。"
+  echo "[ERROR] 具体改动如下："
+  echo "${DIRTY_STATUS}"
   exit 2
 fi
 
