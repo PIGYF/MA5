@@ -138,3 +138,12 @@ python backtest.py --symbol MSFT --source yfinance --start 2021-01-01 --end 2024
 - 连续买入信号不会重复买入。
 - 连续卖出信号不会重复卖出。
 - 默认满仓买入，按整股数量计算。
+
+## 6. 自动部署（GitHub push 后自动更新网站）
+
+本项目已提供自动部署骨架，适合“每次 push 到 `main` 自动部署到服务器”的流程。
+
+- 工作流：`.github/workflows/deploy-ma5.yml`
+- 服务器脚本：`deploy/deploy.sh`、`deploy/rollback.sh`
+
+建议先在 GitHub Actions 配置好 `MA5_SSH_HOST`、`MA5_SSH_PORT`、`MA5_SSH_USER`、`MA5_DEPLOY_PATH`、`MA5_SSH_PRIVATE_KEY`，再手动触发一次工作流做首次验证。

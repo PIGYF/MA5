@@ -1,0 +1,59 @@
+name: Deploy MA5 Site
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-ma5-main
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy to Aliyun
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.MA5_SSH_PRIVATE_KEY }}
+
+      - name: Add server to known_hosts
+        shell: bash
+        env:
+          MA5_SSH_HOST: ${{ secrets.MA5_SSH_HOST }}
+          MA5_SSH_PORT: ${{ secrets.MA5_SSH_PORT }}
+        run: |
+          set -euo pipefail
+          PORT="${MA5_SSH_PORT:-22}"
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "$PORT" -H "$MA5_SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Run deploy script on server
+        shell: bash
+        env:
+          MA5_SSH_HOST: ${{ secrets.MA5_SSH_HOST }}
+          MA5_SSH_PORT: ${{ secrets.MA5_SSH_PORT }}
+          MA5_SSH_USER: ${{ secrets.MA5_SSH_USER }}
+          MA5_DEPLOY_PATH: ${{ secrets.MA5_DEPLOY_PATH }}
+        run: |
+          set -euo pipefail
+          PORT="${MA5_SSH_PORT:-22}"
+          DEPLOY_PATH="${MA5_DEPLOY_PATH:-/root/MA5_site}"
+          ssh -p "$PORT" -o StrictHostKeyChecking=yes "$MA5_SSH_USER@$MA5_SSH_HOST" "cd '$DEPLOY_PATH' && bash deploy/deploy.sh"
+
+      - name: Post summary
+        if: success()
+        run: |
+          {
+            echo "### MA5 自动部署成功 ✅"
+            echo "- 分支: main"
+            echo "- 触发提交: $GITHUB_SHA"
+          } >> "$GITHUB_STEP_SUMMARY"
