@@ -47,7 +47,7 @@ jobs:
           set -euo pipefail
           PORT="${MA5_SSH_PORT:-22}"
           DEPLOY_PATH="${MA5_DEPLOY_PATH:-/root/MA5_site}"
-          ssh -p "$PORT" -o StrictHostKeyChecking=yes "$MA5_SSH_USER@$MA5_SSH_HOST" "cd '$DEPLOY_PATH' && bash deploy/deploy.sh"
+          ssh -p "$PORT" -o StrictHostKeyChecking=yes "$MA5_SSH_USER@$MA5_SSH_HOST" "set -euo pipefail; DEPLOY_PATH='$DEPLOY_PATH'; echo '---REMOTE_DEPLOY_PATH---'; echo \"\$DEPLOY_PATH\"; test -d \"\$DEPLOY_PATH/.git\"; cd \"\$DEPLOY_PATH\"; echo '---REMOTE_BEFORE_PULL---'; pwd; ls -la; git pull --ff-only origin main; echo '---REMOTE_AFTER_PULL---'; git rev-parse --short HEAD; ls -la; test -f deploy/deploy.sh; bash \"\$DEPLOY_PATH/deploy/deploy.sh\""
 
       - name: Post summary
         if: success()
