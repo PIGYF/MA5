@@ -14,6 +14,8 @@ HIGH_KEYS = ("high", "最高", "最高价")
 LOW_KEYS = ("low", "最低", "最低价")
 CLOSE_KEYS = ("close", "收盘", "收盘价")
 VOLUME_KEYS = ("volume", "vol", "成交量", "成交量(股)", "成交量(手)")
+PRICE_CACHE_DIR = Path(__file__).resolve().parent / "data" / "cache" / "prices"
+PRICE_CACHE_MAX_BARS = 1300
 
 
 @dataclass
@@ -30,14 +32,21 @@ class Bar:
 class Trade:
     entry_signal_date: str
     entry_date: str
+    entry_signal_close: float
     entry_price: float
+    entry_gap_pct: float
     shares: int
     exit_signal_date: str
     exit_date: str
+    exit_signal_close: float
     exit_price: float
+    exit_gap_pct: float
     pnl: float
     pnl_pct: float
     bars_held: int
+    max_favorable_pct: float
+    max_drawdown_pct: float
+    exit_reason: str
 
 
 def normalize_key(key: str) -> str:
@@ -91,6 +100,48 @@ def read_bars(csv_path: Path) -> list[Bar]:
     if len(bars) < 2:
         raise ValueError("CSV 至少需要两行行情数据")
     return bars
+
+
+def cache_symbol_name(symbol: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in symbol.upper())
+
+
+def price_cache_path(symbol: str) -> Path:
+    return PRICE_CACHE_DIR / f"{cache_symbol_name(symbol)}.csv"
+
+
+def read_price_cache(symbol: str) -> list[Bar]:
+    path = price_cache_path(symbol)
+    if not path.exists():
+        return []
+    try:
+        return read_bars(path)
+    except Exception:
+        return []
+
+
+def write_price_cache(symbol: str, bars: list[Bar]) -> None:
+    PRICE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    merged = {bar.date: bar for bar in bars}
+    ordered = [merged[key] for key in sorted(merged)]
+    if len(ordered) > PRICE_CACHE_MAX_BARS:
+        ordered = ordered[-PRICE_CACHE_MAX_BARS:]
+    with price_cache_path(symbol).open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["date", "open", "high", "low", "close", "volume"])
+        writer.writeheader()
+        for bar in ordered:
+            writer.writerow(bar.__dict__)
+
+
+def slice_bars(bars: list[Bar], start_date: str, end_date: str) -> list[Bar]:
+    return [bar for bar in bars if start_date <= bar.date <= end_date]
+
+
+def cache_covers_range(bars: list[Bar], start_date: str, end_date: str) -> bool:
+    if not bars:
+        return False
+    dates = [bar.date for bar in bars]
+    return min(dates) <= start_date and max(dates) >= end_date
 
 
 def dataframe_to_bars(df, source: str) -> list[Bar]:
@@ -168,13 +219,29 @@ def fetch_bars(
             raise RuntimeError(
                 "缺少 yfinance。安装命令：python -m pip install yfinance -U"
             ) from exc
+
+        cached_bars = read_price_cache(symbol) if symbol and cache_csv is None else []
+        if cache_csv is None and cache_covers_range(cached_bars, start_date, end_date):
+            sliced = slice_bars(cached_bars, start_date, end_date)
+            if len(sliced) >= 2:
+                return sliced
+
+        download_start = start_date
+        if cache_csv is None and cached_bars:
+            latest_cached = max(bar.date for bar in cached_bars)
+            earliest_cached = min(bar.date for bar in cached_bars)
+            if earliest_cached <= start_date and latest_cached >= start_date:
+                download_start = (
+                    datetime.strptime(latest_cached, "%Y-%m-%d").date() - timedelta(days=7)
+                ).isoformat()
+
         yf_end_date = (
             datetime.strptime(end_date, "%Y-%m-%d").date() + timedelta(days=1)
         ).isoformat()
 
         df = yf.download(
             symbol,
-            start=start_date,
+            start=download_start,
             end=yf_end_date,
             interval="1d",
             auto_adjust=(adjust != ""),
@@ -182,7 +249,14 @@ def fetch_bars(
         )
         if cache_csv:
             df.to_csv(cache_csv, encoding="utf-8-sig")
-        return dataframe_to_bars(df, "yfinance")
+        downloaded_bars = dataframe_to_bars(df, "yfinance")
+        if cache_csv is None and symbol:
+            write_price_cache(symbol, cached_bars + downloaded_bars)
+            cached_bars = read_price_cache(symbol)
+            sliced = slice_bars(cached_bars, start_date, end_date)
+            if len(sliced) >= 2:
+                return sliced
+        return downloaded_bars
 
     raise ValueError("source 只能是 akshare 或 yfinance")
 
@@ -331,10 +405,15 @@ def backtest(
     entry_price = 0.0
     entry_date = ""
     entry_signal_date = ""
+    entry_signal_close = 0.0
     entry_index = 0
     pending_action = None
     pending_signal_date = ""
+    pending_signal_close = 0.0
+    pending_exit_reason = ""
     highest_b_price = None
+    max_high_since_entry = 0.0
+    min_low_since_entry = 0.0
     trades = []
     equity_curve = []
 
@@ -349,7 +428,10 @@ def backtest(
                 entry_price = fill_price
                 entry_date = bar.date
                 entry_signal_date = pending_signal_date
+                entry_signal_close = pending_signal_close
                 entry_index = i
+                max_high_since_entry = bar.high
+                min_low_since_entry = bar.low
                 if strategy_name == "ratchet" and highest_b_price is None:
                     highest_b_price = entry_price
 
@@ -360,32 +442,49 @@ def backtest(
             cash += gross - fee
             pnl = (fill_price - entry_price) * shares - fee - (entry_price * shares * commission_pct / 100)
             pnl_pct = (fill_price / entry_price - 1) * 100 if entry_price else 0.0
+            max_favorable_pct = (max_high_since_entry / entry_price - 1) * 100 if entry_price else 0.0
+            max_drawdown_pct = (1 - min_low_since_entry / entry_price) * 100 if entry_price else 0.0
             trades.append(
                 Trade(
                     entry_signal_date=entry_signal_date,
                     entry_date=entry_date,
+                    entry_signal_close=entry_signal_close,
                     entry_price=entry_price,
+                    entry_gap_pct=(entry_price / entry_signal_close - 1) * 100 if entry_signal_close else 0.0,
                     shares=shares,
                     exit_signal_date=pending_signal_date,
                     exit_date=bar.date,
+                    exit_signal_close=pending_signal_close,
                     exit_price=fill_price,
+                    exit_gap_pct=(fill_price / pending_signal_close - 1) * 100 if pending_signal_close else 0.0,
                     pnl=pnl,
                     pnl_pct=pnl_pct,
                     bars_held=i - entry_index,
+                    max_favorable_pct=max_favorable_pct,
+                    max_drawdown_pct=max_drawdown_pct,
+                    exit_reason=pending_exit_reason or "Signal exit",
                 )
             )
             shares = 0
             entry_price = 0.0
             entry_date = ""
             entry_signal_date = ""
+            entry_signal_close = 0.0
             highest_b_price = None
+            max_high_since_entry = 0.0
+            min_low_since_entry = 0.0
 
         pending_action = None
         pending_signal_date = ""
+        pending_signal_close = 0.0
+        pending_exit_reason = ""
 
         dynamic_stop = ""
         ratchet_sell_today = False
+        exit_reason_today = ""
         if strategy_name == "ratchet" and shares > 0:
+            max_high_since_entry = max(max_high_since_entry, bar.high)
+            min_low_since_entry = min(min_low_since_entry, bar.low)
             if buy_signal[i] and (highest_b_price is None or bar.close > highest_b_price):
                 highest_b_price = bar.close
             dynamic_stop = "" if highest_b_price is None else highest_b_price * (1 - hard_stop_pct / 100)
@@ -395,7 +494,16 @@ def backtest(
                 and bar.close < highest_b_price * (1 - hard_stop_pct / 100)
             )
             ratchet_sell_today = stop_condition_1 or stop_condition_2
+            if stop_condition_1 and stop_condition_2:
+                exit_reason_today = "MA defense + ratchet stop"
+            elif stop_condition_1:
+                exit_reason_today = "MA defense"
+            elif stop_condition_2:
+                exit_reason_today = "Ratchet stop"
             sell_signal[i] = ratchet_sell_today
+        elif shares > 0:
+            max_high_since_entry = max(max_high_since_entry, bar.high)
+            min_low_since_entry = min(min_low_since_entry, bar.low)
 
         market_value = shares * bar.close
         equity = cash + market_value
@@ -420,14 +528,19 @@ def backtest(
                     highest_b_price = bar.close
                 pending_action = "buy"
                 pending_signal_date = bar.date
+                pending_signal_close = bar.close
             elif shares > 0:
                 if strategy_name == "ratchet":
                     if ratchet_sell_today:
                         pending_action = "sell"
                         pending_signal_date = bar.date
+                        pending_signal_close = bar.close
+                        pending_exit_reason = exit_reason_today
                 elif sell_signal[i]:
                     pending_action = "sell"
                     pending_signal_date = bar.date
+                    pending_signal_close = bar.close
+                    pending_exit_reason = "MA crossunder"
 
     return trades, equity_curve
 
@@ -447,6 +560,8 @@ def summarize(trades: list[Trade], equity_curve: list[dict[str, float | str]], i
     best_trade = max([trade.pnl for trade in trades], default=0.0)
     worst_trade = min([trade.pnl for trade in trades], default=0.0)
     avg_bars_held = sum(trade.bars_held for trade in trades) / len(trades) if trades else 0.0
+    avg_max_favorable = sum(trade.max_favorable_pct for trade in trades) / len(trades) if trades else 0.0
+    avg_trade_drawdown = sum(trade.max_drawdown_pct for trade in trades) / len(trades) if trades else 0.0
 
     peak = initial_cash
     max_drawdown = 0.0
@@ -474,6 +589,8 @@ def summarize(trades: list[Trade], equity_curve: list[dict[str, float | str]], i
         "best_trade": best_trade,
         "worst_trade": worst_trade,
         "avg_bars_held": avg_bars_held,
+        "avg_max_favorable_pct": avg_max_favorable,
+        "avg_trade_drawdown_pct": avg_trade_drawdown,
     }
 
 
@@ -484,14 +601,21 @@ def write_trades(path: Path, trades: list[Trade]) -> None:
             fieldnames=[
                 "entry_signal_date",
                 "entry_date",
+                "entry_signal_close",
                 "entry_price",
+                "entry_gap_pct",
                 "shares",
                 "exit_signal_date",
                 "exit_date",
+                "exit_signal_close",
                 "exit_price",
+                "exit_gap_pct",
                 "pnl",
                 "pnl_pct",
                 "bars_held",
+                "max_favorable_pct",
+                "max_drawdown_pct",
+                "exit_reason",
             ],
         )
         writer.writeheader()
@@ -670,9 +794,9 @@ def make_report(
 
     cards = [
         ("净利润", f"{summary['net_profit']:.2f}"),
-        ("总收益率", f"{summary['return_pct']:.2f}%"),
+        ("收益率", f"{summary['return_pct']:.2f}%"),
         ("最大回撤", f"{summary['max_drawdown_pct']:.2f}%"),
-        ("总交易", f"{summary['trades']}"),
+        ("交易次数", f"{summary['trades']}"),
         ("胜率", f"{summary['win_rate_pct']:.2f}%"),
         ("盈亏因子", f"{summary['profit_factor']:.2f}"),
     ]
@@ -680,21 +804,24 @@ def make_report(
         f'<section class="metric"><span>{label}</span><strong>{value}</strong></section>'
         for label, value in cards
     )
+    initial_cash_value = summary["final_equity"] - summary["net_profit"]
     overview_rows = [
-        ("初始资金", f"{initial_cash:.2f}" if (initial_cash := summary["final_equity"] - summary["net_profit"]) else "0.00"),
+        ("初始资金", f"{initial_cash_value:.2f}"),
         ("期末权益", f"{summary['final_equity']:.2f}"),
-        ("毛利润", f"{summary['gross_profit']:.2f}"),
-        ("毛亏损", f"-{summary['gross_loss']:.2f}"),
+        ("总盈利", f"{summary['gross_profit']:.2f}"),
+        ("总亏损", f"-{summary['gross_loss']:.2f}"),
         ("平均每笔", f"{summary['avg_trade']:.2f}"),
         ("平均持仓K线", f"{summary['avg_bars_held']:.1f}"),
     ]
     analysis_rows = [
-        ("盈利交易", f"{summary['wins']}"),
-        ("亏损交易", f"{summary['losses']}"),
+        ("盈利次数", f"{summary['wins']}"),
+        ("亏损次数", f"{summary['losses']}"),
         ("平均盈利", f"{summary['avg_win']:.2f}"),
         ("平均亏损", f"{summary['avg_loss']:.2f}"),
         ("最佳交易", f"{summary['best_trade']:.2f}"),
         ("最差交易", f"{summary['worst_trade']:.2f}"),
+        ("平均最大浮盈", f"{summary['avg_max_favorable_pct']:.2f}%"),
+        ("平均交易回撤", f"{summary['avg_trade_drawdown_pct']:.2f}%"),
     ]
     stat_tables = "".join(
         f"<tr><td>{html.escape(label)}</td><td>{value}</td></tr>"
@@ -708,18 +835,27 @@ def make_report(
     trade_rows = "\n".join(
         "<tr>"
         f"<td>{i}</td>"
+        f"<td>{html.escape(trade.entry_signal_date)}</td>"
+        f"<td>{trade.entry_signal_close:.2f}</td>"
         f"<td>{html.escape(trade.entry_date)}</td>"
         f"<td>{trade.entry_price:.2f}</td>"
+        f"<td>{trade.entry_gap_pct:.2f}%</td>"
+        f"<td>{html.escape(trade.exit_signal_date)}</td>"
+        f"<td>{trade.exit_signal_close:.2f}</td>"
         f"<td>{html.escape(trade.exit_date)}</td>"
         f"<td>{trade.exit_price:.2f}</td>"
+        f"<td>{trade.exit_gap_pct:.2f}%</td>"
         f"<td>{trade.shares}</td>"
         f"<td class=\"{'pos' if trade.pnl >= 0 else 'neg'}\">{trade.pnl:.2f}</td>"
         f"<td class=\"{'pos' if trade.pnl_pct >= 0 else 'neg'}\">{trade.pnl_pct:.2f}%</td>"
+        f"<td>{trade.max_favorable_pct:.2f}%</td>"
+        f"<td>{trade.max_drawdown_pct:.2f}%</td>"
+        f"<td>{html.escape(trade.exit_reason)}</td>"
         "</tr>"
         for i, trade in enumerate(trades, 1)
     )
     if not trade_rows:
-        trade_rows = '<tr><td colspan="8" class="empty">No closed trades in this range.</td></tr>'
+        trade_rows = '<tr><td colspan="17" class="empty">No closed trades in this range.</td></tr>'
 
     benchmark_html = ""
     if benchmark and benchmark.get("curve"):
