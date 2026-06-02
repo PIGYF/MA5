@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-from backtest import Bar, backtest, fetch_bars, make_report, rolling_sma, summarize, write_equity, write_trades
+from backtest import Bar, backtest, fetch_bars, make_report, open_position_snapshot, rolling_sma, summarize, write_equity, write_trades
 from scan_next_b import SignalResult, latest_b_signal, load_symbols, unique_symbols, write_html
 
 
@@ -245,10 +245,10 @@ table {{ width: 100%; border-collapse: separate; border-spacing: 0; background: 
 .table-wrap table {{ width: max-content; min-width: 100%; table-layout: auto; }}
 th, td {{ padding: 8px 10px; border-bottom: 1px solid #eef1f5; text-align: right; font-size: 12px; white-space: nowrap; }}
 tbody tr:hover td {{ background: #f8fafc; }}
-th {{ background: #f5f7fa; color: #5d6675; position: sticky; top: 0; z-index: 2; font-size: 11px; font-weight: 800; text-transform: uppercase; border-bottom: 1px solid #d6dbe3; }}
+th {{ background: #f5f7fa; color: #5d6675; position: sticky; top: 0; z-index: 8; font-size: 11px; font-weight: 800; text-transform: uppercase; border-bottom: 1px solid #d6dbe3; }}
 th:first-child, td:first-child {{ position: sticky; left: 0; background: #fff; z-index: 3; box-shadow: 1px 0 0 #eef1f5; }}
-th:first-child {{ background: #f5f7fa; z-index: 4; }}
-th.resizable {{ position: relative; user-select: none; }}
+th:first-child {{ background: #f5f7fa; z-index: 10; }}
+th.resizable {{ position: sticky; user-select: none; }}
 .col-resizer {{ position: absolute; top: 0; right: -3px; width: 6px; height: 100%; cursor: col-resize; z-index: 2; }}
 th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5), th:nth-child(6), td:nth-child(6), th:nth-child(7), td:nth-child(7) {{ text-align: left; }}
 .empty {{ text-align: center; color: #607080; }}
@@ -358,7 +358,7 @@ backtestForm.addEventListener("submit", (event) => {{
 """
 
 
-def render_backtest_trade_table(trades) -> str:
+def render_backtest_trade_table(trades, equity_curve) -> str:
     rows = []
     for i, trade in enumerate(trades, 1):
         pnl_class = "pos" if trade.pnl >= 0 else "neg"
@@ -377,6 +377,25 @@ def render_backtest_trade_table(trades) -> str:
             f"<td class=\"{pnl_class}\">{trade.pnl:.2f}</td>"
             f"<td class=\"{pct_class}\">{trade.pnl_pct:.2f}%</td>"
             f"<td>{html.escape(trade.exit_reason)}</td>"
+            "</tr>"
+        )
+    open_position = open_position_snapshot(equity_curve)
+    if open_position:
+        pnl_class = "pos" if float(open_position["pnl"]) >= 0 else "neg"
+        rows.append(
+            "<tr>"
+            f"<td>{len(rows) + 1}</td>"
+            f"<td>{html.escape(str(open_position['entry_signal_date']))}</td>"
+            f"<td>{html.escape(str(open_position['entry_date']))}</td>"
+            f"<td>{html.escape(str(open_position['mark_date']))}</td>"
+            "<td>未平仓</td>"
+            f"<td>{float(open_position['entry_price']):.2f}</td>"
+            f"<td>{float(open_position['mark_price']):.2f}</td>"
+            f"<td>{int(open_position['shares'])}</td>"
+            f"<td>{int(open_position['bars_held'])}</td>"
+            f"<td class=\"{pnl_class}\">{float(open_position['pnl']):.2f}</td>"
+            f"<td class=\"{pnl_class}\">{float(open_position['pnl_pct']):.2f}%</td>"
+            "<td>未平仓，按区间最后收盘价估值</td>"
             "</tr>"
         )
     if not rows:
@@ -440,7 +459,7 @@ def run_strategy(params: dict[str, list[str]]) -> str:
     <a href="{trades_url}" target="_blank">交易明细 CSV</a>
     <a href="{equity_url}" target="_blank">权益曲线 CSV</a>
   </p>
-  {render_backtest_trade_table(trades)}
+  {render_backtest_trade_table(trades, equity_curve)}
   <iframe src="{report_url}" title="Backtest report"></iframe>
 </section>
 """
@@ -653,6 +672,10 @@ def yahoo_news_url(symbol: str) -> str:
 def google_news_url(symbol: str, company_name: str) -> str:
     query = f"{symbol} {company_name} stock news earnings contract catalyst".strip()
     return f"https://www.google.com/search?q={quote(query)}&tbm=nws"
+
+
+def xueqiu_news_url(symbol: str, company_name: str) -> str:
+    return f"https://xueqiu.com/k?q={quote(symbol.upper())}"
 
 
 def load_earnings_cache() -> dict[str, dict[str, object]]:
@@ -916,7 +939,7 @@ def add_space_and_candle_quality(result: SignalResult, bars: list[Bar]) -> Signa
     result.space_score = space_score(result.space_label)
     result.candle_score = candle_score(result.candle_label)
     result.catalyst_yahoo_url = yahoo_news_url(result.symbol)
-    result.catalyst_google_url = google_news_url(result.symbol, result.company_name)
+    result.catalyst_google_url = xueqiu_news_url(result.symbol, result.company_name)
     update_total_score(result)
     return result
 
@@ -1098,7 +1121,7 @@ def scan_symbol_candidate(
             result.candle_score = result.candle_score or 3
             update_total_score(result)
             result.catalyst_yahoo_url = yahoo_news_url(symbol)
-            result.catalyst_google_url = google_news_url(symbol, result.company_name)
+            result.catalyst_google_url = xueqiu_news_url(symbol, result.company_name)
         return symbol, result, None
     except Exception as exc:
         return symbol, None, str(exc)
@@ -1431,16 +1454,18 @@ stopScan.addEventListener("click", async () => {{
   await fetch(`/scan/stop?id=${{encodeURIComponent(activeScanJobId)}}`);
 }});
 
-scanResult.addEventListener("click", async event => {{
+document.addEventListener("click", async event => {{
   const button = event.target.closest("[data-candidate-symbol]");
   if (!button) return;
+  event.preventDefault();
   const symbol = button.dataset.candidateSymbol;
-  let detail = document.getElementById("candidate-detail");
+  const host = button.closest(".result") || scanResult || document.body;
+  let detail = host.querySelector("#candidate-detail");
   if (!detail) {{
     detail = document.createElement("section");
     detail.id = "candidate-detail";
     detail.className = "candidate-detail";
-    scanResult.appendChild(detail);
+    host.appendChild(detail);
   }}
   detail.innerHTML = `<section class="result"><p class="hint">正在生成 ${{symbol}} 的日 K 线和策略交易点...</p></section>`;
   const params = new URLSearchParams(new FormData(scannerForm));
@@ -1479,13 +1504,19 @@ initializeSortableTables(document);
 """
 
 def render_candidate_table(rows: list[SignalResult]) -> str:
+    def catalyst_secondary_url(row: SignalResult) -> str:
+        stored = row.catalyst_google_url or ""
+        if stored and "google." not in stored:
+            return stored
+        return xueqiu_news_url(row.symbol, row.company_name)
+
     table_rows = "\n".join(
         f'<tr><td><button type="button" class="symbol-button" data-candidate-symbol="{html.escape(r.symbol)}">{html.escape(r.symbol)}</button></td><td>{html.escape(r.company_name or "-")}</td>'
         f"<td>{r.market_cap / 1_000_000_000:.2f}</td>"
         f"<td>{r.second_stage_score_total}/20</td>"
         f'<td><span class="rating rating-{html.escape(r.second_stage_rating or "Pending")}">{html.escape(r.second_stage_rating or "Pending")}</span></td>'
         f"<td>{html.escape(format_earnings(r))}</td>"
-        f'<td>{r.catalyst_score}/5 {html.escape(r.catalyst_label or "Manual review")} <a href="{html.escape(r.catalyst_yahoo_url or yahoo_news_url(r.symbol))}" target="_blank">Yahoo</a> <a href="{html.escape(r.catalyst_google_url or google_news_url(r.symbol, r.company_name))}" target="_blank">Google</a></td>'
+        f'<td>{r.catalyst_score}/5 {html.escape(r.catalyst_label or "Manual review")} <a href="{html.escape(r.catalyst_yahoo_url or yahoo_news_url(r.symbol))}" target="_blank">Yahoo</a> <a href="{html.escape(catalyst_secondary_url(r))}" target="_blank">雪球</a></td>'
         f"<td>{r.sector_score}/5 {html.escape(r.sector_label or '-')} ({r.sector_peer_count}/{r.industry_peer_count})</td>"
         f"<td>{r.space_score}/5 {html.escape(r.space_label or '-')} / 52W {r.distance_52w_high_pct:.1f}% / 200MA {html.escape(r.above_200ma or '-')}</td>"
         f"<td>{r.candle_score}/5 {html.escape(r.candle_label or '-')} / close pos {r.close_position_pct:.0f}% / upper shadow {format_metric(r.upper_shadow_body_ratio, 'x')}</td>"
@@ -1561,8 +1592,12 @@ def latest_scan_to_html() -> str:
     end = str(latest.get("signal_date", current_signal_date()))
     report = html.escape(str(latest.get("report", "#")))
     csv_url = html.escape(str(latest.get("csv", "#")))
+    saved_params = {
+        str(key): [str(value)]
+        for key, value in (latest.get("params", {}) or {}).items()
+    }
     return f"""
-{render_scanner_form({})}
+{render_scanner_form(saved_params)}
 <section class="result">
   <div class="toolbar">
     <div class="inline-actions links">
@@ -1577,6 +1612,10 @@ def latest_scan_to_html() -> str:
   {render_candidate_table(candidates)}
   {render_failure_table(errors)}
 </section>
+<script>
+if (window.initializeResizableTables) initializeResizableTables(document);
+if (window.initializeSortableTables) initializeSortableTables(document);
+</script>
 """
 
 def run_scanner(params: dict[str, list[str]]) -> str:
@@ -1631,7 +1670,7 @@ def run_scanner(params: dict[str, list[str]]) -> str:
                     result.second_stage_rating = "Pending"
                     result.catalyst_label = "Manual review"
                     result.catalyst_yahoo_url = yahoo_news_url(symbol)
-                    result.catalyst_google_url = google_news_url(symbol, result.company_name)
+                    result.catalyst_google_url = xueqiu_news_url(symbol, result.company_name)
                 rows.append(result)
         except Exception as exc:
             errors.append((symbol, str(exc)))
@@ -1719,7 +1758,7 @@ def render_candidate_detail(params: dict[str, list[str]]) -> str:
         <td>{signal_result.candle_score}/5 {html.escape(signal_result.candle_label)}</td>
         <td>{signal_result.distance_52w_high_pct:.1f}%</td>
         <td>{html.escape(signal_result.above_200ma)}</td>
-        <td><a href="{html.escape(yahoo_news_url(symbol))}" target="_blank">Yahoo</a> <a href="{html.escape(google_news_url(symbol, signal_result.company_name))}" target="_blank">Google</a></td>
+        <td><a href="{html.escape(yahoo_news_url(symbol))}" target="_blank">Yahoo</a> <a href="{html.escape(xueqiu_news_url(symbol, signal_result.company_name))}" target="_blank">雪球</a></td>
       </tr></tbody>
     </table>
   </div>

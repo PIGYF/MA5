@@ -518,6 +518,13 @@ def backtest(
                 "buy_signal": int(buy_signal[i]),
                 "sell_signal": int(sell_signal[i]),
                 "position_shares": shares,
+                "entry_date": entry_date,
+                "entry_price": entry_price,
+                "entry_signal_date": entry_signal_date,
+                "entry_signal_close": entry_signal_close,
+                "entry_index": entry_index if shares > 0 else "",
+                "max_high_since_entry": max_high_since_entry if shares > 0 else "",
+                "min_low_since_entry": min_low_since_entry if shares > 0 else "",
                 "cash": cash,
                 "equity": equity,
                 "dynamic_stop": dynamic_stop,
@@ -630,6 +637,38 @@ def write_equity(path: Path, equity_curve: list[dict[str, float | str]]) -> None
         writer = csv.DictWriter(f, fieldnames=list(equity_curve[0].keys()))
         writer.writeheader()
         writer.writerows(equity_curve)
+
+
+def open_position_snapshot(equity_curve: list[dict[str, float | str]]) -> dict[str, float | int | str] | None:
+    if not equity_curve:
+        return None
+    row = equity_curve[-1]
+    shares = int(float(row.get("position_shares", 0) or 0))
+    entry_price = float(row.get("entry_price", 0) or 0)
+    if shares <= 0 or entry_price <= 0:
+        return None
+    close = float(row.get("close", 0) or 0)
+    entry_index = int(float(row.get("entry_index", 0) or 0))
+    bars_held = max(0, len(equity_curve) - 1 - entry_index)
+    max_high = float(row.get("max_high_since_entry", close) or close)
+    min_low = float(row.get("min_low_since_entry", close) or close)
+    pnl = (close - entry_price) * shares
+    pnl_pct = (close / entry_price - 1) * 100 if entry_price else 0.0
+    return {
+        "entry_signal_date": str(row.get("entry_signal_date", "")),
+        "entry_date": str(row.get("entry_date", "")),
+        "entry_signal_close": float(row.get("entry_signal_close", 0) or 0),
+        "entry_price": entry_price,
+        "entry_gap_pct": (entry_price / float(row.get("entry_signal_close", 0) or 0) - 1) * 100 if float(row.get("entry_signal_close", 0) or 0) else 0.0,
+        "shares": shares,
+        "mark_date": str(row.get("date", "")),
+        "mark_price": close,
+        "pnl": pnl,
+        "pnl_pct": pnl_pct,
+        "bars_held": bars_held,
+        "max_favorable_pct": (max_high / entry_price - 1) * 100 if entry_price else 0.0,
+        "max_drawdown_pct": (1 - min_low / entry_price) * 100 if entry_price else 0.0,
+    }
 
 
 def svg_polyline(points: list[tuple[float, float]], color: str, width: int = 2) -> str:
@@ -879,6 +918,33 @@ def make_report(
         "</tr>"
         for i, trade in enumerate(trades, 1)
     )
+    open_position = open_position_snapshot(equity_curve)
+    if open_position:
+        row_class = "pos" if float(open_position["pnl"]) >= 0 else "neg"
+        trade_rows += (
+            "<tr>"
+            f"<td>{len(trades) + 1}</td>"
+            f"<td>{html.escape(str(open_position['entry_signal_date']))}</td>"
+            f"<td>{html.escape(str(open_position['entry_date']))}</td>"
+            f"<td>{float(open_position['entry_signal_close']):.2f}</td>"
+            f"<td>{float(open_position['entry_price']):.2f}</td>"
+            f"<td>{float(open_position['entry_gap_pct']):.2f}%</td>"
+            f"<td>{html.escape(str(open_position['mark_date']))}</td>"
+            f"<td>未平仓</td>"
+            f"<td>{float(open_position['mark_price']):.2f}</td>"
+            f"<td>{float(open_position['mark_price']):.2f}</td>"
+            "<td>-</td>"
+            f"<td>{int(open_position['bars_held'])}</td>"
+            f"<td>{int(open_position['shares'])}</td>"
+            f"<td>{float(open_position['entry_price']) * int(open_position['shares']):.2f}</td>"
+            f"<td>{float(open_position['mark_price']) * int(open_position['shares']):.2f}</td>"
+            f"<td class=\"{row_class}\">{float(open_position['pnl']):.2f}</td>"
+            f"<td class=\"{row_class}\">{float(open_position['pnl_pct']):.2f}%</td>"
+            f"<td>{float(open_position['max_favorable_pct']):.2f}%</td>"
+            f"<td>{float(open_position['max_drawdown_pct']):.2f}%</td>"
+            "<td>未平仓，按区间最后收盘价估值</td>"
+            "</tr>"
+        )
     if not trade_rows:
         trade_rows = f'<tr><td colspan="20" class="empty">{labels["empty_trades"]}</td></tr>'
 
