@@ -63,6 +63,9 @@ class SignalResult:
     day_change_pct: float = 0.0
     close_position_pct: float = 0.0
     upper_shadow_body_ratio: float = 0.0
+    next_earnings_date: str = ""
+    earnings_days: int = 9999
+    earnings_status: str = ""
 
 
 def unique_symbols(symbols: list[str]) -> list[str]:
@@ -207,6 +210,7 @@ def write_html(path: Path, rows: list[SignalResult], end: str) -> None:
     table_rows = "\n".join(
         f"<tr><td>{html.escape(r.symbol)}</td><td>{html.escape(r.company_name or '-')}</td><td>{r.market_cap / 1_000_000_000:.2f}B</td>"
         f"<td>{html.escape(r.country or '-')}</td><td>{html.escape(r.sector or '-')}</td><td>{html.escape(r.industry or '-')}</td><td>{html.escape(r.asset_type or '-')}</td>"
+        f"<td>{html.escape(r.next_earnings_date or 'Unknown')}</td><td>{'' if r.earnings_days == 9999 else r.earnings_days}</td><td>{html.escape(r.earnings_status or '-')}</td>"
         f"<td>{html.escape(r.signal_date)}</td><td>{html.escape(r.signal_type)}</td>"
         f"<td>{r.close:.2f}</td><td>{r.ma:.2f}</td><td>{r.dist_to_ma_pct:.2f}%</td>"
         f"<td>{r.volume_ratio:.2f}x</td><td>{r.massive_count_7d}</td>"
@@ -214,7 +218,7 @@ def write_html(path: Path, rows: list[SignalResult], end: str) -> None:
         for r in rows
     )
     if not table_rows:
-        table_rows = '<tr><td colspan="15" class="empty">No candidates found.</td></tr>'
+        table_rows = '<tr><td colspan="18" class="empty">No candidates found.</td></tr>'
     path.write_text(
         f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>Next B Screener</title>
@@ -231,7 +235,7 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(4
 </style></head><body><main>
 <h1>下一交易日 B 点候选</h1>
 <p>筛选口径：最新已完成日 K 在 {end} 附近出现 B 信号，因此下一交易日开盘才是策略买入点。</p>
-<table><thead><tr><th>Symbol</th><th>Company</th><th>Mkt Cap</th><th>Country</th><th>Sector</th><th>Industry</th><th>Asset</th><th>Signal Date</th><th>Signal</th><th>Close</th><th>MA</th><th>Dist</th><th>Vol Ratio</th><th>Massive 7D</th><th>20D $Vol</th></tr></thead>
+<table><thead><tr><th>Symbol</th><th>Company</th><th>Mkt Cap</th><th>Country</th><th>Sector</th><th>Industry</th><th>Asset</th><th>Next Earnings</th><th>Days</th><th>Status</th><th>Signal Date</th><th>Signal</th><th>Close</th><th>MA</th><th>Dist</th><th>Vol Ratio</th><th>Massive 7D</th><th>20D $Vol</th></tr></thead>
 <tbody>{table_rows}</tbody></table>
 </main></body></html>""",
         encoding="utf-8",

@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -30,7 +30,9 @@ SCAN_JOBS_LOCK = threading.Lock()
 ACTIVE_SCAN_STATUSES = {"queued", "running", "pausing", "paused", "stopping"}
 NASDAQ_CACHE_PATH = DATA_DIR / "cache" / "nasdaq_screener.json"
 LEGACY_NASDAQ_CACHE_PATH = ROOT / "nasdaq_screener_cache.json"
+EARNINGS_CACHE_PATH = DATA_DIR / "cache" / "earnings_dates.json"
 NASDAQ_CACHE_SECONDS = 60 * 60 * 12
+EARNINGS_CACHE_SECONDS = 60 * 60 * 24
 DEFAULT_SCAN_LOOKBACK_DAYS = 70
 DEFAULT_MIN_MARKET_CAP_100M_USD = 200
 DEFAULT_MAX_SCAN_SYMBOLS = 500
@@ -211,12 +213,21 @@ button.danger {{ background: #f23645; border-color: #f23645; }}
 .stat-value {{ color: #131722; font-size: 18px; font-weight: 800; }}
 .toolbar {{ display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }}
 .toolbar .links {{ margin: 0; }}
+.latest-scan-card {{ margin: 0 0 20px; }}
+.latest-scan-card .toolbar {{ margin-bottom: 0; align-items: flex-start; }}
+.scan-facts {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 9px; }}
+.scan-fact {{ display: inline-flex; gap: 6px; align-items: center; border: 1px solid #e3e7ee; background: #f8fafc; border-radius: 999px; padding: 5px 9px; font-size: 12px; color: #334155; }}
+.scan-fact span {{ color: #64748b; font-weight: 700; }}
+.inline-actions {{ display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }}
+.delete-form {{ display: inline; margin: 0; }}
+.delete-link {{ border: 0; background: transparent; color: #f23645; min-height: 0; padding: 0; font-size: 13px; font-weight: 800; cursor: pointer; }}
+.delete-link:hover {{ text-decoration: underline; filter: none; }}
 .rating {{ display: inline-block; min-width: 64px; text-align: center; border-radius: 4px; padding: 3px 8px; font-weight: 800; font-size: 12px; }}
 .rating-Strong {{ color: #067a6b; background: rgba(8, 153, 129, .12); }}
 .rating-Medium {{ color: #b26b00; background: rgba(245, 158, 11, .16); }}
 .rating-Weak {{ color: #c22736; background: rgba(242, 54, 69, .13); }}
 .error {{ background: #fff5f6; border: 1px solid #ffc9cf; color: #b42332; padding: 12px; border-radius: 6px; white-space: pre-wrap; }}
-.result {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; margin-top: 14px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
+.result {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; margin-top: 14px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
 .candidate-detail {{ margin-top: 14px; }}
 .candidate-detail iframe {{ height: 980px; }}
 .progress-box {{ display: none; background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; margin-top: 14px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
@@ -644,6 +655,156 @@ def google_news_url(symbol: str, company_name: str) -> str:
     return f"https://www.google.com/search?q={quote(query)}&tbm=nws"
 
 
+def load_earnings_cache() -> dict[str, dict[str, object]]:
+    if not EARNINGS_CACHE_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(EARNINGS_CACHE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {str(key).upper(): value for key, value in payload.items() if isinstance(value, dict)}
+
+
+def save_earnings_cache(cache: dict[str, dict[str, object]]) -> None:
+    EARNINGS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    EARNINGS_CACHE_PATH.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def normalize_earnings_date(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, date):
+        return value.isoformat()
+    text = str(value)
+    if not text or text.lower() in ("nat", "none", "nan"):
+        return ""
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+    except Exception:
+        match = re.search(r"\d{4}-\d{2}-\d{2}", text)
+        return match.group(0) if match else ""
+
+
+def fetch_next_earnings_date(symbol: str) -> tuple[str, str]:
+    try:
+        import yfinance as yf
+    except Exception:
+        return "", "Unavailable"
+
+    today = date.today()
+    ticker = yf.Ticker(symbol)
+
+    try:
+        earnings_dates = ticker.get_earnings_dates(limit=12)
+        if earnings_dates is not None and not earnings_dates.empty:
+            future_dates: list[date] = []
+            for index_value in earnings_dates.index:
+                normalized = normalize_earnings_date(index_value)
+                if not normalized:
+                    continue
+                parsed = date.fromisoformat(normalized)
+                if parsed >= today:
+                    future_dates.append(parsed)
+            if future_dates:
+                return min(future_dates).isoformat(), "Estimated"
+    except Exception:
+        pass
+
+    try:
+        calendar = ticker.calendar
+        if hasattr(calendar, "empty") and not calendar.empty:
+            if "Earnings Date" in calendar.index:
+                values = calendar.loc["Earnings Date"].tolist()
+            elif "Earnings Date" in calendar.columns:
+                values = calendar["Earnings Date"].tolist()
+            else:
+                values = []
+            dates = []
+            for value in values:
+                normalized = normalize_earnings_date(value)
+                if normalized:
+                    parsed = date.fromisoformat(normalized)
+                    if parsed >= today:
+                        dates.append(parsed)
+            if dates:
+                return min(dates).isoformat(), "Estimated"
+        elif isinstance(calendar, dict):
+            values = calendar.get("Earnings Date") or calendar.get("EarningsDate") or []
+            if not isinstance(values, (list, tuple)):
+                values = [values]
+            dates = []
+            for value in values:
+                normalized = normalize_earnings_date(value)
+                if normalized:
+                    parsed = date.fromisoformat(normalized)
+                    if parsed >= today:
+                        dates.append(parsed)
+            if dates:
+                return min(dates).isoformat(), "Estimated"
+    except Exception:
+        pass
+
+    return "", "Unknown"
+
+
+def enrich_earnings_dates(rows: list[SignalResult]) -> None:
+    if not rows:
+        return
+    cache = load_earnings_cache()
+    changed = False
+    now = time.time()
+    today = date.today()
+    missing: list[str] = []
+    row_by_symbol = {row.symbol.upper(): row for row in rows}
+    for row in rows:
+        symbol = row.symbol.upper()
+        cached = cache.get(symbol)
+        if cached and now - float(cached.get("fetched_at", 0)) < EARNINGS_CACHE_SECONDS:
+            earnings_date = str(cached.get("date", ""))
+            status = str(cached.get("status", "Unknown"))
+            row.next_earnings_date = earnings_date
+            row.earnings_status = status
+            row.earnings_days = (date.fromisoformat(earnings_date) - today).days if earnings_date else 9999
+        else:
+            missing.append(symbol)
+
+    if missing:
+        with ThreadPoolExecutor(max_workers=min(6, len(missing))) as executor:
+            future_by_symbol = {executor.submit(fetch_next_earnings_date, symbol): symbol for symbol in missing}
+            for future in as_completed(future_by_symbol):
+                symbol = future_by_symbol[future]
+                try:
+                    earnings_date, status = future.result()
+                except Exception:
+                    earnings_date, status = "", "Unknown"
+                row = row_by_symbol.get(symbol)
+                if row:
+                    row.next_earnings_date = earnings_date
+                    row.earnings_status = status
+                    row.earnings_days = (date.fromisoformat(earnings_date) - today).days if earnings_date else 9999
+                cache[symbol] = {"date": earnings_date, "status": status, "fetched_at": now}
+                changed = True
+    if changed:
+        save_earnings_cache(cache)
+
+
+def format_earnings(row: SignalResult) -> str:
+    if not row.next_earnings_date:
+        return "未知"
+    if row.earnings_days <= 3:
+        risk = "3天内"
+    elif row.earnings_days <= 7:
+        risk = "7天内"
+    elif row.earnings_days <= 30:
+        risk = "30天内"
+    else:
+        risk = ""
+    suffix = f" / {risk}" if risk else ""
+    return f"{row.next_earnings_date} / {row.earnings_days}天 / {row.earnings_status or 'Estimated'}{suffix}"
+
+
 def format_metric(value: float, suffix: str = "%") -> str:
     if value == 999.0:
         return "N/A"
@@ -808,6 +969,36 @@ def cleanup_stale_latest_scan() -> None:
         return
     if payload.get("signal_date") != current_signal_date():
         LATEST_SCAN_PATH.unlink(missing_ok=True)
+
+
+def report_url_to_path(url: str) -> Path | None:
+    if not url.startswith("/reports/"):
+        return None
+    name = Path(unquote(url.removeprefix("/reports/"))).name
+    if not name:
+        return None
+    path = (REPORT_DIR / name).resolve()
+    if path.parent != REPORT_DIR.resolve():
+        return None
+    return path
+
+
+def delete_latest_scan() -> int:
+    deleted = 0
+    latest = load_latest_scan()
+    if latest:
+        for key in ("report", "csv"):
+            path = report_url_to_path(str(latest.get(key, "")))
+            if path and path.exists():
+                try:
+                    path.unlink()
+                    deleted += 1
+                except OSError:
+                    pass
+    if LATEST_SCAN_PATH.exists():
+        LATEST_SCAN_PATH.unlink(missing_ok=True)
+        deleted += 1
+    return deleted
 
 
 def load_latest_scan() -> dict[str, object] | None:
@@ -1007,16 +1198,26 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
     if latest_scan:
         summary = latest_scan.get("summary", {})
         latest_html = f"""
-<section class="result">
+<section class="result latest-scan-card">
   <div class="toolbar">
     <div>
       <strong>当前信号日期已有扫描结果</strong>
-      <p class="hint">信号日期：{html.escape(str(latest_scan.get("signal_date", "")))}；计划买入日：{html.escape(str(latest_scan.get("planned_trade_date", "")))}；候选：{summary.get("visible_candidates", 0)}；Strong：{summary.get("strong", 0)}；Medium：{summary.get("medium", 0)}；扫描时间：{html.escape(str(latest_scan.get("created_at", "")))}</p>
+      <div class="scan-facts">
+        <span class="scan-fact"><span>信号日</span>{html.escape(str(latest_scan.get("signal_date", "")))}</span>
+        <span class="scan-fact"><span>买入日</span>{html.escape(str(latest_scan.get("planned_trade_date", "")))}</span>
+        <span class="scan-fact"><span>候选</span>{summary.get("visible_candidates", 0)}</span>
+        <span class="scan-fact"><span>Strong</span>{summary.get("strong", 0)}</span>
+        <span class="scan-fact"><span>Medium</span>{summary.get("medium", 0)}</span>
+        <span class="scan-fact"><span>扫描时间</span>{html.escape(str(latest_scan.get("created_at", "")))}</span>
+      </div>
     </div>
-    <p class="links">
+    <div class="inline-actions links">
       <a href="/scan/latest">查看当前结果</a>
       <a href="{html.escape(str(latest_scan.get("csv", "#")))}" target="_blank">下载 CSV</a>
-    </p>
+      <form class="delete-form" action="/scan/delete" method="get" onsubmit="return confirm('确认删除当前扫描结果？删除后页面将恢复为未扫描状态。');">
+        <button type="submit" class="delete-link">删除结果</button>
+      </form>
+    </div>
   </div>
 </section>
 """
@@ -1283,6 +1484,7 @@ def render_candidate_table(rows: list[SignalResult]) -> str:
         f"<td>{r.market_cap / 1_000_000_000:.2f}</td>"
         f"<td>{r.second_stage_score_total}/20</td>"
         f'<td><span class="rating rating-{html.escape(r.second_stage_rating or "Pending")}">{html.escape(r.second_stage_rating or "Pending")}</span></td>'
+        f"<td>{html.escape(format_earnings(r))}</td>"
         f'<td>{r.catalyst_score}/5 {html.escape(r.catalyst_label or "Manual review")} <a href="{html.escape(r.catalyst_yahoo_url or yahoo_news_url(r.symbol))}" target="_blank">Yahoo</a> <a href="{html.escape(r.catalyst_google_url or google_news_url(r.symbol, r.company_name))}" target="_blank">Google</a></td>'
         f"<td>{r.sector_score}/5 {html.escape(r.sector_label or '-')} ({r.sector_peer_count}/{r.industry_peer_count})</td>"
         f"<td>{r.space_score}/5 {html.escape(r.space_label or '-')} / 52W {r.distance_52w_high_pct:.1f}% / 200MA {html.escape(r.above_200ma or '-')}</td>"
@@ -1294,11 +1496,11 @@ def render_candidate_table(rows: list[SignalResult]) -> str:
         for r in rows
     )
     if not table_rows:
-        table_rows = '<tr><td colspan="19" class="empty">No visible candidates.</td></tr>'
+        table_rows = '<tr><td colspan="20" class="empty">No visible candidates.</td></tr>'
     return f"""
 <div class="table-wrap">
 <table class="resizable-table">
-  <thead><tr><th>Symbol</th><th>Company</th><th>Mkt Cap $B</th><th>Total</th><th>Rating</th><th>Catalyst</th><th>Sector Score</th><th>Space</th><th>Candle</th><th>Sector</th><th>Industry</th><th>Signal Date</th><th>Signal</th><th>Close</th><th>MA</th><th>Dist</th><th>Vol Ratio</th><th>Massive 7D</th><th>20D $Vol</th></tr></thead>
+  <thead><tr><th>Symbol</th><th>Company</th><th>Mkt Cap $B</th><th>Total</th><th>Rating</th><th>Next Earnings</th><th>Catalyst</th><th>Sector Score</th><th>Space</th><th>Candle</th><th>Sector</th><th>Industry</th><th>Signal Date</th><th>Signal</th><th>Close</th><th>MA</th><th>Dist</th><th>Vol Ratio</th><th>Massive 7D</th><th>20D $Vol</th></tr></thead>
   <tbody>{table_rows}</tbody>
 </table>
 </div>
@@ -1363,10 +1565,13 @@ def latest_scan_to_html() -> str:
 {render_scanner_form({})}
 <section class="result">
   <div class="toolbar">
-    <p class="links">
+    <div class="inline-actions links">
       <a href="{report}" target="_blank">打开扫描报告</a>
       <a href="{csv_url}" target="_blank">下载 CSV</a>
-    </p>
+      <form class="delete-form" action="/scan/delete" method="get" onsubmit="return confirm('确认删除当前扫描结果？删除后页面将恢复为未扫描状态。');">
+        <button type="submit" class="delete-link">删除结果</button>
+      </form>
+    </div>
   </div>
   {render_scan_summary(source, int(summary.get("scanned", 0)), int(summary.get("technical_candidates", 0)), int(summary.get("visible_candidates", len(candidates))), int(summary.get("failed", len(errors))), end)}
   {render_candidate_table(candidates)}
@@ -1434,6 +1639,7 @@ def run_scanner(params: dict[str, list[str]]) -> str:
     add_sector_and_rating(rows)
     rows.sort(key=lambda row: (row.second_stage_score_total, row.avg_dollar_volume_20d), reverse=True)
     display_rows = visible_candidate_rows(params, rows)
+    enrich_earnings_dates(display_rows)
     stem = safe_name(f"next_b_{end}_{len(symbols)}")
     csv_path = REPORT_DIR / f"{stem}.csv"
     html_path = REPORT_DIR / f"{stem}.html"
@@ -1454,10 +1660,13 @@ def run_scanner(params: dict[str, list[str]]) -> str:
 {render_scanner_form(params)}
 <section class="result">
   <div class="toolbar">
-    <p class="links">
+    <div class="inline-actions links">
       <a href="/reports/{quote(html_path.name)}" target="_blank">打开扫描报告</a>
       <a href="/reports/{quote(csv_path.name)}" target="_blank">下载 CSV</a>
-    </p>
+      <form class="delete-form" action="/scan/delete" method="get" onsubmit="return confirm('确认删除当前扫描结果？删除后页面将恢复为未扫描状态。');">
+        <button type="submit" class="delete-link">删除结果</button>
+      </form>
+    </div>
   </div>
   {render_scan_summary(source, len(symbols), len(rows), len(display_rows), len(errors), end)}
   {error_note}
@@ -1596,6 +1805,7 @@ def finish_scan_result(
     add_sector_and_rating(rows)
     rows.sort(key=lambda row: (row.second_stage_score_total, row.avg_dollar_volume_20d), reverse=True)
     display_rows = visible_candidate_rows(params, rows)
+    enrich_earnings_dates(display_rows)
     stem = safe_name(f"next_b_{end}_{len(symbols)}_{int(time.time())}")
     csv_path = REPORT_DIR / f"{stem}.csv"
     html_path = REPORT_DIR / f"{stem}.html"
@@ -1615,10 +1825,13 @@ def finish_scan_result(
     return f"""
 <section class="result">
   <div class="toolbar">
-    <p class="links">
+    <div class="inline-actions links">
       <a href="/reports/{quote(html_path.name)}" target="_blank">打开扫描报告</a>
       <a href="/reports/{quote(csv_path.name)}" target="_blank">下载 CSV</a>
-    </p>
+      <form class="delete-form" action="/scan/delete" method="get" onsubmit="return confirm('确认删除当前扫描结果？删除后页面将恢复为未扫描状态。');">
+        <button type="submit" class="delete-link">删除结果</button>
+      </form>
+    </div>
   </div>
   {render_scan_summary(source, len(symbols), len(rows), len(display_rows), len(errors), end)}
   {error_note}
@@ -1768,6 +1981,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_bytes(page_shell(run_scanner(params), "scanner"))
             elif parsed.path == "/scan/latest":
                 self.send_bytes(page_shell(latest_scan_to_html(), "scanner"))
+            elif parsed.path == "/scan/delete":
+                self.delete_scan_result()
             elif parsed.path == "/scan/start":
                 self.start_scan_job(params)
             elif parsed.path == "/scan/pause":
@@ -1785,7 +2000,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_error(404)
         except Exception as exc:
-            active = "scanner" if parsed.path in ("/scanner", "/scan") else "batch" if parsed.path.startswith("/batch") else "backtest"
+            active = "scanner" if parsed.path in ("/scanner", "/scan") or parsed.path.startswith("/scan/") else "batch" if parsed.path.startswith("/batch") else "backtest"
             form = render_scanner_form(params) if active == "scanner" else render_batch_form(params) if active == "batch" else render_backtest_form(params)
             self.send_bytes(page_shell(form + f'<div class="error">{html.escape(str(exc))}</div>', active), 500)
 
@@ -1809,6 +2024,12 @@ class Handler(BaseHTTPRequestHandler):
         worker = threading.Thread(target=execute_scan_job, args=(job_id, params), daemon=True)
         worker.start()
         self.send_json({"job_id": job_id})
+
+    def delete_scan_result(self) -> None:
+        deleted = delete_latest_scan()
+        message = f"已删除当前扫描结果（清理 {deleted} 个文件）。" if deleted else "当前没有可删除的扫描结果。"
+        content = render_scanner_form({}) + f'<section class="result"><p class="hint">{html.escape(message)}</p></section>'
+        self.send_bytes(page_shell(content, "scanner"))
 
     def pause_scan_job(self, params: dict[str, list[str]]) -> None:
         job_id = field(params, "id", "")
@@ -1897,4 +2118,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
