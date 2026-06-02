@@ -2,6 +2,7 @@ import argparse
 import csv
 import html
 import math
+import os
 from collections import deque
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -14,7 +15,7 @@ HIGH_KEYS = ("high", "最高", "最高价")
 LOW_KEYS = ("low", "最低", "最低价")
 CLOSE_KEYS = ("close", "收盘", "收盘价")
 VOLUME_KEYS = ("volume", "vol", "成交量", "成交量(股)", "成交量(手)")
-PRICE_CACHE_DIR = Path(__file__).resolve().parent / "data" / "cache" / "prices"
+PRICE_CACHE_DIR = Path(os.environ.get("MA5_PRICE_CACHE_DIR", Path(os.environ.get("MA5_DATA_DIR", Path(__file__).resolve().parent / "data")) / "cache" / "prices")).expanduser().resolve()
 PRICE_CACHE_MAX_BARS = 1300
 
 

@@ -3,8 +3,8 @@
 import csv
 import html
 import json
+import os
 import re
-import subprocess
 import threading
 import time
 import uuid
@@ -13,19 +13,23 @@ from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.request import Request, urlopen
 
 from backtest import Bar, backtest, fetch_bars, make_report, rolling_sma, summarize, write_equity, write_trades
 from scan_next_b import SignalResult, latest_b_signal, load_symbols, unique_symbols, write_html
 
 
 ROOT = Path(__file__).resolve().parent
-REPORT_DIR = ROOT / "reports"
-SCAN_DIR = ROOT / "data" / "scans"
+DATA_DIR = Path(os.environ.get("MA5_DATA_DIR", ROOT / "data")).expanduser().resolve()
+REPORT_DIR = Path(os.environ.get("MA5_REPORT_DIR", ROOT / "reports")).expanduser().resolve()
+SCAN_DIR = DATA_DIR / "scans"
 LATEST_SCAN_PATH = SCAN_DIR / "latest.json"
 DEFAULT_BENCHMARK = "^IXIC"
 SCAN_JOBS: dict[str, dict[str, object]] = {}
 SCAN_JOBS_LOCK = threading.Lock()
-NASDAQ_CACHE_PATH = ROOT / "nasdaq_screener_cache.json"
+ACTIVE_SCAN_STATUSES = {"queued", "running", "pausing", "paused", "stopping"}
+NASDAQ_CACHE_PATH = DATA_DIR / "cache" / "nasdaq_screener.json"
+LEGACY_NASDAQ_CACHE_PATH = ROOT / "nasdaq_screener_cache.json"
 NASDAQ_CACHE_SECONDS = 60 * 60 * 12
 DEFAULT_SCAN_LOOKBACK_DAYS = 70
 DEFAULT_MIN_MARKET_CAP_100M_USD = 200
@@ -81,6 +85,14 @@ def get_job(job_id: str) -> dict[str, object] | None:
     with SCAN_JOBS_LOCK:
         job = SCAN_JOBS.get(job_id)
         return dict(job) if job else None
+
+
+def active_scan_job() -> tuple[str, dict[str, object]] | None:
+    with SCAN_JOBS_LOCK:
+        for job_id, job in SCAN_JOBS.items():
+            if job.get("status") in ACTIVE_SCAN_STATUSES:
+                return job_id, dict(job)
+    return None
 
 
 def job_pause_requested(job_id: str) -> bool:
@@ -307,7 +319,7 @@ end.addEventListener("change", applyPreset);
 """
 
 def run_strategy(params: dict[str, list[str]]) -> str:
-    REPORT_DIR.mkdir(exist_ok=True)
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
     cleanup_old_reports()
     symbol = field(params, "symbol", "AAPL").upper()
     strategy_name = field(params, "strategy_name", "ratchet")
@@ -393,7 +405,7 @@ def render_batch_form(params: dict[str, list[str]] | None = None) -> str:
 """
 
 def run_batch_backtest(params: dict[str, list[str]]) -> str:
-    REPORT_DIR.mkdir(exist_ok=True)
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
     cleanup_old_reports()
     symbols = parse_symbols_text(field(params, "symbols", "AAPL,MSFT,NVDA,TSM"))
     start = field(params, "start", start_for_preset("1y", date.today()).isoformat())
@@ -833,32 +845,32 @@ def scan_symbol_candidate(
 
 
 def fetch_nasdaq_screener_rows() -> list[dict[str, object]]:
-    if NASDAQ_CACHE_PATH.exists():
-        age = time.time() - NASDAQ_CACHE_PATH.stat().st_mtime
+    cache_path = NASDAQ_CACHE_PATH if NASDAQ_CACHE_PATH.exists() else LEGACY_NASDAQ_CACHE_PATH
+    if cache_path.exists():
+        age = time.time() - cache_path.stat().st_mtime
         if age < NASDAQ_CACHE_SECONDS:
-            return json.loads(NASDAQ_CACHE_PATH.read_text(encoding="utf-8"))
+            return json.loads(cache_path.read_text(encoding="utf-8"))
 
-    ps = r"""
-$headers=@{
-  'User-Agent'='Mozilla/5.0';
-  'Accept'='application/json, text/plain, */*';
-  'Origin'='https://www.nasdaq.com';
-  'Referer'='https://www.nasdaq.com/market-activity/stocks/screener'
-}
-$url='https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true'
-$r=Invoke-WebRequest -Uri $url -Headers $headers -UseBasicParsing -TimeoutSec 60
-$r.Content
-"""
-    completed = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", ps],
-        cwd=str(ROOT),
-        text=True,
-        capture_output=True,
-        timeout=90,
-        check=True,
+    request = Request(
+        "https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true",
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json, text/plain, */*",
+            "Origin": "https://www.nasdaq.com",
+            "Referer": "https://www.nasdaq.com/market-activity/stocks/screener",
+        },
     )
-    payload = json.loads(completed.stdout)
+    try:
+        with urlopen(request, timeout=60) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        if NASDAQ_CACHE_PATH.exists():
+            return json.loads(NASDAQ_CACHE_PATH.read_text(encoding="utf-8"))
+        if LEGACY_NASDAQ_CACHE_PATH.exists():
+            return json.loads(LEGACY_NASDAQ_CACHE_PATH.read_text(encoding="utf-8"))
+        raise RuntimeError(f"无法拉取 Nasdaq 股票池，且本地没有可用缓存：{exc}") from exc
     rows = payload.get("data", {}).get("rows", [])
+    NASDAQ_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     NASDAQ_CACHE_PATH.write_text(json.dumps(rows), encoding="utf-8")
     return rows
 
@@ -1294,7 +1306,7 @@ def latest_scan_to_html() -> str:
 """
 
 def run_scanner(params: dict[str, list[str]]) -> str:
-    REPORT_DIR.mkdir(exist_ok=True)
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
     cleanup_old_reports()
     source = field(params, "universe_source", "auto")
     symbols_text = field(params, "symbols", "")
@@ -1387,7 +1399,7 @@ def run_scanner(params: dict[str, list[str]]) -> str:
 
 
 def render_candidate_detail(params: dict[str, list[str]]) -> str:
-    REPORT_DIR.mkdir(exist_ok=True)
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
     cleanup_old_reports()
     symbol = field(params, "symbol", "").upper()
     if not symbol:
@@ -1549,7 +1561,7 @@ def finish_scan_result(
 
 def execute_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
     try:
-        REPORT_DIR.mkdir(exist_ok=True)
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
         cleanup_old_reports()
         set_job(job_id, status="running", message="正在准备股票池", total=0, scanned=0, candidates=0, errors=0, current="")
         source, symbols, metadata_by_symbol = resolve_scan_symbols(params)
@@ -1709,6 +1721,20 @@ class Handler(BaseHTTPRequestHandler):
             self.send_bytes(page_shell(form + f'<div class="error">{html.escape(str(exc))}</div>', active), 500)
 
     def start_scan_job(self, params: dict[str, list[str]]) -> None:
+        active = active_scan_job()
+        if active:
+            active_id, active_job = active
+            self.send_json(
+                {
+                    "status": "busy",
+                    "error": "已有扫描任务正在运行，请等待完成，或先暂停/终止当前任务。",
+                    "active_job_id": active_id,
+                    "active_status": active_job.get("status", ""),
+                    "active_message": active_job.get("message", ""),
+                },
+                status=409,
+            )
+            return
         job_id = uuid.uuid4().hex
         set_job(job_id, status="queued", message="排队中", total=0, scanned=0, candidates=0, errors=0, current="", pause_requested=False, stop_requested=False)
         worker = threading.Thread(target=execute_scan_job, args=(job_id, params), daemon=True)
@@ -1793,8 +1819,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", 8765), Handler)
-    print("Open http://127.0.0.1:8765")
+    host = os.environ.get("MA5_HOST", "127.0.0.1")
+    port = int(os.environ.get("MA5_PORT", "8765"))
+    server = ThreadingHTTPServer((host, port), Handler)
+    print(f"Open http://{host}:{port}")
     server.serve_forever()
 
 
