@@ -47,6 +47,21 @@ def number_field(params: dict[str, list[str]], name: str, default: float) -> flo
     return float(field(params, name, str(default)))
 
 
+def min_backtest_days(vol_length: int) -> int:
+    return max(30, vol_length + 10)
+
+
+def validate_backtest_range(start: str, end: str, vol_length: int) -> None:
+    start_date = date.fromisoformat(start)
+    end_date = date.fromisoformat(end)
+    minimum_days = min_backtest_days(vol_length)
+    if end_date <= start_date:
+        raise ValueError("结束日期必须晚于开始日期。")
+    actual_days = (end_date - start_date).days
+    if actual_days < minimum_days:
+        raise ValueError(f"回测区间过短。当前均量周期为 {vol_length}，至少需要 {minimum_days} 天。")
+
+
 def safe_name(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in value)
 
@@ -266,7 +281,7 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
   </div>
   <div class="mode-pill">Backtest | Daily</div>
 </section>
-<form class="form" action="/run" method="get">
+<form class="form" action="/run" method="get" id="backtest-form">
   <label>股票代码<input name="symbol" value="{value("symbol", "AAPL").upper()}" placeholder="AAPL"></label>
   <label>策略版本
     <select name="strategy_name">
@@ -290,7 +305,7 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
   <label>手续费 %<input name="commission_pct" value="{value("commission_pct", "0.1")}"></label>
   <label>滑点 %<input name="slippage_pct" value="{value("slippage_pct", "0")}"></label>
   <label>均线周期<input name="ma_length" value="{value("ma_length", "5")}"></label>
-  <label>均量周期<input name="vol_length" value="{value("vol_length", "20")}"></label>
+  <label>均量周期<input name="vol_length" id="vol_length" value="{value("vol_length", "20")}"></label>
   <label>巨量倍数<input name="vol_multiplier" value="{value("vol_multiplier", "1.45")}"></label>
   <label>跌破均线止损 %<input name="stop_5ma_pct" value="{value("stop_5ma_pct", "7.5")}"></label>
   <label>B点追踪止损 %<input name="hard_stop_pct" value="{value("hard_stop_pct", "20")}"></label>
@@ -301,6 +316,8 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
 const preset = document.getElementById("preset");
 const start = document.getElementById("start");
 const end = document.getElementById("end");
+const volLength = document.getElementById("vol_length");
+const backtestForm = document.getElementById("backtest-form");
 function isoDate(d) {{ return d.toISOString().slice(0, 10); }}
 function applyPreset() {{
   const value = preset.value;
@@ -315,7 +332,52 @@ function applyPreset() {{
 }}
 preset.addEventListener("change", applyPreset);
 end.addEventListener("change", applyPreset);
+backtestForm.addEventListener("submit", (event) => {{
+  const startDate = new Date(start.value);
+  const endDate = new Date(end.value);
+  const volDays = Number.parseInt(volLength.value || "20", 10);
+  const minDays = Math.max(30, volDays + 10);
+  const diffDays = Math.round((endDate - startDate) / 86400000);
+  if (!Number.isFinite(diffDays) || diffDays < minDays) {{
+    event.preventDefault();
+    alert(`回测区间至少需要 ${{minDays}} 天。当前均量周期为 ${{volDays}}，请扩大日期范围。`);
+  }}
+}});
 </script>
+"""
+
+
+def render_backtest_trade_table(trades) -> str:
+    rows = []
+    for i, trade in enumerate(trades, 1):
+        pnl_class = "pos" if trade.pnl >= 0 else "neg"
+        pct_class = "pos" if trade.pnl_pct >= 0 else "neg"
+        rows.append(
+            "<tr>"
+            f"<td>{i}</td>"
+            f"<td>{html.escape(trade.entry_signal_date)}</td>"
+            f"<td>{html.escape(trade.entry_date)}</td>"
+            f"<td>{html.escape(trade.exit_signal_date)}</td>"
+            f"<td>{html.escape(trade.exit_date)}</td>"
+            f"<td>{trade.entry_price:.2f}</td>"
+            f"<td>{trade.exit_price:.2f}</td>"
+            f"<td>{trade.shares}</td>"
+            f"<td>{trade.bars_held}</td>"
+            f"<td class=\"{pnl_class}\">{trade.pnl:.2f}</td>"
+            f"<td class=\"{pct_class}\">{trade.pnl_pct:.2f}%</td>"
+            f"<td>{html.escape(trade.exit_reason)}</td>"
+            "</tr>"
+        )
+    if not rows:
+        rows.append('<tr><td colspan="12" class="empty">这个区间没有完成交易。</td></tr>')
+    return f"""
+  <h2>交易明细</h2>
+  <div class="table-wrap">
+    <table class="resizable-table">
+      <thead><tr><th>#</th><th>买入信号日</th><th>买入操作日</th><th>卖出信号日</th><th>卖出操作日</th><th>买入价</th><th>卖出价</th><th>股数</th><th>持仓K线</th><th>收益金额</th><th>收益率</th><th>卖出原因</th></tr></thead>
+      <tbody>{"".join(rows)}</tbody>
+    </table>
+  </div>
 """
 
 def run_strategy(params: dict[str, list[str]]) -> str:
@@ -327,12 +389,15 @@ def run_strategy(params: dict[str, list[str]]) -> str:
     end = field(params, "end", date.today().isoformat())
     benchmark_symbol = field(params, "benchmark", DEFAULT_BENCHMARK).upper()
     initial_cash = number_field(params, "initial_cash", 100000)
+    ma_length = int(number_field(params, "ma_length", 5))
+    vol_length = int(number_field(params, "vol_length", 20))
+    validate_backtest_range(start, end, vol_length)
 
     bars = fetch_bars("yfinance", symbol, start, end, "qfq", None)
     trades, equity_curve = backtest(
         bars=bars,
-        ma_length=int(number_field(params, "ma_length", 5)),
-        vol_length=int(number_field(params, "vol_length", 20)),
+        ma_length=ma_length,
+        vol_length=vol_length,
         vol_multiplier=number_field(params, "vol_multiplier", 1.45),
         initial_cash=initial_cash,
         commission_pct=number_field(params, "commission_pct", 0.1),
@@ -364,6 +429,7 @@ def run_strategy(params: dict[str, list[str]]) -> str:
     <a href="{trades_url}" target="_blank">交易明细 CSV</a>
     <a href="{equity_url}" target="_blank">权益曲线 CSV</a>
   </p>
+  {render_backtest_trade_table(trades)}
   <iframe src="{report_url}" title="Backtest report"></iframe>
 </section>
 """
@@ -411,6 +477,9 @@ def run_batch_backtest(params: dict[str, list[str]]) -> str:
     start = field(params, "start", start_for_preset("1y", date.today()).isoformat())
     end = field(params, "end", date.today().isoformat())
     initial_cash = number_field(params, "initial_cash", 100000)
+    ma_length = int(number_field(params, "ma_length", 5))
+    vol_length = int(number_field(params, "vol_length", 20))
+    validate_backtest_range(start, end, vol_length)
     rows = []
     errors = []
     for symbol in symbols:
@@ -418,8 +487,8 @@ def run_batch_backtest(params: dict[str, list[str]]) -> str:
             bars = fetch_bars("yfinance", symbol, start, end, "qfq", None)
             trades, equity_curve = backtest(
                 bars=bars,
-                ma_length=int(number_field(params, "ma_length", 5)),
-                vol_length=int(number_field(params, "vol_length", 20)),
+                ma_length=ma_length,
+                vol_length=vol_length,
                 vol_multiplier=number_field(params, "vol_multiplier", 1.45),
                 initial_cash=initial_cash,
                 commission_pct=number_field(params, "commission_pct", 0.1),

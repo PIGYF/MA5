@@ -1,6 +1,7 @@
 import argparse
 import csv
 import html
+import json
 import math
 import os
 from collections import deque
@@ -641,6 +642,8 @@ def svg_polyline(points: list[tuple[float, float]], color: str, width: int = 2) 
     )
 
 
+
+
 def make_report(
     path: Path,
     title: str,
@@ -650,203 +653,224 @@ def make_report(
     summary: dict[str, float | int],
     benchmark: dict[str, object] | None = None,
 ) -> None:
-    width = 1180
-    price_height = 520
-    pnl_height = 320
-    compare_height = 360
-    pad_left = 72
-    pad_right = 28
-    pad_top = 28
-    pad_bottom = 58
-    plot_width = width - pad_left - pad_right
-    plot_height = price_height - pad_top - pad_bottom
+    labels = {
+        "net_profit": "\u51c0\u5229\u6da6",
+        "return_pct": "\u6536\u76ca\u7387",
+        "max_drawdown": "\u6700\u5927\u56de\u64a4",
+        "trades": "\u4ea4\u6613\u6b21\u6570",
+        "win_rate": "\u80dc\u7387",
+        "profit_factor": "\u76c8\u4e8f\u56e0\u5b50",
+        "overview": "\u603b\u89c8",
+        "trade_analysis": "\u4ea4\u6613\u5206\u6790",
+        "initial_cash": "\u521d\u59cb\u8d44\u91d1",
+        "final_equity": "\u671f\u672b\u6743\u76ca",
+        "gross_profit": "\u603b\u76c8\u5229",
+        "gross_loss": "\u603b\u4e8f\u635f",
+        "avg_trade": "\u5e73\u5747\u6bcf\u7b14",
+        "avg_bars": "\u5e73\u5747\u6301\u4ed3K\u7ebf",
+        "wins": "\u76c8\u5229\u7b14\u6570",
+        "losses": "\u4e8f\u635f\u7b14\u6570",
+        "avg_win": "\u5e73\u5747\u76c8\u5229",
+        "avg_loss": "\u5e73\u5747\u4e8f\u635f",
+        "best_trade": "\u6700\u4f73\u4ea4\u6613",
+        "worst_trade": "\u6700\u5dee\u4ea4\u6613",
+        "avg_mfe": "\u5e73\u5747\u6700\u5927\u6d6e\u76c8",
+        "avg_dd": "\u5e73\u5747\u4ea4\u6613\u56de\u64a4",
+        "strategy_vs": "\u7b56\u7565 vs",
+        "strategy_return": "\u7b56\u7565\u533a\u95f4\u6536\u76ca",
+        "benchmark_return": "\u533a\u95f4\u6536\u76ca",
+        "main_chart": "K\u7ebf\u3001\u5747\u7ebf\u3001\u6210\u4ea4\u91cf\u4e0e\u4ea4\u6613\u70b9",
+        "pnl_chart": "\u5355\u7b14\u4ea4\u6613\u6536\u76ca",
+        "trade_detail": "\u4ea4\u6613\u660e\u7ec6",
+        "buy_signal_date": "\u4e70\u5165\u4fe1\u53f7\u65e5",
+        "buy_action_date": "\u4e70\u5165\u64cd\u4f5c\u65e5",
+        "buy_signal_close": "\u4e70\u5165\u4fe1\u53f7\u6536\u76d8",
+        "buy_fill": "\u4e70\u5165\u6210\u4ea4",
+        "buy_gap": "\u4e70\u5165\u8df3\u7a7a",
+        "sell_signal_date": "\u5356\u51fa\u4fe1\u53f7\u65e5",
+        "sell_action_date": "\u5356\u51fa\u64cd\u4f5c\u65e5",
+        "sell_signal_close": "\u5356\u51fa\u4fe1\u53f7\u6536\u76d8",
+        "sell_fill": "\u5356\u51fa\u6210\u4ea4",
+        "sell_gap": "\u5356\u51fa\u8df3\u7a7a",
+        "bars_held": "\u6301\u4ed3K\u7ebf",
+        "shares": "\u80a1\u6570",
+        "entry_value": "\u4e70\u5165\u91d1\u989d",
+        "exit_value": "\u5356\u51fa\u91d1\u989d",
+        "pnl_amount": "\u6536\u76ca\u91d1\u989d",
+        "max_favorable": "\u6700\u5927\u6d6e\u76c8",
+        "exit_reason": "\u5356\u51fa\u539f\u56e0",
+        "empty_trades": "\u8fd9\u4e2a\u533a\u95f4\u6ca1\u6709\u5b8c\u6210\u4ea4\u6613\u3002",
+        "date": "\u65e5\u671f",
+        "open": "\u5f00",
+        "high": "\u9ad8",
+        "low": "\u4f4e",
+        "close": "\u6536",
+        "volume": "\u6210\u4ea4\u91cf",
+        "volume_ma": "\u6210\u4ea4\u91cf\u5747\u7ebf",
+        "dynamic_stop": "\u52a8\u6001\u6b62\u635f",
+        "buy": "\u4e70\u5165",
+        "sell": "\u5356\u51fa",
+        "hold_buy": "\u6301\u4ed3B\u70b9",
+        "hold_sell": "\u6301\u4ed3\u5356\u70b9",
+        "trade_no": "\u4ea4\u6613\u5e8f\u53f7",
+        "equity": "\u6743\u76ca",
+        "reset_view": "\u91cd\u7f6e\u89c6\u56fe",
+        "chart_hint": "\u6eda\u8f6e\u7f29\u653e\uff0c\u6309\u4f4f\u62d6\u52a8\uff0c\u60ac\u505c\u67e5\u770bOHLC\u548c\u6210\u4ea4\u91cf\u3002",
+    }
 
-    closes = [bar.close for bar in bars]
-    ma_values = [float(row["ma"]) for row in equity_curve if row["ma"] != ""]
-    low = min(closes + ma_values)
-    high = max(closes + ma_values)
-    padding = (high - low) * 0.08 or 1
-    low -= padding
-    high += padding
+    dates = [bar.date for bar in bars]
+    ma_values = [None if row["ma"] == "" else float(row["ma"]) for row in equity_curve]
+    vol_ma_values = [None if row["vol_ma"] == "" else float(row["vol_ma"]) for row in equity_curve]
+    dynamic_stop_values = [None if row.get("dynamic_stop", "") in ("", None) else float(row["dynamic_stop"]) for row in equity_curve]
+    volume_colors = ["rgba(8,153,129,0.42)" if bar.close >= bar.open else "rgba(242,54,69,0.42)" for bar in bars]
 
-    def x_at(index: int) -> float:
-        if len(bars) == 1:
-            return pad_left + plot_width / 2
-        return pad_left + index / (len(bars) - 1) * plot_width
-
-    def y_at(value: float) -> float:
-        return pad_top + (high - value) / (high - low) * plot_height
-
-    close_points = [(x_at(i), y_at(bar.close)) for i, bar in enumerate(bars)]
-    ma_points = [
-        (x_at(i), y_at(float(row["ma"])))
-        for i, row in enumerate(equity_curve)
-        if row["ma"] != ""
+    trade_by_entry = {trade.entry_date: trade for trade in trades}
+    trade_by_exit = {trade.exit_date: trade for trade in trades}
+    entry_text = [
+        f"{labels['buy_action_date']}: {trade.entry_date}<br>{labels['buy_signal_date']}: {trade.entry_signal_date}<br>{labels['buy_fill']}: {trade.entry_price:.2f}<br>{labels['buy_signal_close']}: {trade.entry_signal_close:.2f}<br>{labels['buy_gap']}: {trade.entry_gap_pct:.2f}%"
+        for trade in trades
     ]
-    bar_spacing = plot_width / max(1, len(bars) - 1)
-    candle_width = max(2.0, min(8.0, bar_spacing * 0.55))
-    candle_svg = []
-    for i, bar in enumerate(bars):
-        x = x_at(i)
-        open_y = y_at(bar.open)
-        close_y = y_at(bar.close)
-        high_y = y_at(bar.high)
-        low_y = y_at(bar.low)
-        body_y = min(open_y, close_y)
-        body_height = max(1.2, abs(close_y - open_y))
-        klass = "candle-up" if bar.close >= bar.open else "candle-down"
-        candle_svg.append(
-            f'<g><line x1="{x:.2f}" y1="{high_y:.2f}" x2="{x:.2f}" y2="{low_y:.2f}" class="{klass}" />'
-            f'<rect x="{x - candle_width / 2:.2f}" y="{body_y:.2f}" width="{candle_width:.2f}" height="{body_height:.2f}" class="{klass}" />'
-            f'<title>{html.escape(bar.date)} O {bar.open:.2f} H {bar.high:.2f} L {bar.low:.2f} C {bar.close:.2f}</title></g>'
-        )
+    exit_text = [
+        f"{labels['sell_action_date']}: {trade.exit_date}<br>{labels['sell_signal_date']}: {trade.exit_signal_date}<br>{labels['sell_fill']}: {trade.exit_price:.2f}<br>{labels['sell_signal_close']}: {trade.exit_signal_close:.2f}<br>{labels['pnl_amount']}: {trade.pnl:.2f}<br>{labels['return_pct']}: {trade.pnl_pct:.2f}%<br>{labels['exit_reason']}: {html.escape(trade.exit_reason)}"
+        for trade in trades
+    ]
 
-    date_to_index = {bar.date: i for i, bar in enumerate(bars)}
-    buy_marks = []
-    sell_marks = []
-    in_position_buy_signals = []
-    in_position_sell_signals = []
-    for trade in trades:
-        if trade.entry_date in date_to_index:
-            i = date_to_index[trade.entry_date]
-            buy_marks.append((x_at(i), y_at(trade.entry_price), trade))
-        if trade.exit_date in date_to_index:
-            i = date_to_index[trade.exit_date]
-            sell_marks.append((x_at(i), y_at(trade.exit_price), trade))
-
-    trade_entry_dates = {trade.entry_date for trade in trades}
-    trade_exit_dates = {trade.exit_date for trade in trades}
+    hold_buy_x: list[str] = []
+    hold_buy_y: list[float] = []
+    hold_buy_text: list[str] = []
+    hold_sell_x: list[str] = []
+    hold_sell_y: list[float] = []
+    hold_sell_text: list[str] = []
     for i, row in enumerate(equity_curve):
         position = float(row.get("position_shares", 0) or 0)
         if position <= 0:
             continue
         bar = bars[i]
-        if int(row.get("buy_signal", 0)) and bar.date not in trade_entry_dates:
-            marker_y = y_at(bar.low if hasattr(bar, "low") else bar.close) + 14
-            in_position_buy_signals.append((x_at(i), marker_y, bar))
-        if int(row.get("sell_signal", 0)) and bar.date not in trade_exit_dates:
-            marker_y = y_at(bar.high if hasattr(bar, "high") else bar.close) - 14
-            in_position_sell_signals.append((x_at(i), marker_y, bar))
+        if int(row.get("buy_signal", 0)) and bar.date not in trade_by_entry:
+            hold_buy_x.append(bar.date)
+            hold_buy_y.append(bar.low)
+            hold_buy_text.append(f"{labels['hold_buy']}<br>{labels['date']}: {bar.date}<br>{labels['close']}: {bar.close:.2f}")
+        if int(row.get("sell_signal", 0)) and bar.date not in trade_by_exit:
+            hold_sell_x.append(bar.date)
+            hold_sell_y.append(bar.high)
+            hold_sell_text.append(f"{labels['hold_sell']}<br>{labels['date']}: {bar.date}<br>{labels['close']}: {bar.close:.2f}")
 
-    grid_lines = []
-    for step in range(6):
-        y = pad_top + step / 5 * plot_height
-        value = high - step / 5 * (high - low)
-        grid_lines.append(
-            f'<line x1="{pad_left}" y1="{y:.2f}" x2="{width - pad_right}" y2="{y:.2f}" class="grid" />'
-            f'<text x="16" y="{y + 4:.2f}" class="axis">{value:.2f}</text>'
-        )
+    chart_payload = {
+        "labels": labels,
+        "dates": dates,
+        "ohlc": [{"time": bar.date, "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close} for bar in bars],
+        "volume": [{"time": bar.date, "value": bar.volume, "color": volume_colors[i]} for i, bar in enumerate(bars)],
+        "ma": [{"time": dates[i], "value": value} for i, value in enumerate(ma_values) if value is not None],
+        "volMa": [{"time": dates[i], "value": value} for i, value in enumerate(vol_ma_values) if value is not None],
+        "dynamicStop": [{"time": dates[i], "value": value} for i, value in enumerate(dynamic_stop_values) if value is not None],
+        "rows": [
+            {
+                "time": bar.date,
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": bar.volume,
+                "ma": ma_values[i],
+                "volMa": vol_ma_values[i],
+                "dynamicStop": dynamic_stop_values[i],
+            }
+            for i, bar in enumerate(bars)
+        ],
+        "entryMarkers": [
+            {"time": trade.entry_date, "position": "belowBar", "color": "#089981", "shape": "arrowUp", "text": labels["buy"]}
+            for trade in trades
+        ],
+        "exitMarkers": [
+            {"time": trade.exit_date, "position": "aboveBar", "color": "#f23645", "shape": "arrowDown", "text": labels["sell"]}
+            for trade in trades
+        ],
+        "holdBuyMarkers": [
+            {"time": day, "position": "belowBar", "color": "#84cc16", "shape": "circle", "text": "B"}
+            for day in hold_buy_x
+        ],
+        "holdSellMarkers": [
+            {"time": day, "position": "aboveBar", "color": "#f97316", "shape": "circle", "text": "S"}
+            for day in hold_sell_x
+        ],
+        "entryText": entry_text,
+        "exitText": exit_text,
+        "holdBuyText": hold_buy_text,
+        "holdSellText": hold_sell_text,
+    }
 
-    date_ticks = []
-    tick_count = min(8, len(bars))
-    for step in range(tick_count):
-        i = round(step * (len(bars) - 1) / max(1, tick_count - 1))
-        x = x_at(i)
-        date_ticks.append(
-            f'<text x="{x:.2f}" y="{price_height - 22}" text-anchor="middle" class="axis">{html.escape(bars[i].date)}</text>'
-        )
-
-    buy_svg = "".join(
-        f'<g><circle cx="{x:.2f}" cy="{y:.2f}" r="7" class="buy" />'
-        f'<title>Buy {html.escape(t.entry_date)} @ {t.entry_price:.2f}</title></g>'
-        for x, y, t in buy_marks
-    )
-    sell_svg = "".join(
-        f'<g><circle cx="{x:.2f}" cy="{y:.2f}" r="7" class="sell" />'
-        f'<title>Sell {html.escape(t.exit_date)} @ {t.exit_price:.2f}, PnL {t.pnl:.2f}</title></g>'
-        for x, y, t in sell_marks
-    )
-    in_position_buy_svg = "".join(
-        f'<g><circle cx="{x:.2f}" cy="{y:.2f}" r="8" class="hold-buy" />'
-        f'<text x="{x:.2f}" y="{y + 4:.2f}" text-anchor="middle" class="signal-letter">B</text>'
-        f'<title>Holding B signal {html.escape(bar.date)} close {bar.close:.2f}</title></g>'
-        for x, y, bar in in_position_buy_signals
-    )
-    in_position_sell_svg = "".join(
-        f'<g><circle cx="{x:.2f}" cy="{y:.2f}" r="8" class="hold-sell" />'
-        f'<text x="{x:.2f}" y="{y + 4:.2f}" text-anchor="middle" class="signal-letter">S</text>'
-        f'<title>Holding sell signal {html.escape(bar.date)} close {bar.close:.2f}</title></g>'
-        for x, y, bar in in_position_sell_signals
-    )
-
-    max_abs_pnl = max([abs(trade.pnl) for trade in trades] + [1])
-    bar_pad_left = 72
-    bar_pad_right = 28
-    bar_pad_top = 24
-    bar_pad_bottom = 70
-    bar_plot_width = width - bar_pad_left - bar_pad_right
-    bar_mid = bar_pad_top + (pnl_height - bar_pad_top - bar_pad_bottom) / 2
-    bar_scale = (pnl_height - bar_pad_top - bar_pad_bottom) / 2 / max_abs_pnl
-    trade_gap = 6
-    trade_bar_width = (
-        max(10, (bar_plot_width - trade_gap * max(0, len(trades) - 1)) / max(1, len(trades)))
-    )
-    pnl_bars = []
-    for i, trade in enumerate(trades):
-        x = bar_pad_left + i * (trade_bar_width + trade_gap)
-        h = abs(trade.pnl) * bar_scale
-        y = bar_mid - h if trade.pnl >= 0 else bar_mid
-        klass = "pnl-pos" if trade.pnl >= 0 else "pnl-neg"
-        pnl_bars.append(
-            f'<g><rect x="{x:.2f}" y="{y:.2f}" width="{trade_bar_width:.2f}" height="{h:.2f}" class="{klass}" />'
-            f'<title>{html.escape(trade.entry_date)} -> {html.escape(trade.exit_date)}: {trade.pnl:.2f}</title>'
-            f'<text x="{x + trade_bar_width / 2:.2f}" y="{pnl_height - 38}" text-anchor="middle" class="trade-label">{i + 1}</text></g>'
-        )
+    benchmark_html = ""
+    if benchmark and benchmark.get("curve"):
+        benchmark_symbol = html.escape(str(benchmark.get("symbol", "Benchmark")))
+        benchmark_return = float(benchmark.get("return_pct", 0.0))
+        strategy_curve = [[row["date"], float(row["equity"])] for row in equity_curve]
+        benchmark_curve = [[day, value] for day, value in benchmark["curve"]]
+        benchmark_payload = {
+            "strategy": strategy_curve,
+            "benchmark": benchmark_curve,
+            "benchmarkSymbol": benchmark_symbol,
+        }
+        benchmark_html = f"""
+<h2>{labels['strategy_vs']} {benchmark_symbol}</h2>
+<section class="panel">
+  <div class="compare-note">{labels['strategy_return']} {summary['return_pct']:.2f}% / {benchmark_symbol} {labels['benchmark_return']} {benchmark_return:.2f}%</div>
+  <div id="compare-chart" class="chart compare-chart"></div>
+</section>
+<script type="application/json" id="benchmark-data">{json.dumps(benchmark_payload, ensure_ascii=False)}</script>
+"""
 
     cards = [
-        ("净利润", f"{summary['net_profit']:.2f}"),
-        ("收益率", f"{summary['return_pct']:.2f}%"),
-        ("最大回撤", f"{summary['max_drawdown_pct']:.2f}%"),
-        ("交易次数", f"{summary['trades']}"),
-        ("胜率", f"{summary['win_rate_pct']:.2f}%"),
-        ("盈亏因子", f"{summary['profit_factor']:.2f}"),
+        (labels["net_profit"], f"{summary['net_profit']:.2f}"),
+        (labels["return_pct"], f"{summary['return_pct']:.2f}%"),
+        (labels["max_drawdown"], f"{summary['max_drawdown_pct']:.2f}%"),
+        (labels["trades"], f"{summary['trades']}"),
+        (labels["win_rate"], f"{summary['win_rate_pct']:.2f}%"),
+        (labels["profit_factor"], f"{summary['profit_factor']:.2f}"),
     ]
     card_html = "\n".join(
-        f'<section class="metric"><span>{label}</span><strong>{value}</strong></section>'
+        f'<section class="metric"><span>{html.escape(label)}</span><strong>{value}</strong></section>'
         for label, value in cards
     )
+
     initial_cash_value = summary["final_equity"] - summary["net_profit"]
     overview_rows = [
-        ("初始资金", f"{initial_cash_value:.2f}"),
-        ("期末权益", f"{summary['final_equity']:.2f}"),
-        ("总盈利", f"{summary['gross_profit']:.2f}"),
-        ("总亏损", f"-{summary['gross_loss']:.2f}"),
-        ("平均每笔", f"{summary['avg_trade']:.2f}"),
-        ("平均持仓K线", f"{summary['avg_bars_held']:.1f}"),
+        (labels["initial_cash"], f"{initial_cash_value:.2f}"),
+        (labels["final_equity"], f"{summary['final_equity']:.2f}"),
+        (labels["gross_profit"], f"{summary['gross_profit']:.2f}"),
+        (labels["gross_loss"], f"-{summary['gross_loss']:.2f}"),
+        (labels["avg_trade"], f"{summary['avg_trade']:.2f}"),
+        (labels["avg_bars"], f"{summary['avg_bars_held']:.1f}"),
     ]
     analysis_rows = [
-        ("盈利次数", f"{summary['wins']}"),
-        ("亏损次数", f"{summary['losses']}"),
-        ("平均盈利", f"{summary['avg_win']:.2f}"),
-        ("平均亏损", f"{summary['avg_loss']:.2f}"),
-        ("最佳交易", f"{summary['best_trade']:.2f}"),
-        ("最差交易", f"{summary['worst_trade']:.2f}"),
-        ("平均最大浮盈", f"{summary['avg_max_favorable_pct']:.2f}%"),
-        ("平均交易回撤", f"{summary['avg_trade_drawdown_pct']:.2f}%"),
+        (labels["wins"], f"{summary['wins']}"),
+        (labels["losses"], f"{summary['losses']}"),
+        (labels["avg_win"], f"{summary['avg_win']:.2f}"),
+        (labels["avg_loss"], f"{summary['avg_loss']:.2f}"),
+        (labels["best_trade"], f"{summary['best_trade']:.2f}"),
+        (labels["worst_trade"], f"{summary['worst_trade']:.2f}"),
+        (labels["avg_mfe"], f"{summary['avg_max_favorable_pct']:.2f}%"),
+        (labels["avg_dd"], f"{summary['avg_trade_drawdown_pct']:.2f}%"),
     ]
-    stat_tables = "".join(
-        f"<tr><td>{html.escape(label)}</td><td>{value}</td></tr>"
-        for label, value in overview_rows
-    )
-    analysis_tables = "".join(
-        f"<tr><td>{html.escape(label)}</td><td>{value}</td></tr>"
-        for label, value in analysis_rows
-    )
+    stat_tables = "".join(f"<tr><td>{html.escape(label)}</td><td>{value}</td></tr>" for label, value in overview_rows)
+    analysis_tables = "".join(f"<tr><td>{html.escape(label)}</td><td>{value}</td></tr>" for label, value in analysis_rows)
 
     trade_rows = "\n".join(
         "<tr>"
         f"<td>{i}</td>"
         f"<td>{html.escape(trade.entry_signal_date)}</td>"
-        f"<td>{trade.entry_signal_close:.2f}</td>"
         f"<td>{html.escape(trade.entry_date)}</td>"
+        f"<td>{trade.entry_signal_close:.2f}</td>"
         f"<td>{trade.entry_price:.2f}</td>"
         f"<td>{trade.entry_gap_pct:.2f}%</td>"
         f"<td>{html.escape(trade.exit_signal_date)}</td>"
-        f"<td>{trade.exit_signal_close:.2f}</td>"
         f"<td>{html.escape(trade.exit_date)}</td>"
+        f"<td>{trade.exit_signal_close:.2f}</td>"
         f"<td>{trade.exit_price:.2f}</td>"
         f"<td>{trade.exit_gap_pct:.2f}%</td>"
+        f"<td>{trade.bars_held}</td>"
         f"<td>{trade.shares}</td>"
+        f"<td>{trade.entry_price * trade.shares:.2f}</td>"
+        f"<td>{trade.exit_price * trade.shares:.2f}</td>"
         f"<td class=\"{'pos' if trade.pnl >= 0 else 'neg'}\">{trade.pnl:.2f}</td>"
         f"<td class=\"{'pos' if trade.pnl_pct >= 0 else 'neg'}\">{trade.pnl_pct:.2f}%</td>"
         f"<td>{trade.max_favorable_pct:.2f}%</td>"
@@ -856,113 +880,60 @@ def make_report(
         for i, trade in enumerate(trades, 1)
     )
     if not trade_rows:
-        trade_rows = '<tr><td colspan="17" class="empty">No closed trades in this range.</td></tr>'
+        trade_rows = f'<tr><td colspan="20" class="empty">{labels["empty_trades"]}</td></tr>'
 
-    benchmark_html = ""
-    if benchmark and benchmark.get("curve"):
-        compare_pad_left = 72
-        compare_pad_right = 28
-        compare_pad_top = 26
-        compare_pad_bottom = 54
-        compare_plot_width = width - compare_pad_left - compare_pad_right
-        compare_plot_height = compare_height - compare_pad_top - compare_pad_bottom
-        strategy_points = [
-            (row["date"], float(row["equity"]))
-            for row in equity_curve
-        ]
-        benchmark_points = benchmark["curve"]
-        all_values = [value for _, value in strategy_points] + [value for _, value in benchmark_points]
-        compare_low = min(all_values)
-        compare_high = max(all_values)
-        compare_padding = (compare_high - compare_low) * 0.08 or 1
-        compare_low -= compare_padding
-        compare_high += compare_padding
-
-        def compare_x(index: int, total: int) -> float:
-            if total <= 1:
-                return compare_pad_left + compare_plot_width / 2
-            return compare_pad_left + index / (total - 1) * compare_plot_width
-
-        def compare_y(value: float) -> float:
-            return compare_pad_top + (compare_high - value) / (compare_high - compare_low) * compare_plot_height
-
-        strategy_compare = [
-            (compare_x(i, len(strategy_points)), compare_y(value))
-            for i, (_, value) in enumerate(strategy_points)
-        ]
-        benchmark_compare = [
-            (compare_x(i, len(benchmark_points)), compare_y(value))
-            for i, (_, value) in enumerate(benchmark_points)
-        ]
-        compare_grid = []
-        for step in range(5):
-            y = compare_pad_top + step / 4 * compare_plot_height
-            value = compare_high - step / 4 * (compare_high - compare_low)
-            compare_grid.append(
-                f'<line x1="{compare_pad_left}" y1="{y:.2f}" x2="{width - compare_pad_right}" y2="{y:.2f}" class="grid" />'
-                f'<text x="16" y="{y + 4:.2f}" class="axis">{value:.0f}</text>'
-            )
-        benchmark_symbol = html.escape(str(benchmark.get("symbol", "Benchmark")))
-        benchmark_return = float(benchmark.get("return_pct", 0.0))
-        benchmark_html = f"""
-<h2>策略 vs {benchmark_symbol}</h2>
-<section class="panel">
-<div class="compare-note">策略收益率 {summary['return_pct']:.2f}% / {benchmark_symbol} 同期收益率 {benchmark_return:.2f}%</div>
-<svg viewBox="0 0 {width} {compare_height}" role="img">
-{''.join(compare_grid)}
-<line x1="{compare_pad_left}" y1="{compare_height - compare_pad_bottom}" x2="{width - compare_pad_right}" y2="{compare_height - compare_pad_bottom}" class="grid" />
-{svg_polyline(strategy_compare, "#2563eb", 2)}
-{svg_polyline(benchmark_compare, "#7c3aed", 2)}
-<line x1="{width - 270}" y1="24" x2="{width - 232}" y2="24" stroke="#2563eb" stroke-width="3" /><text x="{width - 224}" y="28" class="legend">Strategy</text>
-<line x1="{width - 142}" y1="24" x2="{width - 104}" y2="24" stroke="#7c3aed" stroke-width="3" /><text x="{width - 96}" y="28" class="legend">{benchmark_symbol}</text>
-</svg>
-</section>
-"""
+    pnl_payload = {
+        "labels": [str(i) for i in range(1, len(trades) + 1)],
+        "pnl": [trade.pnl for trade in trades],
+        "text": [
+            f"#{i}<br>{trade.entry_date} -> {trade.exit_date}<br>{labels['pnl_amount']}: {trade.pnl:.2f}<br>{labels['return_pct']}: {trade.pnl_pct:.2f}%"
+            for i, trade in enumerate(trades, 1)
+        ],
+    }
 
     report = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
 <title>{html.escape(title)}</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
-body {{ margin: 0; background: #f4f6f8; color: #1f2933; font-family: Arial, "Microsoft YaHei", sans-serif; }}
-main {{ max-width: 1240px; margin: 0 auto; padding: 28px; }}
-h1 {{ margin: 0 0 18px; font-size: 26px; font-weight: 700; }}
-h2 {{ margin: 28px 0 12px; font-size: 18px; }}
-.metrics {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin-bottom: 18px; }}
-.metric {{ background: #fff; border: 1px solid #dde3ea; border-radius: 8px; padding: 12px; }}
-.metric span {{ display: block; color: #607080; font-size: 12px; margin-bottom: 6px; }}
+* {{ box-sizing: border-box; }}
+body {{ margin: 0; background: #f0f3f7; color: #131722; font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", Arial, sans-serif; }}
+main {{ max-width: 1360px; margin: 0 auto; padding: 22px; }}
+h1 {{ margin: 0 0 16px; font-size: 24px; font-weight: 800; }}
+h2 {{ margin: 24px 0 10px; font-size: 17px; }}
+.metrics {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin-bottom: 14px; }}
+.metric {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 10px 12px; }}
+.metric span {{ display: block; color: #6b7280; font-size: 11px; font-weight: 800; text-transform: uppercase; margin-bottom: 6px; }}
 .metric strong {{ font-size: 18px; }}
-.tester {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-bottom: 18px; }}
+.tester {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 14px; }}
 .tester table {{ margin: 0; }}
-.tester caption {{ text-align: left; padding: 12px; font-weight: 700; background: #f8fafc; border-bottom: 1px solid #edf1f5; }}
-.panel {{ background: #fff; border: 1px solid #dde3ea; border-radius: 8px; padding: 12px; margin-bottom: 18px; overflow-x: auto; }}
+.tester caption {{ text-align: left; padding: 10px 12px; font-weight: 800; background: #f5f7fa; border-bottom: 1px solid #eef1f5; }}
+.panel {{ position: relative; background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 10px; margin-bottom: 14px; overflow: hidden; }}
+.chart-shell {{ position: relative; height: 660px; min-width: 760px; }}
+.chart-toolbar {{ position: absolute; top: 12px; left: 12px; z-index: 5; display: flex; gap: 8px; align-items: center; }}
+.chart-toolbar button {{ border: 1px solid #d6dbe3; background: rgba(255,255,255,0.92); color: #131722; border-radius: 4px; height: 28px; padding: 0 10px; font-weight: 700; cursor: pointer; }}
+.chart-toolbar span {{ color: #64748b; font-size: 12px; background: rgba(255,255,255,0.86); padding: 5px 8px; border-radius: 4px; }}
+.tv-chart {{ width: 100%; height: 100%; }}
+.chart-tooltip {{ position: absolute; z-index: 6; display: none; min-width: 220px; pointer-events: none; border: 1px solid #d6dbe3; background: rgba(255,255,255,0.96); border-radius: 6px; box-shadow: 0 8px 22px rgba(15,23,42,0.12); padding: 8px 10px; font-size: 12px; line-height: 1.6; }}
+.chart-tooltip strong {{ display: block; margin-bottom: 4px; font-size: 13px; }}
+.chart-tooltip .up {{ color: #089981; }}
+.chart-tooltip .down {{ color: #f23645; }}
+.chart {{ width: 100%; min-height: 360px; }}
+.compare-chart {{ min-height: 360px; }}
+.pnl-chart {{ min-height: 320px; }}
 .compare-note {{ font-size: 13px; color: #475569; margin: 0 0 8px; }}
-svg {{ display: block; width: 100%; height: auto; }}
-.grid {{ stroke: #e7ecf1; stroke-width: 1; }}
-.axis {{ fill: #607080; font-size: 12px; }}
-.close-line {{ stroke: #2563eb; }}
-.ma-line {{ stroke: #f59e0b; }}
-.candle-up {{ fill: rgba(22, 163, 74, .28); stroke: #16a34a; stroke-width: 1; }}
-.candle-down {{ fill: rgba(220, 38, 38, .25); stroke: #dc2626; stroke-width: 1; }}
-.buy {{ fill: #16a34a; stroke: #ffffff; stroke-width: 2; }}
-.sell {{ fill: #dc2626; stroke: #ffffff; stroke-width: 2; }}
-.hold-buy {{ fill: #84cc16; stroke: #365314; stroke-width: 1.5; }}
-.hold-sell {{ fill: #f97316; stroke: #7c2d12; stroke-width: 1.5; }}
-.signal-letter {{ fill: #ffffff; font-size: 11px; font-weight: 700; pointer-events: none; }}
-.legend {{ fill: #334155; font-size: 13px; }}
-.pnl-pos {{ fill: #16a34a; }}
-.pnl-neg {{ fill: #dc2626; }}
-.trade-label {{ fill: #607080; font-size: 11px; }}
-table {{ width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #dde3ea; border-radius: 8px; overflow: hidden; }}
-th, td {{ padding: 10px 12px; border-bottom: 1px solid #edf1f5; text-align: right; font-size: 13px; }}
-th {{ background: #f8fafc; color: #475569; }}
-th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(4), td:nth-child(4) {{ text-align: left; }}
-.pos {{ color: #15803d; }}
-.neg {{ color: #b91c1c; }}
+.table-wrap {{ width: 100%; overflow: auto; border: 1px solid #d6dbe3; border-radius: 6px; background: #fff; }}
+table {{ width: 100%; border-collapse: separate; border-spacing: 0; background: #fff; }}
+th, td {{ padding: 8px 10px; border-bottom: 1px solid #eef1f5; text-align: right; font-size: 12px; white-space: nowrap; }}
+th {{ position: sticky; top: 0; background: #f5f7fa; color: #5d6675; font-size: 11px; font-weight: 800; text-transform: uppercase; z-index: 1; }}
+th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3), th:nth-child(7), td:nth-child(7), th:nth-child(8), td:nth-child(8), th:last-child, td:last-child {{ text-align: left; }}
+.pos {{ color: #089981; }}
+.neg {{ color: #f23645; }}
 .empty {{ text-align: center; color: #607080; }}
-@media (max-width: 900px) {{ .metrics {{ grid-template-columns: repeat(2, 1fr); }} main {{ padding: 16px; }} }}
-@media (max-width: 900px) {{ .tester {{ grid-template-columns: 1fr; }} }}
+@media (max-width: 900px) {{ main {{ padding: 12px; }} .metrics {{ grid-template-columns: repeat(2, 1fr); }} .tester {{ grid-template-columns: 1fr; }} .chart-shell {{ min-width: 0; height: 560px; }} .chart-toolbar span {{ display: none; }} }}
 </style>
 </head>
 <body>
@@ -970,51 +941,103 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(4
 <h1>{html.escape(title)}</h1>
 <div class="metrics">{card_html}</div>
 <section class="tester">
-<table><caption>Overview</caption><tbody>{stat_tables}</tbody></table>
-<table><caption>Trade Analysis</caption><tbody>{analysis_tables}</tbody></table>
+<table><caption>{labels['overview']}</caption><tbody>{stat_tables}</tbody></table>
+<table><caption>{labels['trade_analysis']}</caption><tbody>{analysis_tables}</tbody></table>
 </section>
 {benchmark_html}
-<h2>价格、5日线与买卖点</h2>
+<h2>{labels['main_chart']}</h2>
 <section class="panel">
-<svg viewBox="0 0 {width} {price_height}" role="img">
-{''.join(grid_lines)}
-{''.join(date_ticks)}
-<line x1="{pad_left}" y1="{pad_top}" x2="{pad_left}" y2="{price_height - pad_bottom}" class="grid" />
-<line x1="{pad_left}" y1="{price_height - pad_bottom}" x2="{width - pad_right}" y2="{price_height - pad_bottom}" class="grid" />
-{''.join(candle_svg)}
-{svg_polyline(close_points, "#2563eb", 2)}
-{svg_polyline(ma_points, "#f59e0b", 2)}
-{buy_svg}
-{sell_svg}
-{in_position_buy_svg}
-{in_position_sell_svg}
-<circle cx="{width - 320}" cy="22" r="5" class="buy" /><text x="{width - 308}" y="26" class="legend">Buy</text>
-<circle cx="{width - 252}" cy="22" r="5" class="sell" /><text x="{width - 240}" y="26" class="legend">Sell</text>
-<circle cx="{width - 176}" cy="22" r="6" class="hold-buy" /><text x="{width - 176}" y="26" text-anchor="middle" class="signal-letter">B</text><text x="{width - 164}" y="26" class="legend">Hold B</text>
-<circle cx="{width - 92}" cy="22" r="6" class="hold-sell" /><text x="{width - 92}" y="26" text-anchor="middle" class="signal-letter">S</text><text x="{width - 80}" y="26" class="legend">Signal S</text>
-<line x1="{width - 320}" y1="44" x2="{width - 284}" y2="44" class="close-line" stroke-width="3" /><text x="{width - 276}" y="48" class="legend">Close</text>
-<line x1="{width - 220}" y1="44" x2="{width - 184}" y2="44" class="ma-line" stroke-width="3" /><text x="{width - 176}" y="48" class="legend">MA</text>
-</svg>
+  <div class="chart-shell">
+    <div class="chart-toolbar"><button id="fit-chart">{labels['reset_view']}</button><span>{labels['chart_hint']}</span></div>
+    <div id="price-chart" class="tv-chart"></div>
+    <div id="price-tooltip" class="chart-tooltip"></div>
+  </div>
 </section>
-<h2>每笔交易收益金额</h2>
-<section class="panel">
-<svg viewBox="0 0 {width} {pnl_height}" role="img">
-<line x1="{bar_pad_left}" y1="{bar_mid:.2f}" x2="{width - bar_pad_right}" y2="{bar_mid:.2f}" class="grid" />
-<text x="16" y="{bar_mid + 4:.2f}" class="axis">0</text>
-{''.join(pnl_bars)}
-</svg>
-</section>
-<h2>交易明细</h2>
+<h2>{labels['pnl_chart']}</h2>
+<section class="panel"><div id="pnl-chart" class="chart pnl-chart"></div></section>
+<h2>{labels['trade_detail']}</h2>
+<div class="table-wrap">
 <table>
-<thead><tr><th>#</th><th>买入日</th><th>买入价</th><th>卖出日</th><th>卖出价</th><th>股数</th><th>收益金额</th><th>收益率</th></tr></thead>
+<thead><tr><th>#</th><th>{labels['buy_signal_date']}</th><th>{labels['buy_action_date']}</th><th>{labels['buy_signal_close']}</th><th>{labels['buy_fill']}</th><th>{labels['buy_gap']}</th><th>{labels['sell_signal_date']}</th><th>{labels['sell_action_date']}</th><th>{labels['sell_signal_close']}</th><th>{labels['sell_fill']}</th><th>{labels['sell_gap']}</th><th>{labels['bars_held']}</th><th>{labels['shares']}</th><th>{labels['entry_value']}</th><th>{labels['exit_value']}</th><th>{labels['pnl_amount']}</th><th>{labels['return_pct']}</th><th>{labels['max_favorable']}</th><th>{labels['max_drawdown']}</th><th>{labels['exit_reason']}</th></tr></thead>
 <tbody>{trade_rows}</tbody>
 </table>
+</div>
 </main>
+<script type="application/json" id="chart-data">{json.dumps(chart_payload, ensure_ascii=False)}</script>
+<script type="application/json" id="pnl-data">{json.dumps(pnl_payload, ensure_ascii=False)}</script>
+<script>
+const chartData = JSON.parse(document.getElementById('chart-data').textContent);
+const chartLabels = chartData.labels;
+const chartElement = document.getElementById('price-chart');
+const tooltip = document.getElementById('price-tooltip');
+const priceChart = LightweightCharts.createChart(chartElement, {{
+  layout: {{ background: {{ type: 'solid', color: '#ffffff' }}, textColor: '#131722', fontFamily: 'Inter, Microsoft YaHei UI, PingFang SC, Arial, sans-serif' }},
+  width: chartElement.clientWidth,
+  height: chartElement.clientHeight,
+  rightPriceScale: {{ borderColor: '#d6dbe3', scaleMargins: {{ top: 0.08, bottom: 0.28 }} }},
+  timeScale: {{ borderColor: '#d6dbe3', timeVisible: false, secondsVisible: false, rightOffset: 6, barSpacing: 8, minBarSpacing: 3, fixLeftEdge: false, fixRightEdge: false }},
+  grid: {{ vertLines: {{ color: '#f1f3f6' }}, horzLines: {{ color: '#f1f3f6' }} }},
+  crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal, vertLine: {{ color: '#9ca3af', width: 1, style: LightweightCharts.LineStyle.Dashed, labelBackgroundColor: '#2962ff' }}, horzLine: {{ color: '#9ca3af', width: 1, style: LightweightCharts.LineStyle.Dashed, labelBackgroundColor: '#2962ff' }} }},
+  handleScroll: {{ mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false }},
+  handleScale: {{ axisPressedMouseMove: true, mouseWheel: true, pinch: true }},
+}});
+const candleSeries = priceChart.addCandlestickSeries({{
+  upColor: '#089981', downColor: '#f23645', borderUpColor: '#089981', borderDownColor: '#f23645', wickUpColor: '#089981', wickDownColor: '#f23645', priceLineVisible: false,
+}});
+candleSeries.setData(chartData.ohlc);
+candleSeries.priceScale().applyOptions({{ scaleMargins: {{ top: 0.08, bottom: 0.28 }} }});
+const maSeries = priceChart.addLineSeries({{ color: '#f5a623', lineWidth: 2, title: '5MA', priceLineVisible: false }});
+maSeries.setData(chartData.ma);
+const stopSeries = priceChart.addLineSeries({{ color: '#f97316', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: chartLabels.dynamic_stop, priceLineVisible: false }});
+stopSeries.setData(chartData.dynamicStop);
+const volumeSeries = priceChart.addHistogramSeries({{ color: 'rgba(41,98,255,0.25)', priceFormat: {{ type: 'volume' }}, priceScaleId: '', priceLineVisible: false, lastValueVisible: false }});
+volumeSeries.setData(chartData.volume);
+priceChart.priceScale('').applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
+const volMaSeries = priceChart.addLineSeries({{ color: '#2962ff', lineWidth: 1, priceScaleId: '', title: chartLabels.volume_ma, priceLineVisible: false, lastValueVisible: false }});
+volMaSeries.setData(chartData.volMa);
+const markerData = [...chartData.entryMarkers, ...chartData.exitMarkers, ...chartData.holdBuyMarkers, ...chartData.holdSellMarkers].sort((a, b) => a.time.localeCompare(b.time));
+candleSeries.setMarkers(markerData);
+const rowByTime = new Map(chartData.rows.map(row => [row.time, row]));
+function formatNumber(value, digits = 2) {{ return value === null || value === undefined || Number.isNaN(value) ? '-' : Number(value).toLocaleString(undefined, {{ maximumFractionDigits: digits, minimumFractionDigits: digits }}); }}
+function formatVolume(value) {{ return value === null || value === undefined ? '-' : Number(value).toLocaleString(undefined, {{ maximumFractionDigits: 0 }}); }}
+priceChart.subscribeCrosshairMove(param => {{
+  if (!param.time || !param.point || param.point.x < 0 || param.point.y < 0 || param.point.x > chartElement.clientWidth || param.point.y > chartElement.clientHeight) {{ tooltip.style.display = 'none'; return; }}
+  const row = rowByTime.get(param.time);
+  if (!row) {{ tooltip.style.display = 'none'; return; }}
+  const up = row.close >= row.open;
+  tooltip.innerHTML = `<strong>${{row.time}}</strong>` +
+    `<div><span class="${{up ? 'up' : 'down'}}">${{chartLabels.open}} ${{formatNumber(row.open)}} &nbsp; ${{chartLabels.high}} ${{formatNumber(row.high)}} &nbsp; ${{chartLabels.low}} ${{formatNumber(row.low)}} &nbsp; ${{chartLabels.close}} ${{formatNumber(row.close)}}</span></div>` +
+    `<div>${{chartLabels.volume}} ${{formatVolume(row.volume)}} &nbsp; 5MA ${{formatNumber(row.ma)}} &nbsp; ${{chartLabels.dynamic_stop}} ${{formatNumber(row.dynamicStop)}}</div>`;
+  tooltip.style.display = 'block';
+  const left = Math.min(param.point.x + 16, chartElement.clientWidth - 250);
+  const top = Math.max(44, param.point.y - 72);
+  tooltip.style.left = `${{left}}px`;
+  tooltip.style.top = `${{top}}px`;
+}});
+new ResizeObserver(entries => {{
+  const rect = entries[0].contentRect;
+  priceChart.applyOptions({{ width: Math.floor(rect.width), height: Math.floor(rect.height) }});
+}}).observe(chartElement);
+document.getElementById('fit-chart').addEventListener('click', () => priceChart.timeScale().fitContent());
+priceChart.timeScale().fitContent();
+
+const chartConfig = {{ responsive: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d', 'select2d'] }};
+const pnlData = JSON.parse(document.getElementById('pnl-data').textContent);
+Plotly.newPlot('pnl-chart', [{{ type: 'bar', x: pnlData.labels, y: pnlData.pnl, text: pnlData.text, marker: {{ color: pnlData.pnl.map(v => v >= 0 ? '#089981' : '#f23645') }}, hovertemplate: '%{{text}}<extra></extra>' }}], {{ margin: {{ l: 64, r: 28, t: 20, b: 48 }}, paper_bgcolor: '#fff', plot_bgcolor: '#fff', xaxis: {{ title: chartLabels.trade_no }}, yaxis: {{ title: chartLabels.pnl_amount, zeroline: true, zerolinecolor: '#9ca3af', gridcolor: '#eef1f5' }}, font: {{ family: 'Inter, Microsoft YaHei UI, PingFang SC, Arial, sans-serif', size: 12, color: '#131722' }} }}, chartConfig);
+
+const benchmarkEl = document.getElementById('benchmark-data');
+if (benchmarkEl) {{
+  const b = JSON.parse(benchmarkEl.textContent);
+  Plotly.newPlot('compare-chart', [
+    {{ type: 'scatter', mode: 'lines', name: 'Strategy', x: b.strategy.map(p => p[0]), y: b.strategy.map(p => p[1]), line: {{ color: '#2962ff', width: 2 }} }},
+    {{ type: 'scatter', mode: 'lines', name: b.benchmarkSymbol, x: b.benchmark.map(p => p[0]), y: b.benchmark.map(p => p[1]), line: {{ color: '#7c3aed', width: 2 }} }},
+  ], {{ margin: {{ l: 64, r: 28, t: 20, b: 44 }}, hovermode: 'x unified', paper_bgcolor: '#fff', plot_bgcolor: '#fff', xaxis: {{ showgrid: true, gridcolor: '#eef1f5' }}, yaxis: {{ title: chartLabels.equity, showgrid: true, gridcolor: '#eef1f5' }}, legend: {{ orientation: 'h', x: 0, y: 1.08 }}, font: {{ family: 'Inter, Microsoft YaHei UI, PingFang SC, Arial, sans-serif', size: 12, color: '#131722' }} }}, chartConfig);
+}}
+</script>
 </body>
 </html>
 """
     path.write_text(report, encoding="utf-8")
-
 
 def print_summary(summary: dict[str, float | int]) -> None:
     print("========== 回测结果 ==========")
