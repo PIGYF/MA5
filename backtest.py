@@ -929,7 +929,7 @@ def make_report(
             f"<td>{float(open_position['entry_signal_close']):.2f}</td>"
             f"<td>{float(open_position['entry_price']):.2f}</td>"
             f"<td>{float(open_position['entry_gap_pct']):.2f}%</td>"
-            f"<td>{html.escape(str(open_position['mark_date']))}</td>"
+            "<td>未触发</td>"
             f"<td>未平仓</td>"
             f"<td>{float(open_position['mark_price']):.2f}</td>"
             f"<td>{float(open_position['mark_price']):.2f}</td>"
@@ -942,7 +942,7 @@ def make_report(
             f"<td class=\"{row_class}\">{float(open_position['pnl_pct']):.2f}%</td>"
             f"<td>{float(open_position['max_favorable_pct']):.2f}%</td>"
             f"<td>{float(open_position['max_drawdown_pct']):.2f}%</td>"
-            "<td>未平仓，按区间最后收盘价估值</td>"
+            f"<td>未平仓，按 {html.escape(str(open_position['mark_date']))} 收盘价估值</td>"
             "</tr>"
         )
     if not trade_rows:

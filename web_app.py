@@ -15,7 +15,21 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-from backtest import Bar, backtest, fetch_bars, make_report, open_position_snapshot, rolling_sma, summarize, write_equity, write_trades
+from backtest import (
+    Bar,
+    PRICE_CACHE_DIR,
+    PRICE_CACHE_MAX_BARS,
+    backtest,
+    fetch_bars,
+    make_report,
+    open_position_snapshot,
+    price_cache_path,
+    read_price_cache,
+    rolling_sma,
+    summarize,
+    write_equity,
+    write_trades,
+)
 from scan_next_b import SignalResult, latest_b_signal, load_symbols, unique_symbols, write_html
 
 
@@ -24,6 +38,7 @@ DATA_DIR = Path(os.environ.get("MA5_DATA_DIR", ROOT / "data")).expanduser().reso
 REPORT_DIR = Path(os.environ.get("MA5_REPORT_DIR", ROOT / "reports")).expanduser().resolve()
 SCAN_DIR = DATA_DIR / "scans"
 LATEST_SCAN_PATH = SCAN_DIR / "latest.json"
+WATCHLIST_PATH = DATA_DIR / "watchlist.json"
 DEFAULT_BENCHMARK = "^IXIC"
 SCAN_JOBS: dict[str, dict[str, object]] = {}
 SCAN_JOBS_LOCK = threading.Lock()
@@ -166,10 +181,159 @@ def build_benchmark(symbol: str, start: str, end: str, initial_cash: float) -> d
     }
 
 
+def watchlist_default_payload() -> dict[str, object]:
+    return {"items": []}
+
+
+def load_watchlist_items() -> list[dict[str, str]]:
+    if not WATCHLIST_PATH.exists():
+        return []
+    try:
+        payload = json.loads(WATCHLIST_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    raw_items = payload.get("items")
+    if raw_items is None:
+        raw_items = [{"symbol": symbol} for symbol in payload.get("symbols", [])]
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in raw_items:
+        if isinstance(raw, str):
+            raw = {"symbol": raw}
+        if not isinstance(raw, dict):
+            continue
+        symbol = normalize_yahoo_symbol(str(raw.get("symbol", "")))
+        if not symbol:
+            continue
+        symbol = symbol.upper()
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        items.append(
+            {
+                "symbol": symbol,
+                "group": str(raw.get("group", "") or "观察"),
+                "note": str(raw.get("note", "") or ""),
+                "added_at": str(raw.get("added_at", "") or ""),
+            }
+        )
+    return items
+
+
+def load_watchlist() -> list[str]:
+    return [item["symbol"] for item in load_watchlist_items()]
+
+
+def save_watchlist_items(items: list[dict[str, str]]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    payload = watchlist_default_payload()
+    clean_items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in items:
+        symbol = normalize_yahoo_symbol(str(item.get("symbol", "")))
+        if not symbol:
+            continue
+        symbol = symbol.upper()
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        clean_items.append(
+            {
+                "symbol": symbol,
+                "group": str(item.get("group", "") or "观察").strip()[:40],
+                "note": str(item.get("note", "") or "").strip()[:240],
+                "added_at": str(item.get("added_at", "") or time.strftime("%Y-%m-%d %H:%M:%S")),
+            }
+        )
+    payload["items"] = clean_items
+    payload["symbols"] = [item["symbol"] for item in clean_items]
+    payload["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    WATCHLIST_PATH.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+
+
+def save_watchlist(symbols: list[str]) -> None:
+    save_watchlist_items([{"symbol": symbol} for symbol in symbols])
+
+
+def add_watchlist_symbol(symbol: str, group: str = "观察", note: str = "") -> list[str]:
+    clean = normalize_yahoo_symbol(symbol)
+    if not clean:
+        raise ValueError("请输入股票代码。")
+    clean = clean.upper()
+    items = load_watchlist_items()
+    for item in items:
+        if item["symbol"] == clean:
+            if group:
+                item["group"] = group.strip()[:40]
+            if note:
+                item["note"] = note.strip()[:240]
+            save_watchlist_items(items)
+            return [row["symbol"] for row in items]
+    items.append({"symbol": clean, "group": group or "观察", "note": note, "added_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+    save_watchlist_items(items)
+    return [row["symbol"] for row in items]
+
+
+def delete_watchlist_symbol(symbol: str) -> list[str]:
+    clean = normalize_yahoo_symbol(symbol)
+    if not clean:
+        return load_watchlist()
+    clean = clean.upper()
+    items = [item for item in load_watchlist_items() if item["symbol"].upper() != clean]
+    save_watchlist_items(items)
+    return [item["symbol"] for item in items]
+
+
+def update_watchlist_symbol(symbol: str, group: str, note: str) -> list[str]:
+    clean = normalize_yahoo_symbol(symbol)
+    if not clean:
+        raise ValueError("缺少股票代码。")
+    clean = clean.upper()
+    items = load_watchlist_items()
+    for item in items:
+        if item["symbol"] == clean:
+            item["group"] = group.strip()[:40] or "观察"
+            item["note"] = note.strip()[:240]
+            save_watchlist_items(items)
+            return [row["symbol"] for row in items]
+    raise ValueError(f"{clean} 不在自选池中。")
+
+
+def chart_start_for_preset(preset: str, end: date) -> date:
+    return {
+        "1m": end - timedelta(days=30),
+        "3m": end - timedelta(days=90),
+        "6m": end - timedelta(days=183),
+        "1y": end - timedelta(days=365),
+        "3y": end - timedelta(days=365 * 3),
+        "5y": end - timedelta(days=365 * 5),
+    }.get(preset, end - timedelta(days=365))
+
+
+def price_cache_summary(symbols: list[str]) -> dict[str, object]:
+    files = list(PRICE_CACHE_DIR.glob("*.csv")) if PRICE_CACHE_DIR.exists() else []
+    total_size = sum(path.stat().st_size for path in files if path.exists())
+    cached_symbols = 0
+    latest_dates: list[str] = []
+    for symbol in symbols:
+        bars = read_price_cache(symbol)
+        if bars:
+            cached_symbols += 1
+            latest_dates.append(max(bar.date for bar in bars))
+    return {
+        "files": len(files),
+        "size_mb": total_size / 1_000_000,
+        "cached_symbols": cached_symbols,
+        "latest": max(latest_dates) if latest_dates else "-",
+        "max_bars": PRICE_CACHE_MAX_BARS,
+    }
+
+
 def page_shell(content: str, active: str = "backtest") -> bytes:
     backtest_active = " active" if active == "backtest" else ""
     scanner_active = " active" if active == "scanner" else ""
     batch_active = " active" if active == "batch" else ""
+    watchlist_active = " active" if active == "watchlist" else ""
     text = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -222,6 +386,8 @@ button.danger {{ background: #f23645; border-color: #f23645; }}
 .delete-form {{ display: inline; margin: 0; }}
 .delete-link {{ border: 0; background: transparent; color: #f23645; min-height: 0; padding: 0; font-size: 13px; font-weight: 800; cursor: pointer; }}
 .delete-link:hover {{ text-decoration: underline; filter: none; }}
+.mini-action {{ min-height: 24px; padding: 3px 7px; font-size: 12px; border-color: #c7ccd5; background: #fff; color: #2962ff; }}
+.mini-action.added {{ color: #089981; border-color: #9fd8cc; background: rgba(8,153,129,.08); }}
 .rating {{ display: inline-block; min-width: 64px; text-align: center; border-radius: 4px; padding: 3px 8px; font-weight: 800; font-size: 12px; }}
 .rating-Strong {{ color: #067a6b; background: rgba(8, 153, 129, .12); }}
 .rating-Medium {{ color: #b26b00; background: rgba(245, 158, 11, .16); }}
@@ -230,6 +396,22 @@ button.danger {{ background: #f23645; border-color: #f23645; }}
 .result {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; margin-top: 14px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
 .candidate-detail {{ margin-top: 14px; }}
 .candidate-detail iframe {{ height: 980px; }}
+.watchlist-grid {{ display: grid; grid-template-columns: minmax(360px, 520px) 1fr; gap: 14px; align-items: start; }}
+.watchlist-panel {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
+.watchlist-chart-shell {{ position: relative; height: 680px; min-width: 520px; }}
+.watchlist-chart {{ width: 100%; height: 100%; }}
+.table-input {{ min-width: 90px; margin: 0; padding: 5px 7px; font-size: 12px; }}
+.table-note {{ min-width: 220px; height: 34px; min-height: 34px; margin: 0; padding: 5px 7px; font-size: 12px; resize: horizontal; }}
+.watchlist-panel td form {{ display: inline-flex; gap: 6px; margin-right: 8px; vertical-align: middle; }}
+.watchlist-panel td button.secondary {{ min-height: 28px; padding: 4px 8px; font-size: 12px; }}
+.period-tabs {{ display: flex; gap: 4px; margin: 0 0 10px; flex-wrap: wrap; }}
+.period-tabs button {{ min-height: 28px; padding: 4px 9px; border-color: #c7ccd5; background: #fff; color: #334155; font-size: 12px; }}
+.period-tabs button.active {{ border-color: #2962ff; background: #2962ff; color: #fff; }}
+.watchlist-empty {{ color: #607080; padding: 18px 0; text-align: center; }}
+.chart-tooltip {{ position: absolute; z-index: 6; display: none; min-width: 220px; pointer-events: none; border: 1px solid #d6dbe3; background: rgba(255,255,255,0.96); border-radius: 6px; box-shadow: 0 8px 22px rgba(15,23,42,0.12); padding: 8px 10px; font-size: 12px; line-height: 1.6; }}
+.chart-tooltip strong {{ display: block; margin-bottom: 4px; font-size: 13px; }}
+.chart-tooltip .up {{ color: #089981; }}
+.chart-tooltip .down {{ color: #f23645; }}
 .progress-box {{ display: none; background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; margin-top: 14px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
 .progress-track {{ height: 8px; background: #e6eaf0; border-radius: 999px; overflow: hidden; margin: 8px 0; }}
 .progress-bar {{ height: 100%; width: 0%; background: #2962ff; transition: width .2s ease; }}
@@ -252,7 +434,7 @@ th.resizable {{ position: sticky; user-select: none; }}
 .col-resizer {{ position: absolute; top: 0; right: -3px; width: 6px; height: 100%; cursor: col-resize; z-index: 2; }}
 th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5), th:nth-child(6), td:nth-child(6), th:nth-child(7), td:nth-child(7) {{ text-align: left; }}
 .empty {{ text-align: center; color: #607080; }}
-@media (max-width: 1200px) {{ .form {{ grid-template-columns: repeat(4, 1fr); }} }}
+@media (max-width: 1200px) {{ .form {{ grid-template-columns: repeat(4, 1fr); }} .watchlist-grid {{ grid-template-columns: 1fr; }} .watchlist-chart-shell {{ min-width: 0; }} }}
 @media (max-width: 760px) {{ main {{ padding: 0 10px 18px; }} .app-topbar {{ margin: 0 -10px 12px; height: auto; padding: 10px; align-items: flex-start; flex-direction: column; }} .tabs {{ width: 100%; overflow-x: auto; }} .form, .status-strip {{ grid-template-columns: repeat(2, 1fr); }} .wide {{ grid-column: span 2; }} .page-head {{ display: block; }} }}
 </style>
 </head>
@@ -263,6 +445,7 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(4
     <a class="{backtest_active}" href="/">回测</a>
     <a class="{scanner_active}" href="/scanner">选股器</a>
     <a class="{batch_active}" href="/batch">批量回测</a>
+    <a class="{watchlist_active}" href="/watchlist">自选池</a>
   </nav>
 </header>
 {content}
@@ -387,7 +570,7 @@ def render_backtest_trade_table(trades, equity_curve) -> str:
             f"<td>{len(rows) + 1}</td>"
             f"<td>{html.escape(str(open_position['entry_signal_date']))}</td>"
             f"<td>{html.escape(str(open_position['entry_date']))}</td>"
-            f"<td>{html.escape(str(open_position['mark_date']))}</td>"
+            "<td>未触发</td>"
             "<td>未平仓</td>"
             f"<td>{float(open_position['entry_price']):.2f}</td>"
             f"<td>{float(open_position['mark_price']):.2f}</td>"
@@ -395,7 +578,7 @@ def render_backtest_trade_table(trades, equity_curve) -> str:
             f"<td>{int(open_position['bars_held'])}</td>"
             f"<td class=\"{pnl_class}\">{float(open_position['pnl']):.2f}</td>"
             f"<td class=\"{pnl_class}\">{float(open_position['pnl_pct']):.2f}%</td>"
-            "<td>未平仓，按区间最后收盘价估值</td>"
+            f"<td>未平仓，按 {html.escape(str(open_position['mark_date']))} 收盘价估值</td>"
             "</tr>"
         )
     if not rows:
@@ -1455,6 +1638,25 @@ stopScan.addEventListener("click", async () => {{
 }});
 
 document.addEventListener("click", async event => {{
+  const addButton = event.target.closest("[data-add-watchlist]");
+  if (addButton) {{
+    event.preventDefault();
+    const symbol = addButton.dataset.addWatchlist;
+    const note = addButton.dataset.watchNote || "";
+    addButton.disabled = true;
+    addButton.textContent = "添加中";
+    const params = new URLSearchParams({{ symbol, group: "候选", note }});
+    const res = await fetch(`/watchlist/add.json?${{params.toString()}}`);
+    const data = await res.json();
+    if (data.ok) {{
+      addButton.classList.add("added");
+      addButton.textContent = "已加入";
+    }} else {{
+      addButton.disabled = false;
+      addButton.textContent = data.error || "失败";
+    }}
+    return;
+  }}
   const button = event.target.closest("[data-candidate-symbol]");
   if (!button) return;
   event.preventDefault();
@@ -1515,6 +1717,7 @@ def render_candidate_table(rows: list[SignalResult]) -> str:
         f"<td>{r.market_cap / 1_000_000_000:.2f}</td>"
         f"<td>{r.second_stage_score_total}/20</td>"
         f'<td><span class="rating rating-{html.escape(r.second_stage_rating or "Pending")}">{html.escape(r.second_stage_rating or "Pending")}</span></td>'
+        f'<td><button type="button" class="mini-action" data-add-watchlist="{html.escape(r.symbol)}" data-watch-note="{html.escape((r.second_stage_rating or "") + " " + (r.catalyst_label or ""))}">加入自选</button></td>'
         f"<td>{html.escape(format_earnings(r))}</td>"
         f'<td>{r.catalyst_score}/5 {html.escape(r.catalyst_label or "Manual review")} <a href="{html.escape(r.catalyst_yahoo_url or yahoo_news_url(r.symbol))}" target="_blank">Yahoo</a> <a href="{html.escape(catalyst_secondary_url(r))}" target="_blank">雪球</a></td>'
         f"<td>{r.sector_score}/5 {html.escape(r.sector_label or '-')} ({r.sector_peer_count}/{r.industry_peer_count})</td>"
@@ -1527,11 +1730,11 @@ def render_candidate_table(rows: list[SignalResult]) -> str:
         for r in rows
     )
     if not table_rows:
-        table_rows = '<tr><td colspan="20" class="empty">No visible candidates.</td></tr>'
+        table_rows = '<tr><td colspan="21" class="empty">No visible candidates.</td></tr>'
     return f"""
 <div class="table-wrap">
 <table class="resizable-table">
-  <thead><tr><th>Symbol</th><th>Company</th><th>Mkt Cap $B</th><th>Total</th><th>Rating</th><th>Next Earnings</th><th>Catalyst</th><th>Sector Score</th><th>Space</th><th>Candle</th><th>Sector</th><th>Industry</th><th>Signal Date</th><th>Signal</th><th>Close</th><th>MA</th><th>Dist</th><th>Vol Ratio</th><th>Massive 7D</th><th>20D $Vol</th></tr></thead>
+  <thead><tr><th>Symbol</th><th>Company</th><th>Mkt Cap $B</th><th>Total</th><th>Rating</th><th>Watch</th><th>Next Earnings</th><th>Catalyst</th><th>Sector Score</th><th>Space</th><th>Candle</th><th>Sector</th><th>Industry</th><th>Signal Date</th><th>Signal</th><th>Close</th><th>MA</th><th>Dist</th><th>Vol Ratio</th><th>Massive 7D</th><th>20D $Vol</th></tr></thead>
   <tbody>{table_rows}</tbody>
 </table>
 </div>
@@ -1803,6 +2006,351 @@ def render_candidate_detail(params: dict[str, list[str]]) -> str:
 """
 
 
+def watchlist_metadata_by_symbol(symbols: list[str]) -> dict[str, dict[str, object]]:
+    if not symbols:
+        return {}
+    wanted = {symbol.upper() for symbol in symbols}
+    metadata: dict[str, dict[str, object]] = {}
+    try:
+        for row in fetch_nasdaq_screener_rows():
+            symbol = normalize_yahoo_symbol(str(row.get("symbol", "")))
+            if symbol and symbol.upper() in wanted:
+                metadata[symbol.upper()] = nasdaq_row_metadata(row)
+                if len(metadata) == len(wanted):
+                    break
+    except Exception:
+        pass
+    return metadata
+
+
+def watchlist_row(item: dict[str, str], metadata: dict[str, object] | None) -> str:
+    symbol = item["symbol"]
+    group = item.get("group", "观察")
+    note = item.get("note", "")
+    company = str((metadata or {}).get("company_name", "") or "-")
+    sector = str((metadata or {}).get("sector", "") or "-")
+    industry = str((metadata or {}).get("industry", "") or "-")
+    market_cap = float((metadata or {}).get("market_cap", 0) or 0)
+    latest_close = "-"
+    change_pct = "-"
+    dist_ma = "-"
+    vol_ratio = "-"
+    b_status = "-"
+    earnings = "未知"
+    try:
+        end = default_scan_end_date()
+        start = end - timedelta(days=90)
+        bars = fetch_bars("yfinance", symbol, start.isoformat(), end.isoformat(), "qfq", None)
+        if bars:
+            latest_close = f"{bars[-1].close:.2f}"
+            if len(bars) >= 2 and bars[-2].close:
+                change_pct = f"{(bars[-1].close / bars[-2].close - 1) * 100:.2f}%"
+            ma = rolling_sma([bar.close for bar in bars], 5)
+            vol_ma = rolling_sma([bar.volume for bar in bars], 20)
+            if ma[-1]:
+                dist_ma = f"{(bars[-1].close / ma[-1] - 1) * 100:.2f}%"
+            if vol_ma[-1]:
+                vol_ratio = f"{bars[-1].volume / vol_ma[-1]:.2f}x"
+            result = latest_b_signal(symbol, bars, 5, 20, 1.45, 4.5, 0, 0)
+            b_status = "B点" if result else "-"
+            temp = SignalResult(
+                symbol=symbol,
+                signal_date=bars[-1].date,
+                close=bars[-1].close,
+                ma=ma[-1] or 0,
+                dist_to_ma_pct=0,
+                volume=bars[-1].volume,
+                vol_ma=vol_ma[-1] or 0,
+                volume_ratio=bars[-1].volume / vol_ma[-1] if vol_ma[-1] else 0,
+                massive_count_7d=0,
+                signal_type="",
+                avg_dollar_volume_20d=0,
+                company_name=company if company != "-" else "",
+            )
+            enrich_earnings_dates([temp])
+            earnings = format_earnings(temp)
+    except Exception:
+        pass
+    cap_text = f"{market_cap / 1_000_000_000:.2f}" if market_cap else "-"
+    cache_bars = read_price_cache(symbol)
+    cache_text = f"{len(cache_bars)}根 / {max((bar.date for bar in cache_bars), default='-')}" if cache_bars else "未缓存"
+    form_id = f"watch-edit-{html.escape(symbol)}"
+    return (
+        "<tr>"
+        f'<td><button type="button" class="symbol-button" data-watch-symbol="{html.escape(symbol)}">{html.escape(symbol)}</button></td>'
+        f'<td><input class="table-input" form="{form_id}" name="group" value="{html.escape(group)}" title="分组"></td>'
+        f'<td><textarea class="table-note" form="{form_id}" name="note" title="备注">{html.escape(note)}</textarea></td>'
+        f"<td>{html.escape(company)}</td>"
+        f"<td>{cap_text}</td>"
+        f"<td>{html.escape(sector)}</td>"
+        f"<td>{html.escape(industry)}</td>"
+        f"<td>{latest_close}</td>"
+        f"<td>{change_pct}</td>"
+        f"<td>{dist_ma}</td>"
+        f"<td>{vol_ratio}</td>"
+        f"<td>{html.escape(earnings)}</td>"
+        f"<td>{b_status}</td>"
+        f"<td>{html.escape(cache_text)}</td>"
+        f'<td><form id="{form_id}" action="/watchlist/update" method="get"><input type="hidden" name="symbol" value="{html.escape(symbol)}"><button type="submit" class="secondary">保存</button></form><a class="delete-link" href="/watchlist/delete?symbol={quote(symbol)}" onclick="return confirm(\'确认从自选池删除 {html.escape(symbol)}？\');">删除</a></td>'
+        "</tr>"
+    )
+
+
+def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
+    params = params or {}
+    items = load_watchlist_items()
+    symbols = [item["symbol"] for item in items]
+    metadata = watchlist_metadata_by_symbol(symbols)
+    rows = "\n".join(watchlist_row(item, metadata.get(item["symbol"].upper())) for item in items)
+    if not rows:
+        rows = '<tr><td colspan="15" class="empty">暂无自选股。先在上方添加股票代码。</td></tr>'
+    default_symbol = symbols[0] if symbols else ""
+    cache = price_cache_summary(symbols)
+    return f"""
+<script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+<section class="page-head">
+  <div>
+    <h1>自选池</h1>
+    <p class="hint">维护你关注的股票。点击 Symbol 后在右侧查看可缩放、可拖动的日 K 图；图表数据通过 JSON 返回，不生成报告文件。</p>
+  </div>
+  <div class="mode-pill">Watchlist | Daily</div>
+</section>
+<form class="form" action="/watchlist/add" method="get">
+  <label>添加股票代码<input name="symbol" value="{html.escape(field(params, "symbol", ""))}" placeholder="NVDA"></label>
+  <label>分组<input name="group" value="{html.escape(field(params, "group", "观察"))}" placeholder="AI / 半导体 / 观察"></label>
+  <label class="wide">备注<input name="note" value="{html.escape(field(params, "note", ""))}" placeholder="关注原因、财报催化、阻力位等"></label>
+  <button type="submit">添加到自选</button>
+</form>
+<section class="status-strip">
+  <div class="stat-card"><div class="stat-label">自选数量</div><div class="stat-value">{len(symbols)}</div></div>
+  <div class="stat-card"><div class="stat-label">已缓存自选</div><div class="stat-value">{cache["cached_symbols"]}/{len(symbols)}</div></div>
+  <div class="stat-card"><div class="stat-label">缓存文件</div><div class="stat-value">{cache["files"]}</div></div>
+  <div class="stat-card"><div class="stat-label">缓存大小</div><div class="stat-value">{float(cache["size_mb"]):.1f} MB</div></div>
+</section>
+<p class="hint">日线缓存会自动增量刷新；每只股票最多保留约 {cache["max_bars"]} 根日 K，避免长期膨胀。当前自选缓存最新日期：{html.escape(str(cache["latest"]))}。</p>
+<section class="watchlist-grid">
+  <div class="watchlist-panel">
+    <div class="table-wrap">
+      <table class="resizable-table" id="watchlist-table">
+        <thead><tr><th>Symbol</th><th>Group</th><th>Note</th><th>Company</th><th>Mkt Cap $B</th><th>Sector</th><th>Industry</th><th>Close</th><th>Day %</th><th>Dist 5MA</th><th>Vol Ratio</th><th>Next Earnings</th><th>B Status</th><th>Cache</th><th>Action</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </div>
+  </div>
+  <div class="watchlist-panel">
+    <div class="toolbar">
+      <div>
+        <strong id="watch-chart-title">{html.escape(default_symbol) if default_symbol else "选择一个股票"}</strong>
+        <p class="hint" id="watch-chart-subtitle">周期可切换，数据为已完成日 K。</p>
+      </div>
+    </div>
+    <div class="period-tabs" id="watch-periods">
+      <button type="button" data-preset="1m">1M</button>
+      <button type="button" data-preset="3m">3M</button>
+      <button type="button" data-preset="6m">6M</button>
+      <button type="button" data-preset="1y" class="active">1Y</button>
+      <button type="button" data-preset="3y">3Y</button>
+      <button type="button" data-preset="5y">5Y</button>
+    </div>
+    <div class="watchlist-chart-shell">
+      <div id="watchlist-chart" class="watchlist-chart"></div>
+      <div id="watchlist-tooltip" class="chart-tooltip"></div>
+    </div>
+  </div>
+</section>
+<script>
+const watchInitialSymbol = {json.dumps(default_symbol)};
+let watchCurrentSymbol = watchInitialSymbol;
+let watchCurrentPreset = "1y";
+let watchChart = null;
+let watchSeries = {{}};
+const watchChartEl = document.getElementById("watchlist-chart");
+const watchTooltip = document.getElementById("watchlist-tooltip");
+const watchTitle = document.getElementById("watch-chart-title");
+const watchSubtitle = document.getElementById("watch-chart-subtitle");
+
+function destroyWatchChart() {{
+  if (watchChart) {{
+    watchChart.remove();
+    watchChart = null;
+    watchSeries = {{}};
+  }}
+}}
+
+function makeWatchChart(payload) {{
+  destroyWatchChart();
+  watchChart = LightweightCharts.createChart(watchChartEl, {{
+    layout: {{ background: {{ type: "solid", color: "#ffffff" }}, textColor: "#131722", fontFamily: "Inter, Microsoft YaHei UI, PingFang SC, Arial, sans-serif" }},
+    width: watchChartEl.clientWidth,
+    height: watchChartEl.clientHeight,
+    rightPriceScale: {{ borderColor: "#d6dbe3", scaleMargins: {{ top: 0.08, bottom: 0.28 }} }},
+    timeScale: {{ borderColor: "#d6dbe3", rightOffset: 6, barSpacing: 8, minBarSpacing: 3 }},
+    grid: {{ vertLines: {{ color: "#f1f3f6" }}, horzLines: {{ color: "#f1f3f6" }} }},
+    crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
+    handleScroll: {{ mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false }},
+    handleScale: {{ axisPressedMouseMove: true, mouseWheel: true, pinch: true }},
+  }});
+  const candle = watchChart.addCandlestickSeries({{
+    upColor: "#089981", downColor: "#f23645", borderUpColor: "#089981", borderDownColor: "#f23645", wickUpColor: "#089981", wickDownColor: "#f23645", priceLineVisible: false,
+  }});
+  candle.setData(payload.ohlc);
+  candle.priceScale().applyOptions({{ scaleMargins: {{ top: 0.08, bottom: 0.28 }} }});
+  const ma = watchChart.addLineSeries({{ color: "#f5a623", lineWidth: 2, title: "5MA", priceLineVisible: false }});
+  ma.setData(payload.ma);
+  const stop = watchChart.addLineSeries({{ color: "#f97316", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: "动态止损", priceLineVisible: false }});
+  stop.setData(payload.dynamicStop);
+  const volume = watchChart.addHistogramSeries({{ priceScaleId: "", priceFormat: {{ type: "volume" }}, priceLineVisible: false, lastValueVisible: false }});
+  volume.setData(payload.volume);
+  watchChart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
+  const volMa = watchChart.addLineSeries({{ color: "#2962ff", lineWidth: 1, priceScaleId: "", title: "成交量均线", priceLineVisible: false, lastValueVisible: false }});
+  volMa.setData(payload.volMa);
+  candle.setMarkers(payload.markers || []);
+  const rowByTime = new Map(payload.rows.map(row => [row.time, row]));
+  watchChart.subscribeCrosshairMove(param => {{
+    if (!param.time || !param.point || param.point.x < 0 || param.point.y < 0 || param.point.x > watchChartEl.clientWidth || param.point.y > watchChartEl.clientHeight) {{ watchTooltip.style.display = "none"; return; }}
+    const row = rowByTime.get(param.time);
+    if (!row) {{ watchTooltip.style.display = "none"; return; }}
+    const up = row.close >= row.open;
+    const f = value => value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }});
+    const fv = value => value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ maximumFractionDigits: 0 }});
+    watchTooltip.innerHTML = `<strong>${{row.time}}</strong><div><span class="${{up ? "up" : "down"}}">开 ${{f(row.open)}} 高 ${{f(row.high)}} 低 ${{f(row.low)}} 收 ${{f(row.close)}}</span></div><div>成交量 ${{fv(row.volume)}} &nbsp; 5MA ${{f(row.ma)}} &nbsp; 动态止损 ${{f(row.dynamicStop)}}</div>`;
+    watchTooltip.style.display = "block";
+    watchTooltip.style.left = Math.min(param.point.x + 16, watchChartEl.clientWidth - 250) + "px";
+    watchTooltip.style.top = Math.max(44, param.point.y - 72) + "px";
+  }});
+  new ResizeObserver(entries => {{
+    if (!watchChart) return;
+    const rect = entries[0].contentRect;
+    watchChart.applyOptions({{ width: Math.floor(rect.width), height: Math.floor(rect.height) }});
+  }}).observe(watchChartEl);
+  watchChart.timeScale().fitContent();
+}}
+
+async function loadWatchChart(symbol, preset = watchCurrentPreset) {{
+  if (!symbol) return;
+  watchCurrentSymbol = symbol;
+  watchCurrentPreset = preset;
+  watchTitle.textContent = symbol;
+  watchSubtitle.textContent = "正在加载...";
+  const res = await fetch(`/watchlist/chart?symbol=${{encodeURIComponent(symbol)}}&preset=${{encodeURIComponent(preset)}}`);
+  const payload = await res.json();
+  if (payload.error) {{
+    watchSubtitle.textContent = payload.error;
+    destroyWatchChart();
+    return;
+  }}
+  watchSubtitle.textContent = `${{payload.start}} 到 ${{payload.end}}，日 K`;
+  makeWatchChart(payload);
+}}
+
+document.addEventListener("click", event => {{
+  const button = event.target.closest("[data-watch-symbol]");
+  if (!button) return;
+  event.preventDefault();
+  loadWatchChart(button.dataset.watchSymbol, watchCurrentPreset);
+}});
+document.getElementById("watch-periods").addEventListener("click", event => {{
+  const button = event.target.closest("[data-preset]");
+  if (!button) return;
+  document.querySelectorAll("#watch-periods button").forEach(item => item.classList.remove("active"));
+  button.classList.add("active");
+  loadWatchChart(watchCurrentSymbol, button.dataset.preset);
+}});
+if (window.initializeResizableTables) initializeResizableTables(document);
+if (window.initializeSortableTables) initializeSortableTables(document);
+if (watchInitialSymbol) loadWatchChart(watchInitialSymbol, "1y");
+</script>
+"""
+
+
+def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
+    symbol = field(params, "symbol", "").upper()
+    if not symbol:
+        return {"error": "缺少股票代码。"}
+    preset = field(params, "preset", "1y").lower()
+    end_day = default_scan_end_date()
+    start_day = chart_start_for_preset(preset, end_day)
+    try:
+        bars = fetch_bars("yfinance", symbol, start_day.isoformat(), end_day.isoformat(), "qfq", None)
+    except Exception as exc:
+        return {"error": str(exc)}
+    if not bars:
+        return {"error": f"{symbol} 没有可用日线数据。"}
+    try:
+        trades, equity_curve = backtest(
+            bars=bars,
+            ma_length=5,
+            vol_length=20,
+            vol_multiplier=1.45,
+            initial_cash=100000,
+            commission_pct=0.1,
+            slippage_pct=0,
+            strategy_name="ratchet",
+            stop_5ma_pct=7.5,
+            hard_stop_pct=20,
+            reentry_pct=4.5,
+        )
+    except Exception as exc:
+        return {"error": str(exc)}
+    markers = [
+        {"time": trade.entry_date, "position": "belowBar", "color": "#089981", "shape": "arrowUp", "text": "买入"}
+        for trade in trades
+    ] + [
+        {"time": trade.exit_date, "position": "aboveBar", "color": "#f23645", "shape": "arrowDown", "text": "卖出"}
+        for trade in trades
+    ]
+    trade_entry_dates = {trade.entry_date for trade in trades}
+    trade_exit_dates = {trade.exit_date for trade in trades}
+    rows = []
+    ma_points = []
+    vol_ma_points = []
+    dynamic_points = []
+    volume_points = []
+    for i, bar in enumerate(bars):
+        row = equity_curve[i]
+        ma = None if row["ma"] == "" else float(row["ma"])
+        vol_ma = None if row["vol_ma"] == "" else float(row["vol_ma"])
+        dynamic_stop = None if row.get("dynamic_stop", "") in ("", None) else float(row["dynamic_stop"])
+        rows.append(
+            {
+                "time": bar.date,
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": bar.volume,
+                "ma": ma,
+                "volMa": vol_ma,
+                "dynamicStop": dynamic_stop,
+            }
+        )
+        if ma is not None:
+            ma_points.append({"time": bar.date, "value": ma})
+        if vol_ma is not None:
+            vol_ma_points.append({"time": bar.date, "value": vol_ma})
+        if dynamic_stop is not None:
+            dynamic_points.append({"time": bar.date, "value": dynamic_stop})
+        volume_points.append({"time": bar.date, "value": bar.volume, "color": "rgba(8,153,129,0.42)" if bar.close >= bar.open else "rgba(242,54,69,0.42)"})
+        position = float(row.get("position_shares", 0) or 0)
+        if position > 0 and int(row.get("buy_signal", 0)) and bar.date not in trade_entry_dates:
+            markers.append({"time": bar.date, "position": "belowBar", "color": "#84cc16", "shape": "circle", "text": "B"})
+        if position > 0 and int(row.get("sell_signal", 0)) and bar.date not in trade_exit_dates:
+            markers.append({"time": bar.date, "position": "aboveBar", "color": "#f97316", "shape": "circle", "text": "S"})
+    return {
+        "symbol": symbol,
+        "preset": preset,
+        "start": bars[0].date,
+        "end": bars[-1].date,
+        "ohlc": [{"time": bar.date, "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close} for bar in bars],
+        "volume": volume_points,
+        "ma": ma_points,
+        "volMa": vol_ma_points,
+        "dynamicStop": dynamic_points,
+        "markers": sorted(markers, key=lambda item: str(item["time"])),
+        "rows": rows,
+    }
+
+
 def resolve_scan_symbols(params: dict[str, list[str]]) -> tuple[str, list[str], dict[str, dict[str, object]]]:
     source = field(params, "universe_source", "auto")
     symbols_text = field(params, "symbols", "")
@@ -2014,6 +2562,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_bytes(page_shell(render_batch_form(params), "batch"))
             elif parsed.path == "/batch/run":
                 self.send_bytes(page_shell(run_batch_backtest(params), "batch"))
+            elif parsed.path == "/watchlist":
+                self.send_bytes(page_shell(render_watchlist_page(params), "watchlist"))
+            elif parsed.path == "/watchlist/add":
+                self.add_watchlist_item(params)
+            elif parsed.path == "/watchlist/add.json":
+                self.add_watchlist_item_json(params)
+            elif parsed.path == "/watchlist/update":
+                self.update_watchlist_item(params)
+            elif parsed.path == "/watchlist/delete":
+                self.delete_watchlist_item(params)
+            elif parsed.path == "/watchlist/chart":
+                self.send_json(watchlist_chart_payload(params))
             elif parsed.path == "/scanner":
                 self.send_bytes(page_shell(render_scanner_form(params), "scanner"))
             elif parsed.path == "/scan":
@@ -2039,9 +2599,43 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_error(404)
         except Exception as exc:
-            active = "scanner" if parsed.path in ("/scanner", "/scan") or parsed.path.startswith("/scan/") else "batch" if parsed.path.startswith("/batch") else "backtest"
-            form = render_scanner_form(params) if active == "scanner" else render_batch_form(params) if active == "batch" else render_backtest_form(params)
+            active = "scanner" if parsed.path in ("/scanner", "/scan") or parsed.path.startswith("/scan/") else "watchlist" if parsed.path.startswith("/watchlist") else "batch" if parsed.path.startswith("/batch") else "backtest"
+            form = render_scanner_form(params) if active == "scanner" else render_watchlist_page(params) if active == "watchlist" else render_batch_form(params) if active == "batch" else render_backtest_form(params)
             self.send_bytes(page_shell(form + f'<div class="error">{html.escape(str(exc))}</div>', active), 500)
+
+    def add_watchlist_item(self, params: dict[str, list[str]]) -> None:
+        symbol = field(params, "symbol", "")
+        group = field(params, "group", "观察")
+        note = field(params, "note", "")
+        try:
+            add_watchlist_symbol(symbol, group, note)
+            content = render_watchlist_page({})
+        except ValueError as exc:
+            content = render_watchlist_page(params) + f'<div class="error">{html.escape(str(exc))}</div>'
+        self.send_bytes(page_shell(content, "watchlist"))
+
+    def add_watchlist_item_json(self, params: dict[str, list[str]]) -> None:
+        try:
+            symbol = field(params, "symbol", "")
+            group = field(params, "group", "候选")
+            note = field(params, "note", "")
+            symbols = add_watchlist_symbol(symbol, group, note)
+            self.send_json({"ok": True, "symbols": symbols})
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def update_watchlist_item(self, params: dict[str, list[str]]) -> None:
+        try:
+            update_watchlist_symbol(field(params, "symbol", ""), field(params, "group", "观察"), field(params, "note", ""))
+            content = render_watchlist_page({})
+        except ValueError as exc:
+            content = render_watchlist_page(params) + f'<div class="error">{html.escape(str(exc))}</div>'
+        self.send_bytes(page_shell(content, "watchlist"))
+
+    def delete_watchlist_item(self, params: dict[str, list[str]]) -> None:
+        symbol = field(params, "symbol", "")
+        delete_watchlist_symbol(symbol)
+        self.send_bytes(page_shell(render_watchlist_page({}), "watchlist"))
 
     def start_scan_job(self, params: dict[str, list[str]]) -> None:
         active = active_scan_job()
