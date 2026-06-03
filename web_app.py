@@ -361,13 +361,21 @@ label {{ display: block; font-size: 12px; color: #5d6675; font-weight: 700; }}
 input, select, textarea {{ width: 100%; margin-top: 6px; padding: 8px 9px; border: 1px solid #c7ccd5; border-radius: 4px; background: #fff; color: #131722; font-family: inherit; font-size: 13px; outline: none; }}
 input:focus, select:focus, textarea:focus {{ border-color: #2962ff; box-shadow: 0 0 0 2px rgba(41, 98, 255, .12); }}
 textarea {{ min-height: 78px; resize: vertical; line-height: 1.45; }}
-button {{ min-height: 34px; padding: 8px 13px; border: 1px solid #2962ff; border-radius: 4px; background: #2962ff; color: #fff; font-weight: 800; cursor: pointer; }}
-button:hover {{ filter: brightness(.97); }}
-button.secondary {{ background: #fff; color: #334155; border-color: #c7ccd5; }}
-button.success {{ background: #089981; border-color: #089981; }}
-button.danger {{ background: #f23645; border-color: #f23645; }}
-.symbol-button {{ border: 0; background: transparent; color: #2962ff; padding: 0; min-height: 0; font: inherit; font-weight: 800; cursor: pointer; }}
-.symbol-button:hover {{ text-decoration: underline; }}
+button, .btn {{ display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 8px 13px; border: 1px solid #2962ff; border-radius: 4px; background: #2962ff; color: #fff; font: inherit; font-size: 13px; font-weight: 800; line-height: 1.2; text-decoration: none; cursor: pointer; transition: background-color .12s ease, border-color .12s ease, color .12s ease, box-shadow .12s ease, transform .06s ease; }}
+button:hover, .btn:hover {{ filter: none; background: #1e53e5; border-color: #1e53e5; color: #fff; text-decoration: none; }}
+button:active, .btn:active {{ transform: translateY(1px); }}
+button:focus-visible, .btn:focus-visible {{ outline: none; box-shadow: 0 0 0 2px rgba(41, 98, 255, .18); }}
+button:disabled, .btn.disabled {{ cursor: not-allowed; opacity: .62; transform: none; }}
+button.secondary, .btn-secondary {{ background: #fff; color: #334155; border-color: #c7ccd5; }}
+button.secondary:hover, .btn-secondary:hover {{ background: #f8fafc; border-color: #aeb7c5; color: #131722; }}
+button.success, .btn-success {{ background: #089981; border-color: #089981; }}
+button.success:hover, .btn-success:hover {{ background: #067a6b; border-color: #067a6b; }}
+button.danger, .btn-danger {{ background: #fff; border-color: #f3a6ad; color: #d12030; }}
+button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f23645; color: #b42332; }}
+.btn-small {{ min-height: 26px; padding: 4px 8px; font-size: 12px; }}
+.btn-loading::before {{ content: ""; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .75s linear infinite; }}
+.symbol-button {{ border: 1px solid transparent; background: transparent; color: #2962ff; padding: 2px 4px; min-height: 24px; font: inherit; font-weight: 800; cursor: pointer; border-radius: 4px; }}
+.symbol-button:hover {{ background: rgba(41, 98, 255, .08); border-color: rgba(41, 98, 255, .16); color: #1e53e5; text-decoration: none; }}
 .wide {{ grid-column: span 3; }}
 .page-head {{ display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 12px; }}
 .mode-pill {{ background: #131722; color: #f8fafc; border-radius: 999px; padding: 6px 10px; font-size: 12px; white-space: nowrap; }}
@@ -384,9 +392,9 @@ button.danger {{ background: #f23645; border-color: #f23645; }}
 .scan-fact span {{ color: #64748b; font-weight: 700; }}
 .inline-actions {{ display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }}
 .delete-form {{ display: inline; margin: 0; }}
-.delete-link {{ border: 0; background: transparent; color: #f23645; min-height: 0; padding: 0; font-size: 13px; font-weight: 800; cursor: pointer; }}
-.delete-link:hover {{ text-decoration: underline; filter: none; }}
-.mini-action {{ min-height: 24px; padding: 3px 7px; font-size: 12px; border-color: #c7ccd5; background: #fff; color: #2962ff; }}
+.delete-link {{ display: inline-flex; align-items: center; justify-content: center; min-height: 26px; padding: 4px 8px; border: 1px solid #f3a6ad; border-radius: 4px; background: #fff; color: #d12030; font-size: 12px; font-weight: 800; cursor: pointer; text-decoration: none; }}
+.delete-link:hover {{ background: #fff5f6; border-color: #f23645; color: #b42332; text-decoration: none; filter: none; }}
+.mini-action {{ min-height: 26px; padding: 4px 8px; font-size: 12px; border-color: #c7ccd5; background: #fff; color: #2962ff; }}
 .mini-action.added {{ color: #089981; border-color: #9fd8cc; background: rgba(8,153,129,.08); }}
 .rating {{ display: inline-block; min-width: 64px; text-align: center; border-radius: 4px; padding: 3px 8px; font-weight: 800; font-size: 12px; }}
 .rating-Strong {{ color: #067a6b; background: rgba(8, 153, 129, .12); }}
@@ -400,6 +408,13 @@ button.danger {{ background: #f23645; border-color: #f23645; }}
 .watchlist-panel {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
 .watchlist-chart-shell {{ position: relative; height: 680px; min-width: 520px; }}
 .watchlist-chart {{ width: 100%; height: 100%; }}
+.loading-overlay {{ position: absolute; inset: 0; z-index: 5; display: none; align-items: center; justify-content: center; flex-direction: column; gap: 10px; background: rgba(255,255,255,.82); color: #334155; font-weight: 800; }}
+.loading-overlay.active {{ display: flex; }}
+.spinner {{ width: 28px; height: 28px; border: 3px solid #d6dbe3; border-top-color: #2962ff; border-radius: 50%; animation: spin .8s linear infinite; }}
+.toast-stack {{ position: fixed; right: 18px; top: 68px; z-index: 80; display: grid; gap: 8px; width: min(340px, calc(100vw - 32px)); pointer-events: none; }}
+.toast {{ background: #131722; color: #fff; border: 1px solid #2a2e39; border-radius: 6px; box-shadow: 0 12px 28px rgba(15,23,42,.2); padding: 10px 12px; font-size: 13px; font-weight: 700; opacity: 0; transform: translateY(-6px); animation: toastIn .16s ease forwards; }}
+.toast.success {{ background: #087f6f; border-color: #087f6f; }}
+.toast.error {{ background: #b42332; border-color: #b42332; }}
 .table-input {{ min-width: 90px; margin: 0; padding: 5px 7px; font-size: 12px; }}
 .table-note {{ min-width: 220px; height: 34px; min-height: 34px; margin: 0; padding: 5px 7px; font-size: 12px; resize: horizontal; }}
 .watchlist-panel td form {{ display: inline-flex; gap: 6px; margin-right: 8px; vertical-align: middle; }}
@@ -412,6 +427,8 @@ button.danger {{ background: #f23645; border-color: #f23645; }}
 .chart-tooltip strong {{ display: block; margin-bottom: 4px; font-size: 13px; }}
 .chart-tooltip .up {{ color: #089981; }}
 .chart-tooltip .down {{ color: #f23645; }}
+@keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+@keyframes toastIn {{ to {{ opacity: 1; transform: translateY(0); }} }}
 .progress-box {{ display: none; background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; margin-top: 14px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
 .progress-track {{ height: 8px; background: #e6eaf0; border-radius: 999px; overflow: hidden; margin: 8px 0; }}
 .progress-bar {{ height: 100%; width: 0%; background: #2962ff; transition: width .2s ease; }}
@@ -449,6 +466,34 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(4
   </nav>
 </header>
 {content}
+<div class="toast-stack" id="toast-stack"></div>
+<script>
+window.showToast = function(message, type = "success") {{
+  const stack = document.getElementById("toast-stack");
+  if (!stack) return;
+  const toast = document.createElement("div");
+  toast.className = `toast ${{type}}`;
+  toast.textContent = message;
+  stack.appendChild(toast);
+  window.setTimeout(() => {{
+    toast.style.opacity = "0";
+    toast.style.transform = "translateY(-6px)";
+    window.setTimeout(() => toast.remove(), 180);
+  }}, 2600);
+}};
+
+document.addEventListener("submit", event => {{
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement) || form.dataset.asyncSubmit === "true") return;
+  const button = form.querySelector("button[type='submit']");
+  if (!button || button.dataset.loadingReady === "true") return;
+  button.dataset.loadingReady = "true";
+  button.dataset.originalText = button.textContent || "";
+  button.classList.add("btn-loading");
+  button.disabled = true;
+  button.textContent = button.dataset.loadingText || "处理中";
+}});
+</script>
 </main></body>
 </html>"""
     return text.encode("utf-8")
@@ -1454,7 +1499,7 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
   <div class="stat-card"><div class="stat-label">计划买入日</div><div class="stat-value">{next_market_weekday(scan_end).isoformat()}</div></div>
   <div class="stat-card"><div class="stat-label">默认过滤</div><div class="stat-value">{DEFAULT_MIN_MARKET_CAP_100M_USD} 亿美元+</div></div>
 </section>
-<form class="form" id="scanner-form" action="/scan" method="get">
+<form class="form" id="scanner-form" action="/scan" method="get" data-async-submit="true">
   <label>股票池来源
     <select name="universe_source">
       <option value="auto"{selected(source, "auto")}>按市值自动筛选美股</option>
@@ -1651,9 +1696,11 @@ document.addEventListener("click", async event => {{
     if (data.ok) {{
       addButton.classList.add("added");
       addButton.textContent = "已加入";
+      window.showToast?.(`${{symbol}} 已加入自选池`, "success");
     }} else {{
       addButton.disabled = false;
       addButton.textContent = data.error || "失败";
+      window.showToast?.(data.error || `${{symbol}} 加入失败`, "error");
     }}
     return;
   }}
@@ -1669,7 +1716,7 @@ document.addEventListener("click", async event => {{
     detail.className = "candidate-detail";
     host.appendChild(detail);
   }}
-  detail.innerHTML = `<section class="result"><p class="hint">正在生成 ${{symbol}} 的日 K 线和策略交易点...</p></section>`;
+  detail.innerHTML = `<section class="result"><div class="loading-overlay active" style="position:relative; min-height:140px;"><div class="spinner"></div><div>正在生成 ${{symbol}} 的日 K 线和策略交易点</div></div></section>`;
   const params = new URLSearchParams(new FormData(scannerForm));
   params.set("symbol", symbol);
   const res = await fetch(`/candidate?${{params.toString()}}`);
@@ -1680,6 +1727,13 @@ document.addEventListener("click", async event => {{
 
 scannerForm.addEventListener("submit", async event => {{
   event.preventDefault();
+  const submitButton = scannerForm.querySelector("button[type='submit']");
+  if (submitButton) {{
+    submitButton.disabled = true;
+    submitButton.classList.add("btn-loading");
+    submitButton.dataset.originalText = submitButton.dataset.originalText || submitButton.textContent || "";
+    submitButton.textContent = "准备中";
+  }}
   progressBox.style.display = "block";
   scanResult.innerHTML = "";
   lastResultHtml = "";
@@ -1691,10 +1745,21 @@ scannerForm.addEventListener("submit", async event => {{
   stopScan.hidden = true;
   activeScanJobId = "";
   const params = new URLSearchParams(new FormData(scannerForm));
-  const res = await fetch(`/scan/start?${{params.toString()}}`);
-  const data = await res.json();
+  let data = {{}};
+  try {{
+    const res = await fetch(`/scan/start?${{params.toString()}}`);
+    data = await res.json();
+  }} catch (error) {{
+    data = {{ error: error?.message || "无法启动扫描" }};
+  }}
+  if (submitButton) {{
+    submitButton.disabled = false;
+    submitButton.classList.remove("btn-loading");
+    submitButton.textContent = submitButton.dataset.originalText || "开始选股";
+  }}
   if (!data.job_id) {{
     scanResult.innerHTML = `<div class="error">${{data.error || "无法启动扫描"}}</div>`;
+    window.showToast?.(data.error || "无法启动扫描", "error");
     return;
   }}
   activeScanJobId = data.job_id;
@@ -2073,7 +2138,7 @@ def watchlist_row(item: dict[str, str], metadata: dict[str, object] | None) -> s
         pass
     cap_text = f"{market_cap / 1_000_000_000:.2f}" if market_cap else "-"
     cache_bars = read_price_cache(symbol)
-    cache_text = f"{len(cache_bars)}根 / {max((bar.date for bar in cache_bars), default='-')}" if cache_bars else "未缓存"
+    cache_text = f"数据至 {max((bar.date for bar in cache_bars), default='-')}" if cache_bars else "待拉取"
     form_id = f"watch-edit-{html.escape(symbol)}"
     return (
         "<tr>"
@@ -2123,11 +2188,11 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
 </form>
 <section class="status-strip">
   <div class="stat-card"><div class="stat-label">自选数量</div><div class="stat-value">{len(symbols)}</div></div>
-  <div class="stat-card"><div class="stat-label">已缓存自选</div><div class="stat-value">{cache["cached_symbols"]}/{len(symbols)}</div></div>
-  <div class="stat-card"><div class="stat-label">缓存文件</div><div class="stat-value">{cache["files"]}</div></div>
-  <div class="stat-card"><div class="stat-label">缓存大小</div><div class="stat-value">{float(cache["size_mb"]):.1f} MB</div></div>
+  <div class="stat-card"><div class="stat-label">行情可加速</div><div class="stat-value">{cache["cached_symbols"]}/{len(symbols)}</div></div>
+  <div class="stat-card"><div class="stat-label">数据最新至</div><div class="stat-value">{html.escape(str(cache["latest"]))}</div></div>
+  <div class="stat-card"><div class="stat-label">缓存容量</div><div class="stat-value">{float(cache["size_mb"]):.1f} MB</div></div>
 </section>
-<p class="hint">日线缓存会自动增量刷新；每只股票最多保留约 {cache["max_bars"]} 根日 K，避免长期膨胀。当前自选缓存最新日期：{html.escape(str(cache["latest"]))}。</p>
+<p class="hint">缓存用于减少重复拉取行情：打开图表或扫描时会自动补最新日 K；每只股票最多保留约 {cache["max_bars"]} 根，避免长期膨胀。</p>
 <section class="watchlist-grid">
   <div class="watchlist-panel">
     <div class="table-wrap">
@@ -2155,6 +2220,7 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
     <div class="watchlist-chart-shell">
       <div id="watchlist-chart" class="watchlist-chart"></div>
       <div id="watchlist-tooltip" class="chart-tooltip"></div>
+      <div id="watch-chart-loading" class="loading-overlay"><div class="spinner"></div><div>正在拉取日 K 数据</div></div>
     </div>
   </div>
 </section>
@@ -2168,6 +2234,7 @@ const watchChartEl = document.getElementById("watchlist-chart");
 const watchTooltip = document.getElementById("watchlist-tooltip");
 const watchTitle = document.getElementById("watch-chart-title");
 const watchSubtitle = document.getElementById("watch-chart-subtitle");
+const watchLoading = document.getElementById("watch-chart-loading");
 
 function destroyWatchChart() {{
   if (watchChart) {{
@@ -2232,15 +2299,26 @@ async function loadWatchChart(symbol, preset = watchCurrentPreset) {{
   watchCurrentPreset = preset;
   watchTitle.textContent = symbol;
   watchSubtitle.textContent = "正在加载...";
-  const res = await fetch(`/watchlist/chart?symbol=${{encodeURIComponent(symbol)}}&preset=${{encodeURIComponent(preset)}}`);
-  const payload = await res.json();
-  if (payload.error) {{
-    watchSubtitle.textContent = payload.error;
+  watchLoading?.classList.add("active");
+  try {{
+    const res = await fetch(`/watchlist/chart?symbol=${{encodeURIComponent(symbol)}}&preset=${{encodeURIComponent(preset)}}`);
+    const payload = await res.json();
+    if (payload.error) {{
+      watchSubtitle.textContent = payload.error;
+      destroyWatchChart();
+      window.showToast?.(payload.error, "error");
+      return;
+    }}
+    watchSubtitle.textContent = `${{payload.start}} 到 ${{payload.end}}，日 K`;
+    makeWatchChart(payload);
+  }} catch (error) {{
+    const message = error?.message || "图表加载失败";
+    watchSubtitle.textContent = message;
     destroyWatchChart();
-    return;
+    window.showToast?.(message, "error");
+  }} finally {{
+    watchLoading?.classList.remove("active");
   }}
-  watchSubtitle.textContent = `${{payload.start}} 到 ${{payload.end}}，日 K`;
-  makeWatchChart(payload);
 }}
 
 document.addEventListener("click", event => {{
