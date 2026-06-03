@@ -5,8 +5,7 @@ __pycache__/
 
 # Generated reports, scans, and local cache files
 reports/
-data/cache/
-data/scans/
+data/
 nasdaq_screener_cache.json
 server.out.log
 server.err.log
