@@ -681,6 +681,235 @@ def svg_polyline(points: list[tuple[float, float]], color: str, width: int = 2) 
     )
 
 
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def signal_rating(score: float) -> str:
+    if score >= 80:
+        return "Strong"
+    if score >= 60:
+        return "Medium"
+    return "Weak"
+
+
+def score_signal_strength(
+    bars: list[Bar],
+    equity_curve: list[dict[str, float | str]],
+    index: int,
+    signal_type: str,
+) -> dict[str, float | str]:
+    bar = bars[index]
+    row = equity_curve[index]
+    ma_raw = row.get("ma", "")
+    vol_ma_raw = row.get("vol_ma", "")
+    ma = 0.0 if ma_raw in ("", None) else float(ma_raw)
+    vol_ma = 0.0 if vol_ma_raw in ("", None) else float(vol_ma_raw)
+    volume_ratio = bar.volume / vol_ma if vol_ma else 0.0
+    dist_ma_pct = (bar.close / ma - 1) * 100 if ma else 0.0
+    prev_ma_raw = equity_curve[index - 1].get("ma", "") if index > 0 else ""
+    prev_ma = 0.0 if prev_ma_raw in ("", None) else float(prev_ma_raw)
+    ma_rising = bool(ma and prev_ma and ma > prev_ma)
+    ma_falling = bool(ma and prev_ma and ma < prev_ma)
+
+    full_range = bar.high - bar.low
+    body = abs(bar.close - bar.open)
+    close_position = ((bar.close - bar.low) / full_range * 100) if full_range else 50.0
+    upper_shadow = bar.high - max(bar.open, bar.close)
+    upper_shadow_ratio = upper_shadow / body if body else 0.0
+    lower_shadow = min(bar.open, bar.close) - bar.low
+    lower_shadow_ratio = lower_shadow / body if body else 0.0
+    lookback = bars[max(0, index - 251) : index + 1]
+    high_52w = max((item.high for item in lookback), default=bar.high)
+    dist_52w_high_pct = (bar.close / high_52w - 1) * 100 if high_52w else 0.0
+    dynamic_stop_raw = row.get("dynamic_stop", "")
+    dynamic_stop = 0.0 if dynamic_stop_raw in ("", None) else float(dynamic_stop_raw)
+    notes: list[str] = []
+
+    if signal_type == "B":
+        if volume_ratio >= 1.45:
+            volume_score = 18 + min(7, (volume_ratio - 1.45) * 6)
+        elif volume_ratio >= 1:
+            volume_score = 10 + (volume_ratio - 1) * 16
+        else:
+            volume_score = volume_ratio * 8
+            notes.append("量能低于均量")
+        if volume_ratio > 4:
+            volume_score = min(volume_score, 18)
+            notes.append("量能过热")
+        volume_score = clamp(volume_score, 0, 25)
+
+        trend_score = 0.0
+        if ma and bar.close > ma:
+            trend_score += 7
+        else:
+            notes.append("未站稳均线")
+        if ma_rising:
+            trend_score += 8
+        else:
+            notes.append("均线斜率不足")
+        if 0 <= dist_ma_pct <= 4.5:
+            trend_score += 5
+        elif 4.5 < dist_ma_pct <= 8:
+            trend_score += 3
+            notes.append("距离均线偏高")
+        elif dist_ma_pct > 8:
+            notes.append("短线乖离过大")
+        trend_score = clamp(trend_score, 0, 20)
+
+        candle_score = 0.0
+        if bar.close > bar.open:
+            candle_score += 6
+        else:
+            notes.append("非阳线")
+        candle_score += clamp((close_position - 45) / 55 * 8, 0, 8)
+        if upper_shadow_ratio <= 0.5:
+            candle_score += 6
+        elif upper_shadow_ratio <= 1:
+            candle_score += 3
+            notes.append("上影线偏长")
+        else:
+            notes.append("上影线较重")
+        candle_score = clamp(candle_score, 0, 20)
+
+        if dist_52w_high_pct >= -2:
+            space_score = 20
+        elif dist_52w_high_pct >= -5:
+            space_score = 16
+        elif dist_52w_high_pct >= -10:
+            space_score = 12
+        elif dist_52w_high_pct >= -20:
+            space_score = 8
+            notes.append("距离52周高点较远")
+        else:
+            space_score = 4
+            notes.append("上方空间压力可能较重")
+
+        if 0 <= dist_ma_pct <= 4.5:
+            risk_score = 15
+        elif 4.5 < dist_ma_pct <= 8:
+            risk_score = 11
+        elif 8 < dist_ma_pct <= 12:
+            risk_score = 7
+            notes.append("入场防守距离偏大")
+        elif dist_ma_pct < 0:
+            risk_score = 4
+        else:
+            risk_score = 3
+            notes.append("入场追高风险高")
+    else:
+        volume_score = clamp(volume_ratio / 2 * 25, 0, 25)
+        trend_score = 0.0
+        if ma and bar.close < ma:
+            trend_score += 10
+        if ma_falling:
+            trend_score += 5
+        trend_score += clamp(abs(min(dist_ma_pct, 0)) / 8 * 5, 0, 5)
+        candle_score = 0.0
+        if bar.close < bar.open:
+            candle_score += 8
+        candle_score += clamp((55 - close_position) / 55 * 8, 0, 8)
+        if lower_shadow_ratio <= 0.5:
+            candle_score += 4
+        else:
+            notes.append("下影线显示承接")
+        space_score = clamp(abs(min(dist_ma_pct, 0)) / 12 * 20, 0, 20)
+        risk_score = 0.0
+        if dynamic_stop and bar.close < dynamic_stop:
+            risk_score += 8
+        if ma and bar.close < ma:
+            risk_score += 7
+        risk_score = clamp(risk_score, 0, 15)
+        if trend_score < 10:
+            notes.append("破位趋势不强")
+
+    total = volume_score + trend_score + candle_score + space_score + risk_score
+    return {
+        "signal_score": round(total, 1),
+        "signal_rating": signal_rating(total),
+        "volume_score": round(volume_score, 1),
+        "trend_score": round(trend_score, 1),
+        "candle_score": round(candle_score, 1),
+        "space_score": round(space_score, 1),
+        "risk_score": round(risk_score, 1),
+        "score_notes": "；".join(notes[:4]) if notes else "技术结构完整",
+    }
+
+
+def build_signal_detail_rows(
+    bars: list[Bar],
+    trades: list[Trade],
+    equity_curve: list[dict[str, float | str]],
+) -> list[dict[str, float | int | str]]:
+    entry_signal_dates = {trade.entry_signal_date for trade in trades}
+    exit_signal_dates = {trade.exit_signal_date for trade in trades}
+    open_position = open_position_snapshot(equity_curve)
+    if open_position and open_position.get("entry_signal_date"):
+        entry_signal_dates.add(str(open_position["entry_signal_date"]))
+    rows: list[dict[str, float | int | str]] = []
+
+    for i, row in enumerate(equity_curve):
+        bar = bars[i]
+        signals: list[tuple[str, bool]] = []
+        if int(row.get("buy_signal", 0)):
+            signals.append(("B", bar.date in entry_signal_dates))
+        if int(row.get("sell_signal", 0)):
+            signals.append(("S", bar.date in exit_signal_dates))
+        if not signals:
+            continue
+
+        ma = row.get("ma", "")
+        vol_ma = row.get("vol_ma", "")
+        ma_value = 0.0 if ma in ("", None) else float(ma)
+        vol_ma_value = 0.0 if vol_ma in ("", None) else float(vol_ma)
+        future = bars[i + 1 : min(len(bars), i + 21)]
+
+        def future_return(days: int) -> float | str:
+            target = i + days
+            if target >= len(bars) or not bar.close:
+                return ""
+            return (bars[target].close / bar.close - 1) * 100
+
+        max_up: float | str = ""
+        max_down: float | str = ""
+        if future and bar.close:
+            max_up = (max(item.high for item in future) / bar.close - 1) * 100
+            max_down = (min(item.low for item in future) / bar.close - 1) * 100
+
+        next_sell = ""
+        for j in range(i + 1, min(len(equity_curve), i + 21)):
+            if int(equity_curve[j].get("sell_signal", 0)):
+                next_sell = str(equity_curve[j].get("date", ""))
+                break
+
+        position = float(row.get("position_shares", 0) or 0)
+        for signal_type, executed in signals:
+            strength = score_signal_strength(bars, equity_curve, i, signal_type)
+            rows.append(
+                {
+                    "date": bar.date,
+                    "signal_type": signal_type,
+                    "status": "交易信号" if executed else "持仓中信号" if position > 0 else "观察信号",
+                    "executed": int(executed),
+                    **strength,
+                    "close": bar.close,
+                    "ma": ma_value if ma_value else "",
+                    "dist_ma_pct": (bar.close / ma_value - 1) * 100 if ma_value else "",
+                    "volume_ratio": bar.volume / vol_ma_value if vol_ma_value else "",
+                    "in_position": int(position > 0),
+                    "ret_1d": future_return(1),
+                    "ret_3d": future_return(3),
+                    "ret_5d": future_return(5),
+                    "ret_10d": future_return(10),
+                    "ret_20d": future_return(20),
+                    "max_up_20d": max_up,
+                    "max_down_20d": max_down,
+                    "next_sell_signal": next_sell,
+                }
+            )
+    return rows
+
+
 
 
 def make_report(
@@ -948,6 +1177,62 @@ def make_report(
     if not trade_rows:
         trade_rows = f'<tr><td colspan="20" class="empty">{labels["empty_trades"]}</td></tr>'
 
+    def fmt_pct(value: float | int | str) -> str:
+        if value == "" or value is None:
+            return "-"
+        number = float(value)
+        cls = "pos" if number >= 0 else "neg"
+        return f'<span class="{cls}">{number:.2f}%</span>'
+
+    def fmt_num(value: float | int | str) -> str:
+        if value == "" or value is None:
+            return "-"
+        return f"{float(value):.2f}"
+
+    def score_badge(row: dict[str, float | int | str]) -> str:
+        rating = html.escape(str(row["signal_rating"]))
+        score = fmt_num(row["signal_score"])
+        return f'<span class="score-badge score-{rating}">{score}</span>'
+
+    def rating_badge(row: dict[str, float | int | str]) -> str:
+        rating = html.escape(str(row["signal_rating"]))
+        return f'<span class="rating rating-{rating}">{rating}</span>'
+
+    signal_rows_data = build_signal_detail_rows(bars, trades, equity_curve)
+    signal_rows = "\n".join(
+        "<tr>"
+        f"<td>{i}</td>"
+        f"<td>{html.escape(str(row['date']))}</td>"
+        f"<td>{html.escape(str(row['signal_type']))}</td>"
+        f"<td>{html.escape(str(row['status']))}</td>"
+        f"<td>{'是' if int(row['executed']) else '否'}</td>"
+        f"<td>{score_badge(row)}</td>"
+        f"<td>{rating_badge(row)}</td>"
+        f"<td>{fmt_num(row['volume_score'])}</td>"
+        f"<td>{fmt_num(row['trend_score'])}</td>"
+        f"<td>{fmt_num(row['candle_score'])}</td>"
+        f"<td>{fmt_num(row['space_score'])}</td>"
+        f"<td>{fmt_num(row['risk_score'])}</td>"
+        f"<td>{html.escape(str(row['score_notes']))}</td>"
+        f"<td>{fmt_num(row['close'])}</td>"
+        f"<td>{fmt_num(row['ma'])}</td>"
+        f"<td>{fmt_pct(row['dist_ma_pct'])}</td>"
+        f"<td>{fmt_num(row['volume_ratio'])}x</td>"
+        f"<td>{'是' if int(row['in_position']) else '否'}</td>"
+        f"<td>{fmt_pct(row['ret_1d'])}</td>"
+        f"<td>{fmt_pct(row['ret_3d'])}</td>"
+        f"<td>{fmt_pct(row['ret_5d'])}</td>"
+        f"<td>{fmt_pct(row['ret_10d'])}</td>"
+        f"<td>{fmt_pct(row['ret_20d'])}</td>"
+        f"<td>{fmt_pct(row['max_up_20d'])}</td>"
+        f"<td>{fmt_pct(row['max_down_20d'])}</td>"
+        f"<td>{html.escape(str(row['next_sell_signal'] or '-'))}</td>"
+        "</tr>"
+        for i, row in enumerate(signal_rows_data, 1)
+    )
+    if not signal_rows:
+        signal_rows = '<tr><td colspan="26" class="empty">这个区间没有信号。</td></tr>'
+
     pnl_payload = {
         "labels": [str(i) for i in range(1, len(trades) + 1)],
         "pnl": [trade.pnl for trade in trades],
@@ -996,6 +1281,12 @@ table {{ width: 100%; border-collapse: separate; border-spacing: 0; background: 
 th, td {{ padding: 8px 10px; border-bottom: 1px solid #eef1f5; text-align: right; font-size: 12px; white-space: nowrap; }}
 th {{ position: sticky; top: 0; background: #f5f7fa; color: #5d6675; font-size: 11px; font-weight: 800; text-transform: uppercase; z-index: 1; }}
 th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3), th:nth-child(7), td:nth-child(7), th:nth-child(8), td:nth-child(8), th:last-child, td:last-child {{ text-align: left; }}
+.rating, .score-badge {{ display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; padding: 3px 7px; font-weight: 900; font-size: 12px; }}
+.rating {{ min-width: 64px; }}
+.score-badge {{ min-width: 46px; }}
+.rating-Strong, .score-Strong {{ color: #067a6b; background: rgba(8,153,129,.12); }}
+.rating-Medium, .score-Medium {{ color: #b26b00; background: rgba(245,158,11,.16); }}
+.rating-Weak, .score-Weak {{ color: #c22736; background: rgba(242,54,69,.13); }}
 .pos {{ color: #089981; }}
 .neg {{ color: #f23645; }}
 .empty {{ text-align: center; color: #607080; }}
@@ -1026,6 +1317,13 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
 <table>
 <thead><tr><th>#</th><th>{labels['buy_signal_date']}</th><th>{labels['buy_action_date']}</th><th>{labels['buy_signal_close']}</th><th>{labels['buy_fill']}</th><th>{labels['buy_gap']}</th><th>{labels['sell_signal_date']}</th><th>{labels['sell_action_date']}</th><th>{labels['sell_signal_close']}</th><th>{labels['sell_fill']}</th><th>{labels['sell_gap']}</th><th>{labels['bars_held']}</th><th>{labels['shares']}</th><th>{labels['entry_value']}</th><th>{labels['exit_value']}</th><th>{labels['pnl_amount']}</th><th>{labels['return_pct']}</th><th>{labels['max_favorable']}</th><th>{labels['max_drawdown']}</th><th>{labels['exit_reason']}</th></tr></thead>
 <tbody>{trade_rows}</tbody>
+</table>
+</div>
+<h2>信号明细</h2>
+<div class="table-wrap">
+<table>
+<thead><tr><th>#</th><th>信号日</th><th>类型</th><th>状态</th><th>是否交易</th><th>技术分</th><th>评级</th><th>量能</th><th>趋势</th><th>K线</th><th>空间</th><th>风险</th><th>说明</th><th>收盘</th><th>MA</th><th>距MA</th><th>量比</th><th>持仓中</th><th>后1日</th><th>后3日</th><th>后5日</th><th>后10日</th><th>后20日</th><th>20日最大涨幅</th><th>20日最大回撤</th><th>20日内S点</th></tr></thead>
+<tbody>{signal_rows}</tbody>
 </table>
 </div>
 </main>

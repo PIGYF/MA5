@@ -20,6 +20,7 @@ from backtest import (
     PRICE_CACHE_DIR,
     PRICE_CACHE_MAX_BARS,
     backtest,
+    build_signal_detail_rows,
     fetch_bars,
     make_report,
     open_position_snapshot,
@@ -77,6 +78,15 @@ def validate_backtest_range(start: str, end: str, vol_length: int) -> None:
     actual_days = (end_date - start_date).days
     if actual_days < minimum_days:
         raise ValueError(f"回测区间过短。当前均量周期为 {vol_length}，至少需要 {minimum_days} 天。")
+
+
+def validate_scan_range(start: str, end: str) -> None:
+    start_date = date.fromisoformat(start)
+    end_date = date.fromisoformat(end)
+    if end_date <= start_date:
+        raise ValueError("选股结束日期必须晚于开始日期。")
+    if (end_date - start_date).days < 30:
+        raise ValueError("选股区间过短。开始日期和结束日期至少需要间隔 1 个月。")
 
 
 def safe_name(value: str) -> str:
@@ -400,6 +410,10 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .rating-Strong {{ color: #067a6b; background: rgba(8, 153, 129, .12); }}
 .rating-Medium {{ color: #b26b00; background: rgba(245, 158, 11, .16); }}
 .rating-Weak {{ color: #c22736; background: rgba(242, 54, 69, .13); }}
+.score-badge {{ display: inline-flex; align-items: center; justify-content: center; min-width: 46px; border-radius: 4px; padding: 3px 7px; font-weight: 900; font-size: 12px; }}
+.score-Strong {{ color: #067a6b; background: rgba(8, 153, 129, .12); }}
+.score-Medium {{ color: #b26b00; background: rgba(245, 158, 11, .16); }}
+.score-Weak {{ color: #c22736; background: rgba(242, 54, 69, .13); }}
 .error {{ background: #fff5f6; border: 1px solid #ffc9cf; color: #b42332; padding: 12px; border-radius: 6px; white-space: pre-wrap; }}
 .result {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; margin-top: 14px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
 .candidate-detail {{ margin-top: 14px; }}
@@ -638,6 +652,74 @@ def render_backtest_trade_table(trades, equity_curve) -> str:
   </div>
 """
 
+
+def render_backtest_signal_table(bars, trades, equity_curve) -> str:
+    def fmt_pct(value) -> str:
+        if value == "" or value is None:
+            return "-"
+        number = float(value)
+        cls = "pos" if number >= 0 else "neg"
+        return f'<span class="{cls}">{number:.2f}%</span>'
+
+    def fmt_num(value) -> str:
+        if value == "" or value is None:
+            return "-"
+        return f"{float(value):.2f}"
+
+    def score_badge(row) -> str:
+        rating = html.escape(str(row["signal_rating"]))
+        score = fmt_num(row["signal_score"])
+        return f'<span class="score-badge score-{rating}">{score}</span>'
+
+    def rating_badge(row) -> str:
+        rating = html.escape(str(row["signal_rating"]))
+        return f'<span class="rating rating-{rating}">{rating}</span>'
+
+    rows = []
+    for i, row in enumerate(build_signal_detail_rows(bars, trades, equity_curve), 1):
+        rows.append(
+            "<tr>"
+            f"<td>{i}</td>"
+            f"<td>{html.escape(str(row['date']))}</td>"
+            f"<td>{html.escape(str(row['signal_type']))}</td>"
+            f"<td>{html.escape(str(row['status']))}</td>"
+            f"<td>{'是' if int(row['executed']) else '否'}</td>"
+            f"<td>{score_badge(row)}</td>"
+            f"<td>{rating_badge(row)}</td>"
+            f"<td>{fmt_num(row['volume_score'])}</td>"
+            f"<td>{fmt_num(row['trend_score'])}</td>"
+            f"<td>{fmt_num(row['candle_score'])}</td>"
+            f"<td>{fmt_num(row['space_score'])}</td>"
+            f"<td>{fmt_num(row['risk_score'])}</td>"
+            f"<td>{html.escape(str(row['score_notes']))}</td>"
+            f"<td>{fmt_num(row['close'])}</td>"
+            f"<td>{fmt_num(row['ma'])}</td>"
+            f"<td>{fmt_pct(row['dist_ma_pct'])}</td>"
+            f"<td>{fmt_num(row['volume_ratio'])}x</td>"
+            f"<td>{'是' if int(row['in_position']) else '否'}</td>"
+            f"<td>{fmt_pct(row['ret_1d'])}</td>"
+            f"<td>{fmt_pct(row['ret_3d'])}</td>"
+            f"<td>{fmt_pct(row['ret_5d'])}</td>"
+            f"<td>{fmt_pct(row['ret_10d'])}</td>"
+            f"<td>{fmt_pct(row['ret_20d'])}</td>"
+            f"<td>{fmt_pct(row['max_up_20d'])}</td>"
+            f"<td>{fmt_pct(row['max_down_20d'])}</td>"
+            f"<td>{html.escape(str(row['next_sell_signal'] or '-'))}</td>"
+            "</tr>"
+        )
+    if not rows:
+        rows.append('<tr><td colspan="26" class="empty">这个区间没有信号。</td></tr>')
+    return f"""
+  <h2>信号明细</h2>
+  <div class="table-wrap">
+    <table class="resizable-table">
+      <thead><tr><th>#</th><th>信号日</th><th>类型</th><th>状态</th><th>是否交易</th><th>技术分</th><th>评级</th><th>量能</th><th>趋势</th><th>K线</th><th>空间</th><th>风险</th><th>说明</th><th>收盘</th><th>MA</th><th>距MA</th><th>量比</th><th>持仓中</th><th>后1日</th><th>后3日</th><th>后5日</th><th>后10日</th><th>后20日</th><th>20日最大涨幅</th><th>20日最大回撤</th><th>20日内S点</th></tr></thead>
+      <tbody>{"".join(rows)}</tbody>
+    </table>
+  </div>
+"""
+
+
 def run_strategy(params: dict[str, list[str]]) -> str:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     cleanup_old_reports()
@@ -688,6 +770,7 @@ def run_strategy(params: dict[str, list[str]]) -> str:
     <a href="{equity_url}" target="_blank">权益曲线 CSV</a>
   </p>
   {render_backtest_trade_table(trades, equity_curve)}
+  {render_backtest_signal_table(bars, trades, equity_curve)}
   <iframe src="{report_url}" title="Backtest report"></iframe>
 </section>
 """
@@ -1727,6 +1810,16 @@ document.addEventListener("click", async event => {{
 
 scannerForm.addEventListener("submit", async event => {{
   event.preventDefault();
+  const formData = new FormData(scannerForm);
+  const scanStart = new Date(formData.get("start"));
+  const scanEnd = new Date(formData.get("end"));
+  const scanDays = (scanEnd - scanStart) / 86400000;
+  if (!Number.isFinite(scanDays) || scanDays < 30) {{
+    const message = "选股区间至少需要 1 个月，请扩大开始日期和结束日期。";
+    scanResult.innerHTML = `<div class="error">${{message}}</div>`;
+    window.showToast?.(message, "error");
+    return;
+  }}
   const submitButton = scannerForm.querySelector("button[type='submit']");
   if (submitButton) {{
     submitButton.disabled = true;
@@ -1744,7 +1837,7 @@ scannerForm.addEventListener("submit", async event => {{
   resumeScan.hidden = true;
   stopScan.hidden = true;
   activeScanJobId = "";
-  const params = new URLSearchParams(new FormData(scannerForm));
+  const params = new URLSearchParams(formData);
   let data = {{}};
   try {{
     const res = await fetch(`/scan/start?${{params.toString()}}`);
@@ -1894,6 +1987,7 @@ def run_scanner(params: dict[str, list[str]]) -> str:
     scan_end = default_scan_end_date()
     start = field(params, "start", default_scan_start_date(scan_end).isoformat())
     end = field(params, "end", scan_end.isoformat())
+    validate_scan_range(start, end)
     ma_length = int(number_field(params, "ma_length", 5))
     vol_length = int(number_field(params, "vol_length", 20))
     vol_multiplier = number_field(params, "vol_multiplier", 1.45)
@@ -2515,6 +2609,7 @@ def execute_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
         scan_end = default_scan_end_date()
         start = field(params, "start", default_scan_start_date(scan_end).isoformat())
         end = field(params, "end", scan_end.isoformat())
+        validate_scan_range(start, end)
         ma_length = int(number_field(params, "ma_length", 5))
         vol_length = int(number_field(params, "vol_length", 20))
         vol_multiplier = number_field(params, "vol_multiplier", 1.45)
@@ -2716,6 +2811,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_bytes(page_shell(render_watchlist_page({}), "watchlist"))
 
     def start_scan_job(self, params: dict[str, list[str]]) -> None:
+        scan_end = default_scan_end_date()
+        start = field(params, "start", default_scan_start_date(scan_end).isoformat())
+        end = field(params, "end", scan_end.isoformat())
+        try:
+            validate_scan_range(start, end)
+        except ValueError as exc:
+            self.send_json({"status": "error", "error": str(exc)}, status=400)
+            return
         active = active_scan_job()
         if active:
             active_id, active_job = active
