@@ -192,6 +192,70 @@ def build_benchmark(symbol: str, start: str, end: str, initial_cash: float) -> d
     }
 
 
+def market_environment(symbol: str = "QQQ") -> dict[str, object]:
+    end = default_scan_end_date()
+    start = end - timedelta(days=120)
+    try:
+        bars = fetch_bars("yfinance", symbol, start.isoformat(), end.isoformat(), "qfq", None)
+        closes = [bar.close for bar in bars]
+        ma20 = rolling_sma(closes, 20)
+        ma50 = rolling_sma(closes, 50)
+        latest = bars[-1]
+        ma20_now = ma20[-1] or 0.0
+        ma50_now = ma50[-1] or 0.0
+        ma20_prev = next((value for value in reversed(ma20[:-1]) if value is not None), 0.0)
+        dist20 = (latest.close / ma20_now - 1) * 100 if ma20_now else 0.0
+        dist50 = (latest.close / ma50_now - 1) * 100 if ma50_now else 0.0
+        ma20_rising = bool(ma20_now and ma20_prev and ma20_now >= ma20_prev)
+        if dist20 >= 0 and ma20_rising and dist50 >= -1:
+            state = "Risk-On"
+            tone = "good"
+            message = "环境支持正常选股"
+        elif dist20 < -1.5 or not ma20_rising:
+            state = "Risk-Off"
+            tone = "bad"
+            message = "候选保留，但建议降低追高优先级"
+        else:
+            state = "Neutral"
+            tone = "warn"
+            message = "环境一般，优先看强催化和低乖离"
+        return {
+            "symbol": symbol,
+            "date": latest.date,
+            "state": state,
+            "tone": tone,
+            "dist20": dist20,
+            "dist50": dist50,
+            "ma20_direction": "上行" if ma20_rising else "下行",
+            "message": message,
+        }
+    except Exception as exc:
+        return {
+            "symbol": symbol,
+            "date": "-",
+            "state": "Unavailable",
+            "tone": "neutral",
+            "dist20": 0.0,
+            "dist50": 0.0,
+            "ma20_direction": "-",
+            "message": f"大盘环境暂不可用：{exc}",
+        }
+
+
+def render_market_environment_bar(env: dict[str, object] | None = None) -> str:
+    env = env or market_environment()
+    tone = html.escape(str(env.get("tone", "neutral")))
+    return f"""
+<section class="market-bar market-{tone}">
+  <div>
+    <strong>{html.escape(str(env.get("state", "Unavailable")))}</strong>
+    <span>{html.escape(str(env.get("symbol", "QQQ")))} {html.escape(str(env.get("date", "-")))}</span>
+  </div>
+  <p>{html.escape(str(env.get("symbol", "QQQ")))} 距20MA {float(env.get("dist20", 0.0)):.2f}% / 距50MA {float(env.get("dist50", 0.0)):.2f}% / 20MA {html.escape(str(env.get("ma20_direction", "-")))}。{html.escape(str(env.get("message", "")))}</p>
+</section>
+"""
+
+
 def build_buy_hold(symbol: str, bars: list[Bar], initial_cash: float) -> dict[str, object]:
     first_close = bars[0].close
     curve = [(bar.date, initial_cash * (bar.close / first_close)) for bar in bars]
@@ -411,6 +475,14 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .stat-card {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 10px 12px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
 .stat-label {{ color: #6b7280; font-size: 11px; font-weight: 800; text-transform: uppercase; margin-bottom: 6px; }}
 .stat-value {{ color: #131722; font-size: 18px; font-weight: 800; }}
+.market-bar {{ display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid #d6dbe3; border-left-width: 4px; border-radius: 6px; background: #fff; padding: 10px 12px; margin: 0 0 14px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
+.market-bar div {{ display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }}
+.market-bar strong {{ font-size: 15px; }}
+.market-bar span, .market-bar p {{ color: #5d6675; font-size: 13px; margin: 0; line-height: 1.45; }}
+.market-good {{ border-left-color: #089981; }}
+.market-warn {{ border-left-color: #f59e0b; }}
+.market-bad {{ border-left-color: #f23645; }}
+.market-neutral {{ border-left-color: #94a3b8; }}
 .toolbar {{ display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }}
 .toolbar .links {{ margin: 0; }}
 .latest-scan-card {{ margin: 0 0 20px; }}
@@ -432,14 +504,28 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .score-Strong {{ color: #067a6b; background: rgba(8, 153, 129, .12); }}
 .score-Medium {{ color: #b26b00; background: rgba(245, 158, 11, .16); }}
 .score-Weak {{ color: #c22736; background: rgba(242, 54, 69, .13); }}
+.badge {{ display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; padding: 3px 7px; font-weight: 800; font-size: 12px; white-space: nowrap; }}
+.earnings-safe {{ color: #334155; background: #eef2f7; }}
+.earnings-watch {{ color: #915d00; background: rgba(245, 158, 11, .16); }}
+.earnings-danger {{ color: #b42332; background: rgba(242, 54, 69, .13); }}
+.earnings-unknown {{ color: #64748b; background: #f1f5f9; }}
 .error {{ background: #fff5f6; border: 1px solid #ffc9cf; color: #b42332; padding: 12px; border-radius: 6px; white-space: pre-wrap; }}
 .result {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; margin-top: 14px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
 .candidate-detail {{ margin-top: 14px; }}
 .candidate-detail iframe {{ height: 980px; }}
-.watchlist-grid {{ display: grid; grid-template-columns: minmax(360px, 520px) 1fr; gap: 14px; align-items: start; }}
+.watchlist-grid {{ display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 14px; align-items: start; }}
 .watchlist-panel {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
 .watchlist-chart-shell {{ position: relative; height: 680px; min-width: 520px; }}
 .watchlist-chart {{ width: 100%; height: 100%; }}
+.watchlist-list-wrap {{ max-height: 760px; overflow: auto; }}
+.watch-row-button {{ width: 100%; justify-content: flex-start; border: 0; background: transparent; color: #131722; padding: 0; min-height: 0; text-align: left; }}
+.watch-row-button:hover {{ background: transparent; color: #2962ff; }}
+.watch-symbol-line {{ display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 900; }}
+.watch-meta-line {{ margin-top: 4px; color: #64748b; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }}
+.watch-detail-grid {{ display: grid; grid-template-columns: repeat(4, minmax(110px, 1fr)); gap: 8px; margin: 10px 0 12px; }}
+.watch-detail-item {{ border: 1px solid #e3e7ee; background: #f8fafc; border-radius: 6px; padding: 8px 9px; }}
+.watch-detail-item span {{ display: block; color: #64748b; font-size: 11px; font-weight: 800; margin-bottom: 4px; }}
+.watch-detail-item strong {{ font-size: 13px; }}
 .loading-overlay {{ position: absolute; inset: 0; z-index: 5; display: none; align-items: center; justify-content: center; flex-direction: column; gap: 10px; background: rgba(255,255,255,.82); color: #334155; font-weight: 800; }}
 .loading-overlay.active {{ display: flex; }}
 .spinner {{ width: 28px; height: 28px; border: 3px solid #d6dbe3; border-top-color: #2962ff; border-radius: 50%; animation: spin .8s linear infinite; }}
@@ -467,6 +553,10 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .progress-meta {{ color: #475569; font-size: 13px; }}
 .progress-actions {{ display: flex; gap: 8px; margin-top: 10px; }}
 .progress-actions button[hidden] {{ display: none; }}
+.dashboard-grid {{ display: grid; grid-template-columns: repeat(2, minmax(280px, 1fr)); gap: 14px; }}
+.dashboard-panel {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
+.dashboard-panel h2 {{ margin-top: 0; }}
+.quick-actions {{ display: flex; flex-wrap: wrap; gap: 8px; }}
 .links {{ margin: 0 0 12px; font-size: 13px; }}
 .links a {{ color: #2962ff; text-decoration: none; margin-right: 12px; font-weight: 700; }}
 .links a:hover {{ text-decoration: underline; }}
@@ -493,7 +583,7 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(4
   <nav class="tabs">
     <a class="{scanner_active}" href="/scanner">选股器</a>
     <a class="{watchlist_active}" href="/watchlist">自选池</a>
-    <a class="{backtest_active}" href="/">回测</a>
+    <a class="{backtest_active}" href="/backtest">回测</a>
     <a class="{batch_active}" href="/batch">批量回测</a>
   </nav>
 </header>
@@ -609,6 +699,93 @@ backtestForm.addEventListener("submit", (event) => {{
   }}
 }});
 </script>
+"""
+
+
+def render_dashboard() -> str:
+    latest = load_latest_scan()
+    latest_summary = latest.get("summary", {}) if latest else {}
+    latest_signal = str(latest.get("signal_date", "-")) if latest else "-"
+    latest_candidates = int(latest_summary.get("visible_candidates", 0)) if latest else 0
+    latest_strong = int(latest_summary.get("strong", 0)) if latest else 0
+    latest_medium = int(latest_summary.get("medium", 0)) if latest else 0
+    watch_items = load_watchlist_items()
+    symbols = [item["symbol"] for item in watch_items]
+    cache = price_cache_summary(symbols)
+    earnings_soon = 0
+    if symbols:
+        temp_rows = [
+            SignalResult(
+                symbol=symbol,
+                signal_date="",
+                close=0,
+                ma=0,
+                dist_to_ma_pct=0,
+                volume=0,
+                vol_ma=0,
+                volume_ratio=0,
+                massive_count_7d=0,
+                signal_type="",
+                avg_dollar_volume_20d=0,
+            )
+            for symbol in symbols[:50]
+        ]
+        enrich_earnings_dates(temp_rows)
+        earnings_soon = sum(1 for row in temp_rows if row.next_earnings_date and row.earnings_days <= 7)
+
+    return f"""
+<section class="page-head">
+  <div>
+    <h1>今日复盘面板</h1>
+    <p class="hint">盘后先看大盘环境，再看今日扫描和自选池风险；需要验证时再进入回测。</p>
+  </div>
+  <div class="mode-pill">Daily Review</div>
+</section>
+{render_market_environment_bar()}
+<section class="dashboard-grid">
+  <div class="dashboard-panel">
+    <h2>今日扫描</h2>
+    <section class="status-strip">
+      <div class="stat-card"><div class="stat-label">信号日</div><div class="stat-value">{html.escape(latest_signal)}</div></div>
+      <div class="stat-card"><div class="stat-label">候选</div><div class="stat-value">{latest_candidates}</div></div>
+      <div class="stat-card"><div class="stat-label">Strong</div><div class="stat-value">{latest_strong}</div></div>
+      <div class="stat-card"><div class="stat-label">Medium</div><div class="stat-value">{latest_medium}</div></div>
+    </section>
+    <div class="quick-actions">
+      <a class="btn" href="/scanner">开始选股</a>
+      <a class="btn btn-secondary" href="/scan/latest">查看今日结果</a>
+    </div>
+  </div>
+  <div class="dashboard-panel">
+    <h2>自选池</h2>
+    <section class="status-strip">
+      <div class="stat-card"><div class="stat-label">自选数量</div><div class="stat-value">{len(symbols)}</div></div>
+      <div class="stat-card"><div class="stat-label">7天内财报</div><div class="stat-value">{earnings_soon}</div></div>
+      <div class="stat-card"><div class="stat-label">缓存覆盖</div><div class="stat-value">{cache["cached_symbols"]}/{len(symbols)}</div></div>
+      <div class="stat-card"><div class="stat-label">数据最新</div><div class="stat-value">{html.escape(str(cache["latest"]))}</div></div>
+    </section>
+    <div class="quick-actions">
+      <a class="btn" href="/watchlist">打开自选池</a>
+      <a class="btn btn-secondary" href="/backtest">单票回测</a>
+      <a class="btn btn-secondary" href="/batch">批量回测</a>
+    </div>
+  </div>
+  <div class="dashboard-panel">
+    <h2>已记录待讨论</h2>
+    <p class="hint">打分制优化：先做因子验证，再决定总分权重。</p>
+    <p class="hint">消息面打分：后续重点讨论催化剂质量、新闻源、人工确认和保存评级。</p>
+    <p class="hint">自选池加入日期：后续显示加入日期、观察天数并支持排序。</p>
+  </div>
+  <div class="dashboard-panel">
+    <h2>快捷入口</h2>
+    <div class="quick-actions">
+      <a class="btn" href="/scanner">选股器</a>
+      <a class="btn btn-secondary" href="/watchlist">自选池</a>
+      <a class="btn btn-secondary" href="/backtest">回测</a>
+      <a class="btn btn-secondary" href="/batch">批量回测</a>
+    </div>
+  </div>
+</section>
 """
 
 
@@ -1251,6 +1428,26 @@ def format_earnings(row: SignalResult) -> str:
     return f"{row.next_earnings_date} / {row.earnings_days}天 / {row.earnings_status or 'Estimated'}{suffix}"
 
 
+def earnings_badge(row: SignalResult) -> str:
+    if not row.next_earnings_date:
+        return '<span class="badge earnings-unknown" title="财报日期暂不可用">Unknown</span>'
+    status = html.escape(row.earnings_status or "Estimated")
+    title = html.escape(f"{row.next_earnings_date} / {row.earnings_days}天 / {status}")
+    if row.earnings_days <= 3:
+        cls = "earnings-danger"
+        label = f"Earnings {row.earnings_days}D"
+    elif row.earnings_days <= 7:
+        cls = "earnings-watch"
+        label = f"Earnings {row.earnings_days}D"
+    elif row.earnings_days <= 30:
+        cls = "earnings-safe"
+        label = f"After {row.earnings_days}D"
+    else:
+        cls = "earnings-safe"
+        label = f"After {row.earnings_days}D"
+    return f'<span class="badge {cls}" title="{title}">{html.escape(label)}</span>'
+
+
 def format_metric(value: float, suffix: str = "%") -> str:
     if value == 999.0:
         return "N/A"
@@ -1400,9 +1597,17 @@ def hide_weak_candidates(params: dict[str, list[str]]) -> bool:
 
 
 def visible_candidate_rows(params: dict[str, list[str]], rows: list[SignalResult]) -> list[SignalResult]:
-    if not hide_weak_candidates(params):
-        return rows
-    return [row for row in rows if row.second_stage_rating != "Weak"]
+    visible = rows
+    if hide_weak_candidates(params):
+        visible = [row for row in visible if row.second_stage_rating != "Weak"]
+    earnings_filter = field(params, "earnings_filter", "show")
+    if earnings_filter == "hide_3d":
+        visible = [row for row in visible if not row.next_earnings_date or row.earnings_days > 3]
+    elif earnings_filter == "hide_7d":
+        visible = [row for row in visible if not row.next_earnings_date or row.earnings_days > 7]
+    elif earnings_filter == "hide_unknown":
+        visible = [row for row in visible if row.next_earnings_date]
+    return visible
 
 
 def cleanup_stale_latest_scan() -> None:
@@ -1678,6 +1883,7 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
 
     asset_type = field(params, "asset_type", "stocks")
     hide_weak_checked = " checked" if field(params, "hide_weak", "1" if DEFAULT_HIDE_WEAK_CANDIDATES else "0") == "1" else ""
+    earnings_filter = field(params, "earnings_filter", "show")
     default_symbols = "ASTS,NVDA,TSLA,AAPL,MSFT,QQQ"
     return f"""
 <section class="page-head">
@@ -1688,6 +1894,7 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
   <div class="mode-pill">盘后复盘 | Daily Close</div>
 </section>
 {latest_html}
+{render_market_environment_bar()}
 <section class="status-strip">
   <div class="stat-card"><div class="stat-label">模式</div><div class="stat-value">盘后复盘</div></div>
   <div class="stat-card"><div class="stat-label">信号日期</div><div class="stat-value">{scan_end.isoformat()}</div></div>
@@ -1721,6 +1928,14 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
   <label>最低价格<input name="min_price" value="{value("min_price", "5")}"></label>
   <label>20日最低成交额<input name="min_avg_dollar_volume" value="{value("min_avg_dollar_volume", "20000000")}"></label>
   <label class="checkbox-label"><input type="checkbox" name="hide_weak" value="1"{hide_weak_checked}> 隐藏 Weak 候选</label>
+  <label>财报风险
+    <select name="earnings_filter">
+      <option value="show"{selected(earnings_filter, "show")}>显示全部</option>
+      <option value="hide_3d"{selected(earnings_filter, "hide_3d")}>隐藏3天内财报</option>
+      <option value="hide_7d"{selected(earnings_filter, "hide_7d")}>隐藏7天内财报</option>
+      <option value="hide_unknown"{selected(earnings_filter, "hide_unknown")}>隐藏未知财报</option>
+    </select>
+  </label>
   <label>均线周期<input name="ma_length" value="{value("ma_length", "5")}"></label>
   <label>均量周期<input name="vol_length" value="{value("vol_length", "20")}"></label>
   <label>巨量倍数<input name="vol_multiplier" value="{value("vol_multiplier", "1.45")}"></label>
@@ -2009,7 +2224,7 @@ def render_candidate_table(rows: list[SignalResult]) -> str:
         f"<td>{r.second_stage_score_total}/20</td>"
         f'<td><span class="rating rating-{html.escape(r.second_stage_rating or "Pending")}">{html.escape(r.second_stage_rating or "Pending")}</span></td>'
         f'<td><button type="button" class="mini-action" data-add-watchlist="{html.escape(r.symbol)}" data-watch-note="{html.escape((r.second_stage_rating or "") + " " + (r.catalyst_label or ""))}">加入自选</button></td>'
-        f"<td>{html.escape(format_earnings(r))}</td>"
+        f"<td>{earnings_badge(r)}</td>"
         f'<td>{r.catalyst_score}/5 {html.escape(r.catalyst_label or "Manual review")} <a href="{html.escape(r.catalyst_yahoo_url or yahoo_news_url(r.symbol))}" target="_blank">Yahoo</a> <a href="{html.escape(catalyst_secondary_url(r))}" target="_blank">雪球</a></td>'
         f"<td>{r.sector_score}/5 {html.escape(r.sector_label or '-')} ({r.sector_peer_count}/{r.industry_peer_count})</td>"
         f"<td>{r.space_score}/5 {html.escape(r.space_label or '-')} / 52W {r.distance_52w_high_pct:.1f}% / 200MA {html.escape(r.above_200ma or '-')}</td>"
@@ -2172,8 +2387,8 @@ def run_scanner(params: dict[str, list[str]]) -> str:
 
     add_sector_and_rating(rows)
     rows.sort(key=lambda row: (row.second_stage_score_total, row.avg_dollar_volume_20d), reverse=True)
+    enrich_earnings_dates(rows)
     display_rows = visible_candidate_rows(params, rows)
-    enrich_earnings_dates(display_rows)
     stem = safe_name(f"next_b_{end}_{len(symbols)}")
     csv_path = REPORT_DIR / f"{stem}.csv"
     html_path = REPORT_DIR / f"{stem}.html"
@@ -2380,25 +2595,43 @@ def watchlist_row(item: dict[str, str], metadata: dict[str, object] | None) -> s
     cache_bars = read_price_cache(symbol)
     cache_text = f"数据至 {max((bar.date for bar in cache_bars), default='-')}" if cache_bars else "待拉取"
     form_id = f"watch-edit-{html.escape(symbol)}"
+    tags = []
+    if b_status != "-":
+        tags.append("B")
+    if s_status != "未触发" and s_status != "-":
+        tags.append("Risk")
+    if "3天内" in earnings or "7天内" in earnings:
+        tags.append("Earnings")
+    tag_text = " ".join(tags) if tags else "-"
+    detail = {
+        "symbol": symbol,
+        "company": company,
+        "sector": sector,
+        "industry": industry,
+        "marketCap": cap_text,
+        "close": latest_close,
+        "change": change_pct,
+        "maStatus": ma_status,
+        "distMa": dist_ma,
+        "volRatio": vol_ratio,
+        "sStatus": s_status,
+        "earnings": earnings,
+        "bStatus": b_status,
+        "group": group,
+        "note": note,
+        "cache": cache_text,
+        "addedAt": item.get("added_at", "-"),
+    }
+    data_attrs = " ".join(
+        f'data-{key}="{html.escape(str(value), quote=True)}"'
+        for key, value in detail.items()
+    )
     return (
         "<tr>"
-        f'<td><button type="button" class="symbol-button" data-watch-symbol="{html.escape(symbol)}">{html.escape(symbol)}</button></td>'
-        f'<td><input class="table-input" form="{form_id}" name="group" value="{html.escape(group)}" title="分组"></td>'
-        f'<td><textarea class="table-note" form="{form_id}" name="note" title="备注">{html.escape(note)}</textarea></td>'
-        f"<td>{html.escape(company)}</td>"
-        f"<td>{cap_text}</td>"
-        f"<td>{html.escape(sector)}</td>"
-        f"<td>{html.escape(industry)}</td>"
+        f'<td><button type="button" class="watch-row-button" data-watch-symbol="{html.escape(symbol)}" {data_attrs}><span class="watch-symbol-line"><span>{html.escape(symbol)}</span><span>{html.escape(change_pct)}</span></span><span class="watch-meta-line">{html.escape(company)} · {html.escape(group)}</span></button></td>'
         f"<td>{latest_close}</td>"
-        f"<td>{change_pct}</td>"
-        f"<td>{html.escape(ma_status)}</td>"
-        f"<td>{dist_ma}</td>"
-        f"<td>{vol_ratio}</td>"
-        f"<td>{html.escape(s_status)}</td>"
-        f"<td>{html.escape(earnings)}</td>"
-        f"<td>{b_status}</td>"
-        f"<td>{html.escape(cache_text)}</td>"
-        f'<td><form id="{form_id}" action="/watchlist/update" method="get"><input type="hidden" name="symbol" value="{html.escape(symbol)}"><button type="submit" class="secondary">保存</button></form><a class="delete-link" href="/watchlist/delete?symbol={quote(symbol)}" onclick="return confirm(\'确认从自选池删除 {html.escape(symbol)}？\');">删除</a></td>'
+        f"<td>{html.escape(tag_text)}</td>"
+        f'<td><form id="{form_id}" action="/watchlist/update" method="get"><input type="hidden" name="symbol" value="{html.escape(symbol)}"><input type="hidden" name="group" value="{html.escape(group)}"><input type="hidden" name="note" value="{html.escape(note)}"><button type="submit" class="secondary btn-small">保存</button></form><a class="delete-link" href="/watchlist/delete?symbol={quote(symbol)}" onclick="return confirm(\'确认从自选池删除 {html.escape(symbol)}？\');">删除</a></td>'
         "</tr>"
     )
 
@@ -2410,7 +2643,7 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
     metadata = watchlist_metadata_by_symbol(symbols)
     rows = "\n".join(watchlist_row(item, metadata.get(item["symbol"].upper())) for item in items)
     if not rows:
-        rows = '<tr><td colspan="17" class="empty">暂无自选股。先在上方添加股票代码。</td></tr>'
+        rows = '<tr><td colspan="4" class="empty">暂无自选股。先在上方添加股票代码。</td></tr>'
     default_symbol = symbols[0] if symbols else ""
     cache = price_cache_summary(symbols)
     return f"""
@@ -2437,9 +2670,9 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
 <p class="hint">缓存用于减少重复拉取行情：打开图表或扫描时会自动补最新日 K；每只股票最多保留约 {cache["max_bars"]} 根，避免长期膨胀。</p>
 <section class="watchlist-grid">
   <div class="watchlist-panel">
-    <div class="table-wrap">
-      <table class="resizable-table" id="watchlist-table">
-        <thead><tr><th>Symbol</th><th>Group</th><th>Note</th><th>Company</th><th>Mkt Cap $B</th><th>Sector</th><th>Industry</th><th>Close</th><th>Day %</th><th>MA状态</th><th>Dist 5MA</th><th>Vol Ratio</th><th>S状态</th><th>Next Earnings</th><th>B Status</th><th>Cache</th><th>Action</th></tr></thead>
+    <div class="table-wrap watchlist-list-wrap">
+      <table id="watchlist-table">
+        <thead><tr><th>自选</th><th>Close</th><th>Tags</th><th>Action</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </div>
@@ -2450,6 +2683,16 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
         <strong id="watch-chart-title">{html.escape(default_symbol) if default_symbol else "选择一个股票"}</strong>
         <p class="hint" id="watch-chart-subtitle">周期可切换，数据为已完成日 K。</p>
       </div>
+    </div>
+    <div class="watch-detail-grid" id="watch-detail-grid">
+      <div class="watch-detail-item"><span>Company</span><strong id="watch-detail-company">-</strong></div>
+      <div class="watch-detail-item"><span>Market Cap</span><strong id="watch-detail-market">-</strong></div>
+      <div class="watch-detail-item"><span>Industry</span><strong id="watch-detail-industry">-</strong></div>
+      <div class="watch-detail-item"><span>加入日期</span><strong id="watch-detail-added">-</strong></div>
+      <div class="watch-detail-item"><span>技术状态</span><strong id="watch-detail-tech">-</strong></div>
+      <div class="watch-detail-item"><span>B / S</span><strong id="watch-detail-signal">-</strong></div>
+      <div class="watch-detail-item"><span>财报</span><strong id="watch-detail-earnings">-</strong></div>
+      <div class="watch-detail-item"><span>备注</span><strong id="watch-detail-note">-</strong></div>
     </div>
     <div class="period-tabs" id="watch-periods">
       <button type="button" data-preset="1m">1M</button>
@@ -2477,6 +2720,20 @@ const watchTooltip = document.getElementById("watchlist-tooltip");
 const watchTitle = document.getElementById("watch-chart-title");
 const watchSubtitle = document.getElementById("watch-chart-subtitle");
 const watchLoading = document.getElementById("watch-chart-loading");
+function attr(node, name, fallback = "-") {{
+  return node?.getAttribute(name) || fallback;
+}}
+function updateWatchDetail(button) {{
+  if (!button) return;
+  document.getElementById("watch-detail-company").textContent = attr(button, "data-company");
+  document.getElementById("watch-detail-market").textContent = attr(button, "data-marketCap");
+  document.getElementById("watch-detail-industry").textContent = `${{attr(button, "data-sector")}} / ${{attr(button, "data-industry")}}`;
+  document.getElementById("watch-detail-added").textContent = attr(button, "data-addedAt");
+  document.getElementById("watch-detail-tech").textContent = `${{attr(button, "data-maStatus")}} / 距5MA ${{attr(button, "data-distMa")}} / 量比 ${{attr(button, "data-volRatio")}}`;
+  document.getElementById("watch-detail-signal").textContent = `${{attr(button, "data-bStatus")}} / ${{attr(button, "data-sStatus")}}`;
+  document.getElementById("watch-detail-earnings").textContent = attr(button, "data-earnings");
+  document.getElementById("watch-detail-note").textContent = attr(button, "data-note");
+}}
 
 function destroyWatchChart() {{
   if (watchChart) {{
@@ -2567,6 +2824,7 @@ document.addEventListener("click", event => {{
   const button = event.target.closest("[data-watch-symbol]");
   if (!button) return;
   event.preventDefault();
+  updateWatchDetail(button);
   loadWatchChart(button.dataset.watchSymbol, watchCurrentPreset);
 }});
 document.getElementById("watch-periods").addEventListener("click", event => {{
@@ -2578,6 +2836,8 @@ document.getElementById("watch-periods").addEventListener("click", event => {{
 }});
 if (window.initializeResizableTables) initializeResizableTables(document);
 if (window.initializeSortableTables) initializeSortableTables(document);
+const initialWatchButton = document.querySelector("[data-watch-symbol]");
+if (initialWatchButton) updateWatchDetail(initialWatchButton);
 if (watchInitialSymbol) loadWatchChart(watchInitialSymbol, "1y");
 </script>
 """
@@ -2711,8 +2971,8 @@ def finish_scan_result(
     end = field(params, "end", default_scan_end_date().isoformat())
     add_sector_and_rating(rows)
     rows.sort(key=lambda row: (row.second_stage_score_total, row.avg_dollar_volume_20d), reverse=True)
+    enrich_earnings_dates(rows)
     display_rows = visible_candidate_rows(params, rows)
-    enrich_earnings_dates(display_rows)
     stem = safe_name(f"next_b_{end}_{len(symbols)}_{int(time.time())}")
     csv_path = REPORT_DIR / f"{stem}.csv"
     html_path = REPORT_DIR / f"{stem}.html"
@@ -2876,6 +3136,8 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         try:
             if parsed.path == "/":
+                self.send_bytes(page_shell(render_dashboard(), "home"))
+            elif parsed.path == "/backtest":
                 self.send_bytes(page_shell(render_backtest_form(params), "backtest"))
             elif parsed.path == "/run":
                 self.send_bytes(page_shell(run_strategy(params), "backtest"))
