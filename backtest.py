@@ -1071,17 +1071,22 @@ def make_report(
     if benchmark and benchmark.get("curve"):
         benchmark_symbol = html.escape(str(benchmark.get("symbol", "Benchmark")))
         benchmark_return = float(benchmark.get("return_pct", 0.0))
+        buy_hold_symbol = html.escape(str(benchmark.get("buy_hold_symbol", "Buy & Hold")))
+        buy_hold_return = float(benchmark.get("buy_hold_return_pct", 0.0))
         strategy_curve = [[row["date"], float(row["equity"])] for row in equity_curve]
         benchmark_curve = [[day, value] for day, value in benchmark["curve"]]
+        buy_hold_curve = [[day, value] for day, value in benchmark.get("buy_hold_curve", [])]
         benchmark_payload = {
             "strategy": strategy_curve,
             "benchmark": benchmark_curve,
             "benchmarkSymbol": benchmark_symbol,
+            "buyHold": buy_hold_curve,
+            "buyHoldSymbol": buy_hold_symbol,
         }
         benchmark_html = f"""
-<h2>{labels['strategy_vs']} {benchmark_symbol}</h2>
+<h2>{labels['strategy_vs']} {buy_hold_symbol} / {benchmark_symbol}</h2>
 <section class="panel">
-  <div class="compare-note">{labels['strategy_return']} {summary['return_pct']:.2f}% / {benchmark_symbol} {labels['benchmark_return']} {benchmark_return:.2f}%</div>
+  <div class="compare-note">{labels['strategy_return']} {summary['return_pct']:.2f}% / {buy_hold_symbol} 买入持有 {buy_hold_return:.2f}% / {benchmark_symbol} {labels['benchmark_return']} {benchmark_return:.2f}%</div>
   <div id="compare-chart" class="chart compare-chart"></div>
 </section>
 <script type="application/json" id="benchmark-data">{json.dumps(benchmark_payload, ensure_ascii=False)}</script>
@@ -1312,20 +1317,6 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
 </section>
 <h2>{labels['pnl_chart']}</h2>
 <section class="panel"><div id="pnl-chart" class="chart pnl-chart"></div></section>
-<h2>{labels['trade_detail']}</h2>
-<div class="table-wrap">
-<table>
-<thead><tr><th>#</th><th>{labels['buy_signal_date']}</th><th>{labels['buy_action_date']}</th><th>{labels['buy_signal_close']}</th><th>{labels['buy_fill']}</th><th>{labels['buy_gap']}</th><th>{labels['sell_signal_date']}</th><th>{labels['sell_action_date']}</th><th>{labels['sell_signal_close']}</th><th>{labels['sell_fill']}</th><th>{labels['sell_gap']}</th><th>{labels['bars_held']}</th><th>{labels['shares']}</th><th>{labels['entry_value']}</th><th>{labels['exit_value']}</th><th>{labels['pnl_amount']}</th><th>{labels['return_pct']}</th><th>{labels['max_favorable']}</th><th>{labels['max_drawdown']}</th><th>{labels['exit_reason']}</th></tr></thead>
-<tbody>{trade_rows}</tbody>
-</table>
-</div>
-<h2>信号明细</h2>
-<div class="table-wrap">
-<table>
-<thead><tr><th>#</th><th>信号日</th><th>类型</th><th>状态</th><th>是否交易</th><th>技术分</th><th>评级</th><th>量能</th><th>趋势</th><th>K线</th><th>空间</th><th>风险</th><th>说明</th><th>收盘</th><th>MA</th><th>距MA</th><th>量比</th><th>持仓中</th><th>后1日</th><th>后3日</th><th>后5日</th><th>后10日</th><th>后20日</th><th>20日最大涨幅</th><th>20日最大回撤</th><th>20日内S点</th></tr></thead>
-<tbody>{signal_rows}</tbody>
-</table>
-</div>
 </main>
 <script type="application/json" id="chart-data">{json.dumps(chart_payload, ensure_ascii=False)}</script>
 <script type="application/json" id="pnl-data">{json.dumps(pnl_payload, ensure_ascii=False)}</script>
@@ -1394,6 +1385,7 @@ if (benchmarkEl) {{
   const b = JSON.parse(benchmarkEl.textContent);
   Plotly.newPlot('compare-chart', [
     {{ type: 'scatter', mode: 'lines', name: 'Strategy', x: b.strategy.map(p => p[0]), y: b.strategy.map(p => p[1]), line: {{ color: '#2962ff', width: 2 }} }},
+    {{ type: 'scatter', mode: 'lines', name: b.buyHoldSymbol || 'Buy & Hold', x: (b.buyHold || []).map(p => p[0]), y: (b.buyHold || []).map(p => p[1]), line: {{ color: '#089981', width: 2 }} }},
     {{ type: 'scatter', mode: 'lines', name: b.benchmarkSymbol, x: b.benchmark.map(p => p[0]), y: b.benchmark.map(p => p[1]), line: {{ color: '#7c3aed', width: 2 }} }},
   ], {{ margin: {{ l: 64, r: 28, t: 20, b: 44 }}, hovermode: 'x unified', paper_bgcolor: '#fff', plot_bgcolor: '#fff', xaxis: {{ showgrid: true, gridcolor: '#eef1f5' }}, yaxis: {{ title: chartLabels.equity, showgrid: true, gridcolor: '#eef1f5' }}, legend: {{ orientation: 'h', x: 0, y: 1.08 }}, font: {{ family: 'Inter, Microsoft YaHei UI, PingFang SC, Arial, sans-serif', size: 12, color: '#131722' }} }}, chartConfig);
 }}

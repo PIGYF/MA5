@@ -26,6 +26,7 @@ from backtest import (
     open_position_snapshot,
     price_cache_path,
     read_price_cache,
+    build_ratchet_inputs,
     rolling_sma,
     summarize,
     write_equity,
@@ -188,6 +189,23 @@ def build_benchmark(symbol: str, start: str, end: str, initial_cash: float) -> d
         "symbol": symbol,
         "return_pct": (bars[-1].close / first_close - 1) * 100,
         "curve": [(bar.date, initial_cash * (bar.close / first_close)) for bar in bars],
+    }
+
+
+def build_buy_hold(symbol: str, bars: list[Bar], initial_cash: float) -> dict[str, object]:
+    first_close = bars[0].close
+    curve = [(bar.date, initial_cash * (bar.close / first_close)) for bar in bars]
+    peak = initial_cash
+    max_drawdown = 0.0
+    for _, value in curve:
+        peak = max(peak, value)
+        if peak:
+            max_drawdown = max(max_drawdown, (peak - value) / peak * 100)
+    return {
+        "symbol": symbol,
+        "return_pct": (bars[-1].close / first_close - 1) * 100,
+        "max_drawdown_pct": max_drawdown,
+        "curve": curve,
     }
 
 
@@ -471,12 +489,12 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(4
 </head>
 <body><main>
 <header class="app-topbar">
-  <div class="brand">MA5 Strategy Lab<span>回测 | 选股 | 观察</span></div>
+  <div class="brand">MA5 Strategy Lab<span>选股 | 自选 | 回测</span></div>
   <nav class="tabs">
-    <a class="{backtest_active}" href="/">回测</a>
     <a class="{scanner_active}" href="/scanner">选股器</a>
-    <a class="{batch_active}" href="/batch">批量回测</a>
     <a class="{watchlist_active}" href="/watchlist">自选池</a>
+    <a class="{backtest_active}" href="/">回测</a>
+    <a class="{batch_active}" href="/batch">批量回测</a>
   </nav>
 </header>
 {content}
@@ -517,7 +535,6 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
     params = params or {}
     today = date.today()
     preset = field(params, "preset", "1y")
-    strategy = field(params, "strategy_name", "ratchet")
     start_default = start_for_preset(preset, today).isoformat()
 
     def value(name: str, default: str) -> str:
@@ -536,12 +553,7 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
 </section>
 <form class="form" action="/run" method="get" id="backtest-form">
   <label>股票代码<input name="symbol" value="{value("symbol", "AAPL").upper()}" placeholder="AAPL"></label>
-  <label>策略版本
-    <select name="strategy_name">
-      <option value="ratchet"{selected(strategy, "ratchet")}>棘轮趋势版</option>
-      <option value="classic"{selected(strategy, "classic")}>原始版本</option>
-    </select>
-  </label>
+  <input type="hidden" name="strategy_name" value="ratchet">
   <label>回测周期
     <select name="preset" id="preset">
       <option value="6m"{selected(preset, "6m")}>近 6 个月</option>
@@ -720,11 +732,105 @@ def render_backtest_signal_table(bars, trades, equity_curve) -> str:
 """
 
 
+def render_signal_rating_summary(bars, trades, equity_curve) -> str:
+    signal_rows = [
+        row for row in build_signal_detail_rows(bars, trades, equity_curve)
+        if row.get("signal_type") == "B"
+    ]
+    groups: dict[str, list[dict[str, float | int | str]]] = {"Strong": [], "Medium": [], "Weak": []}
+    for row in signal_rows:
+        groups.setdefault(str(row.get("signal_rating", "Weak")), []).append(row)
+
+    def numeric(row: dict[str, float | int | str], key: str) -> float | None:
+        value = row.get(key, "")
+        if value == "" or value is None:
+            return None
+        return float(value)
+
+    def fmt_pct(value: float | None) -> str:
+        if value is None:
+            return "-"
+        cls = "pos" if value >= 0 else "neg"
+        return f'<span class="{cls}">{value:.2f}%</span>'
+
+    rows_html = []
+    for rating in ("Strong", "Medium", "Weak"):
+        rows = groups.get(rating, [])
+        if not rows:
+            rows_html.append(
+                f'<tr><td><span class="rating rating-{rating}">{rating}</span></td><td>0</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>'
+            )
+            continue
+        ret5 = [value for row in rows if (value := numeric(row, "ret_5d")) is not None]
+        ret10 = [value for row in rows if (value := numeric(row, "ret_10d")) is not None]
+        ret20 = [value for row in rows if (value := numeric(row, "ret_20d")) is not None]
+        max_up = [value for row in rows if (value := numeric(row, "max_up_20d")) is not None]
+        max_down = [value for row in rows if (value := numeric(row, "max_down_20d")) is not None]
+
+        def avg(values: list[float]) -> float | None:
+            return sum(values) / len(values) if values else None
+
+        win5 = sum(1 for value in ret5 if value > 0) / len(ret5) * 100 if ret5 else None
+        win10 = sum(1 for value in ret10 if value > 0) / len(ret10) * 100 if ret10 else None
+        win20 = sum(1 for value in ret20 if value > 0) / len(ret20) * 100 if ret20 else None
+        rows_html.append(
+            "<tr>"
+            f'<td><span class="rating rating-{rating}">{rating}</span></td>'
+            f"<td>{len(rows)}</td>"
+            f"<td>{fmt_pct(avg(ret5))}</td>"
+            f"<td>{fmt_pct(avg(ret10))}</td>"
+            f"<td>{fmt_pct(avg(ret20))}</td>"
+            f"<td>{fmt_pct(win5)}</td>"
+            f"<td>{fmt_pct(win10)}</td>"
+            f"<td>{fmt_pct(win20)}</td>"
+            f"<td>{fmt_pct(avg(max_up))} / {fmt_pct(avg(max_down))}</td>"
+            "</tr>"
+        )
+
+    return f"""
+  <h2>技术分后续表现</h2>
+  <div class="table-wrap compact-table">
+    <table class="resizable-table">
+      <thead><tr><th>评级</th><th>B点数</th><th>平均后5日</th><th>平均后10日</th><th>平均后20日</th><th>5日胜率</th><th>10日胜率</th><th>20日胜率</th><th>20日平均最大涨幅 / 回撤</th></tr></thead>
+      <tbody>{"".join(rows_html)}</tbody>
+    </table>
+  </div>
+"""
+
+
+def render_strategy_compare(summary: dict[str, float | int], buy_hold: dict[str, object], benchmark: dict[str, object]) -> str:
+    strategy_return = float(summary["return_pct"])
+    strategy_dd = float(summary["max_drawdown_pct"])
+    buy_hold_return = float(buy_hold.get("return_pct", 0.0))
+    buy_hold_dd = float(buy_hold.get("max_drawdown_pct", 0.0))
+    benchmark_return = float(benchmark.get("return_pct", 0.0))
+    out_stock = strategy_return - buy_hold_return
+    out_benchmark = strategy_return - benchmark_return
+
+    def pct_cell(value: float) -> str:
+        cls = "pos" if value >= 0 else "neg"
+        return f'<span class="{cls}">{value:.2f}%</span>'
+
+    return f"""
+  <h2>策略对比</h2>
+  <div class="table-wrap compact-table">
+    <table class="resizable-table">
+      <thead><tr><th>项目</th><th>收益率</th><th>最大回撤</th><th>相对策略</th></tr></thead>
+      <tbody>
+        <tr><td>策略</td><td>{pct_cell(strategy_return)}</td><td>{strategy_dd:.2f}%</td><td>-</td></tr>
+        <tr><td>{html.escape(str(buy_hold.get("symbol", "Buy & Hold")))} 买入持有</td><td>{pct_cell(buy_hold_return)}</td><td>{buy_hold_dd:.2f}%</td><td>{pct_cell(out_stock)}</td></tr>
+        <tr><td>{html.escape(str(benchmark.get("symbol", "Benchmark")))}</td><td>{pct_cell(benchmark_return)}</td><td>-</td><td>{pct_cell(out_benchmark)}</td></tr>
+      </tbody>
+    </table>
+  </div>
+"""
+
+
 def run_strategy(params: dict[str, list[str]]) -> str:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     cleanup_old_reports()
     symbol = field(params, "symbol", "AAPL").upper()
-    strategy_name = field(params, "strategy_name", "ratchet")
+    strategy_name = "ratchet"
     start = field(params, "start", start_for_preset("1y", date.today()).isoformat())
     end = field(params, "end", date.today().isoformat())
     benchmark_symbol = field(params, "benchmark", DEFAULT_BENCHMARK).upper()
@@ -749,6 +855,10 @@ def run_strategy(params: dict[str, list[str]]) -> str:
     )
     summary = summarize(trades, equity_curve, initial_cash)
     benchmark = build_benchmark(benchmark_symbol, start, end, initial_cash)
+    buy_hold = build_buy_hold(symbol, bars, initial_cash)
+    benchmark["buy_hold_symbol"] = symbol
+    benchmark["buy_hold_return_pct"] = buy_hold["return_pct"]
+    benchmark["buy_hold_curve"] = buy_hold["curve"]
 
     stem = safe_name(f"{symbol}_{strategy_name}_{start}_{end}_{benchmark_symbol}")
     report_path = REPORT_DIR / f"{stem}_report.html"
@@ -769,7 +879,9 @@ def run_strategy(params: dict[str, list[str]]) -> str:
     <a href="{trades_url}" target="_blank">交易明细 CSV</a>
     <a href="{equity_url}" target="_blank">权益曲线 CSV</a>
   </p>
+  {render_strategy_compare(summary, buy_hold, benchmark)}
   {render_backtest_trade_table(trades, equity_curve)}
+  {render_signal_rating_summary(bars, trades, equity_curve)}
   {render_backtest_signal_table(bars, trades, equity_curve)}
   <iframe src="{report_url}" title="Backtest report"></iframe>
 </section>
@@ -1870,9 +1982,30 @@ def render_candidate_table(rows: list[SignalResult]) -> str:
             return stored
         return xueqiu_news_url(row.symbol, row.company_name)
 
+    def technical_badge(row: SignalResult) -> str:
+        rating = html.escape(row.technical_rating or "Pending")
+        score = row.technical_score or 0.0
+        return f'<span class="score-badge score-{rating}" title="{html.escape(row.technical_notes or "")}">{score:.1f}</span>'
+
+    def candidate_summary(row: SignalResult) -> str:
+        pieces = [
+            f"Tech {row.technical_score:.0f}",
+            f"量比 {row.volume_ratio:.2f}x",
+            f"距5MA {row.dist_to_ma_pct:.1f}%",
+        ]
+        if row.distance_52w_high_pct:
+            pieces.append(f"距52W高 {row.distance_52w_high_pct:.1f}%")
+        if row.second_stage_rating:
+            pieces.append(row.second_stage_rating)
+        if row.earnings_days != 9999:
+            pieces.append(f"财报 {row.earnings_days}天")
+        return " / ".join(pieces)
+
     table_rows = "\n".join(
         f'<tr><td><button type="button" class="symbol-button" data-candidate-symbol="{html.escape(r.symbol)}">{html.escape(r.symbol)}</button></td><td>{html.escape(r.company_name or "-")}</td>'
         f"<td>{r.market_cap / 1_000_000_000:.2f}</td>"
+        f"<td>{html.escape(candidate_summary(r))}</td>"
+        f"<td>{technical_badge(r)}</td>"
         f"<td>{r.second_stage_score_total}/20</td>"
         f'<td><span class="rating rating-{html.escape(r.second_stage_rating or "Pending")}">{html.escape(r.second_stage_rating or "Pending")}</span></td>'
         f'<td><button type="button" class="mini-action" data-add-watchlist="{html.escape(r.symbol)}" data-watch-note="{html.escape((r.second_stage_rating or "") + " " + (r.catalyst_label or ""))}">加入自选</button></td>'
@@ -1888,11 +2021,11 @@ def render_candidate_table(rows: list[SignalResult]) -> str:
         for r in rows
     )
     if not table_rows:
-        table_rows = '<tr><td colspan="21" class="empty">No visible candidates.</td></tr>'
+        table_rows = '<tr><td colspan="23" class="empty">No visible candidates.</td></tr>'
     return f"""
 <div class="table-wrap">
 <table class="resizable-table">
-  <thead><tr><th>Symbol</th><th>Company</th><th>Mkt Cap $B</th><th>Total</th><th>Rating</th><th>Watch</th><th>Next Earnings</th><th>Catalyst</th><th>Sector Score</th><th>Space</th><th>Candle</th><th>Sector</th><th>Industry</th><th>Signal Date</th><th>Signal</th><th>Close</th><th>MA</th><th>Dist</th><th>Vol Ratio</th><th>Massive 7D</th><th>20D $Vol</th></tr></thead>
+  <thead><tr><th>Symbol</th><th>Company</th><th>Mkt Cap $B</th><th>Summary</th><th>Tech</th><th>Total</th><th>Rating</th><th>Watch</th><th>Next Earnings</th><th>Catalyst</th><th>Sector Score</th><th>Space</th><th>Candle</th><th>Sector</th><th>Industry</th><th>Signal Date</th><th>Signal</th><th>Close</th><th>MA</th><th>Dist</th><th>Vol Ratio</th><th>Massive 7D</th><th>20D $Vol</th></tr></thead>
   <tbody>{table_rows}</tbody>
 </table>
 </div>
@@ -2195,6 +2328,8 @@ def watchlist_row(item: dict[str, str], metadata: dict[str, object] | None) -> s
     dist_ma = "-"
     vol_ratio = "-"
     b_status = "-"
+    ma_status = "-"
+    s_status = "-"
     earnings = "未知"
     try:
         end = default_scan_end_date()
@@ -2208,10 +2343,21 @@ def watchlist_row(item: dict[str, str], metadata: dict[str, object] | None) -> s
             vol_ma = rolling_sma([bar.volume for bar in bars], 20)
             if ma[-1]:
                 dist_ma = f"{(bars[-1].close / ma[-1] - 1) * 100:.2f}%"
+                ma_status = "5MA上方" if bars[-1].close > ma[-1] else "5MA下方"
             if vol_ma[-1]:
                 vol_ratio = f"{bars[-1].volume / vol_ma[-1]:.2f}x"
             result = latest_b_signal(symbol, bars, 5, 20, 1.45, 4.5, 0, 0)
             b_status = "B点" if result else "-"
+            buy_signal, _, _, _ = build_ratchet_inputs(bars, 5, 20, 1.45, 4.5 / 100)
+            recent_b = next((bars[idx].date for idx in range(len(buy_signal) - 1, -1, -1) if buy_signal[idx]), "")
+            if recent_b and not result:
+                b_status = f"最近B {recent_b}"
+            if ma[-1] and bars[-1].close < ma[-1] * (1 - 7.5 / 100):
+                s_status = "跌破防守"
+            elif ma[-1] and len(bars) >= 2 and ma[-2] and bars[-2].close >= ma[-2] and bars[-1].close < ma[-1]:
+                s_status = "跌破5MA"
+            else:
+                s_status = "未触发"
             temp = SignalResult(
                 symbol=symbol,
                 signal_date=bars[-1].date,
@@ -2245,8 +2391,10 @@ def watchlist_row(item: dict[str, str], metadata: dict[str, object] | None) -> s
         f"<td>{html.escape(industry)}</td>"
         f"<td>{latest_close}</td>"
         f"<td>{change_pct}</td>"
+        f"<td>{html.escape(ma_status)}</td>"
         f"<td>{dist_ma}</td>"
         f"<td>{vol_ratio}</td>"
+        f"<td>{html.escape(s_status)}</td>"
         f"<td>{html.escape(earnings)}</td>"
         f"<td>{b_status}</td>"
         f"<td>{html.escape(cache_text)}</td>"
@@ -2262,7 +2410,7 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
     metadata = watchlist_metadata_by_symbol(symbols)
     rows = "\n".join(watchlist_row(item, metadata.get(item["symbol"].upper())) for item in items)
     if not rows:
-        rows = '<tr><td colspan="15" class="empty">暂无自选股。先在上方添加股票代码。</td></tr>'
+        rows = '<tr><td colspan="17" class="empty">暂无自选股。先在上方添加股票代码。</td></tr>'
     default_symbol = symbols[0] if symbols else ""
     cache = price_cache_summary(symbols)
     return f"""
@@ -2291,7 +2439,7 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
   <div class="watchlist-panel">
     <div class="table-wrap">
       <table class="resizable-table" id="watchlist-table">
-        <thead><tr><th>Symbol</th><th>Group</th><th>Note</th><th>Company</th><th>Mkt Cap $B</th><th>Sector</th><th>Industry</th><th>Close</th><th>Day %</th><th>Dist 5MA</th><th>Vol Ratio</th><th>Next Earnings</th><th>B Status</th><th>Cache</th><th>Action</th></tr></thead>
+        <thead><tr><th>Symbol</th><th>Group</th><th>Note</th><th>Company</th><th>Mkt Cap $B</th><th>Sector</th><th>Industry</th><th>Close</th><th>Day %</th><th>MA状态</th><th>Dist 5MA</th><th>Vol Ratio</th><th>S状态</th><th>Next Earnings</th><th>B Status</th><th>Cache</th><th>Action</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </div>

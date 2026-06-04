@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
-from backtest import Bar, fetch_bars, rolling_sma, rolling_sum
+from backtest import Bar, fetch_bars, rolling_sma, rolling_sum, score_signal_strength
 
 
 DEFAULT_SYMBOLS = [
@@ -36,6 +36,9 @@ class SignalResult:
     massive_count_7d: int
     signal_type: str
     avg_dollar_volume_20d: float
+    technical_score: float = 0.0
+    technical_rating: str = ""
+    technical_notes: str = ""
     company_name: str = ""
     market_cap: float = 0.0
     country: str = ""
@@ -89,6 +92,26 @@ def load_symbols(path: Path | None) -> list[str]:
             continue
         symbols.append(line.split(",")[0])
     return unique_symbols(symbols)
+
+
+def technical_strength_for_latest_signal(
+    bars: list[Bar],
+    ma_values: list[float | None],
+    vol_ma_values: list[float | None],
+    signal_type: str,
+) -> dict[str, float | str]:
+    index = len(bars) - 1
+    equity_curve: list[dict[str, float | str]] = []
+    for i, bar in enumerate(bars):
+        equity_curve.append(
+            {
+                "date": bar.date,
+                "ma": "" if ma_values[i] is None else ma_values[i],
+                "vol_ma": "" if vol_ma_values[i] is None else vol_ma_values[i],
+                "dynamic_stop": "",
+            }
+        )
+    return score_signal_strength(bars, equity_curve, index, signal_type)
 
 
 def latest_b_signal(
@@ -190,6 +213,7 @@ def latest_b_signal_with_reason(
         signal_type = "initial"
     else:
         signal_type = "reentry"
+    strength = technical_strength_for_latest_signal(bars, ma, vol_ma, "B")
 
     return SignalResult(
         symbol=symbol,
@@ -203,6 +227,9 @@ def latest_b_signal_with_reason(
         massive_count_7d=int(massive_counts[i]),
         signal_type=signal_type,
         avg_dollar_volume_20d=avg_dollar_volume,
+        technical_score=float(strength["signal_score"]),
+        technical_rating=str(strength["signal_rating"]),
+        technical_notes=str(strength["score_notes"]),
     ), "符合B点"
 
 
@@ -212,13 +239,14 @@ def write_html(path: Path, rows: list[SignalResult], end: str) -> None:
         f"<td>{html.escape(r.country or '-')}</td><td>{html.escape(r.sector or '-')}</td><td>{html.escape(r.industry or '-')}</td><td>{html.escape(r.asset_type or '-')}</td>"
         f"<td>{html.escape(r.next_earnings_date or 'Unknown')}</td><td>{'' if r.earnings_days == 9999 else r.earnings_days}</td><td>{html.escape(r.earnings_status or '-')}</td>"
         f"<td>{html.escape(r.signal_date)}</td><td>{html.escape(r.signal_type)}</td>"
+        f"<td>{r.technical_score:.1f}</td><td>{html.escape(r.technical_rating or '-')}</td>"
         f"<td>{r.close:.2f}</td><td>{r.ma:.2f}</td><td>{r.dist_to_ma_pct:.2f}%</td>"
         f"<td>{r.volume_ratio:.2f}x</td><td>{r.massive_count_7d}</td>"
         f"<td>{r.avg_dollar_volume_20d / 1_000_000:.1f}M</td></tr>"
         for r in rows
     )
     if not table_rows:
-        table_rows = '<tr><td colspan="18" class="empty">No candidates found.</td></tr>'
+        table_rows = '<tr><td colspan="20" class="empty">No candidates found.</td></tr>'
     path.write_text(
         f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>Next B Screener</title>
@@ -235,7 +263,7 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(4
 </style></head><body><main>
 <h1>下一交易日 B 点候选</h1>
 <p>筛选口径：最新已完成日 K 在 {end} 附近出现 B 信号，因此下一交易日开盘才是策略买入点。</p>
-<table><thead><tr><th>Symbol</th><th>Company</th><th>Mkt Cap</th><th>Country</th><th>Sector</th><th>Industry</th><th>Asset</th><th>Next Earnings</th><th>Days</th><th>Status</th><th>Signal Date</th><th>Signal</th><th>Close</th><th>MA</th><th>Dist</th><th>Vol Ratio</th><th>Massive 7D</th><th>20D $Vol</th></tr></thead>
+<table><thead><tr><th>Symbol</th><th>Company</th><th>Mkt Cap</th><th>Country</th><th>Sector</th><th>Industry</th><th>Asset</th><th>Next Earnings</th><th>Days</th><th>Status</th><th>Signal Date</th><th>Signal</th><th>Tech</th><th>Tech Rating</th><th>Close</th><th>MA</th><th>Dist</th><th>Vol Ratio</th><th>Massive 7D</th><th>20D $Vol</th></tr></thead>
 <tbody>{table_rows}</tbody></table>
 </main></body></html>""",
         encoding="utf-8",
