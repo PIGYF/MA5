@@ -32,66 +32,42 @@ from backtest import (
     write_equity,
     write_trades,
 )
+from ma5_config import (
+    DATA_DIR,
+    DEFAULT_BENCHMARK,
+    DEFAULT_HIDE_WEAK_CANDIDATES,
+    DEFAULT_MAX_SCAN_SYMBOLS,
+    DEFAULT_MIN_MARKET_CAP_100M_USD,
+    EARNINGS_CACHE_PATH,
+    EARNINGS_CACHE_SECONDS,
+    LATEST_SCAN_PATH,
+    LEGACY_NASDAQ_CACHE_PATH,
+    NASDAQ_CACHE_PATH,
+    NASDAQ_CACHE_SECONDS,
+    REPORT_DIR,
+    REPORT_RETENTION_DAYS,
+    REPORT_RETENTION_MAX_FILES,
+    SCAN_DIR,
+    WATCHLIST_PATH,
+    chart_start_for_preset,
+    current_signal_date,
+    default_scan_end_date,
+    default_scan_start_date,
+    field,
+    next_market_weekday,
+    number_field,
+    safe_name,
+    start_for_preset,
+    validate_backtest_range,
+    validate_scan_range,
+)
+from ashare_lab import ASHARE_ROUTE, latest_ashare_signal, scan_ashare_candidates
 from scan_next_b import SignalResult, latest_b_signal, load_symbols, unique_symbols, write_html
 
 
-ROOT = Path(__file__).resolve().parent
-DATA_DIR = Path(os.environ.get("MA5_DATA_DIR", ROOT / "data")).expanduser().resolve()
-REPORT_DIR = Path(os.environ.get("MA5_REPORT_DIR", ROOT / "reports")).expanduser().resolve()
-SCAN_DIR = DATA_DIR / "scans"
-LATEST_SCAN_PATH = SCAN_DIR / "latest.json"
-WATCHLIST_PATH = DATA_DIR / "watchlist.json"
-DEFAULT_BENCHMARK = "^IXIC"
 SCAN_JOBS: dict[str, dict[str, object]] = {}
 SCAN_JOBS_LOCK = threading.Lock()
 ACTIVE_SCAN_STATUSES = {"queued", "running", "pausing", "paused", "stopping"}
-NASDAQ_CACHE_PATH = DATA_DIR / "cache" / "nasdaq_screener.json"
-LEGACY_NASDAQ_CACHE_PATH = ROOT / "nasdaq_screener_cache.json"
-EARNINGS_CACHE_PATH = DATA_DIR / "cache" / "earnings_dates.json"
-NASDAQ_CACHE_SECONDS = 60 * 60 * 12
-EARNINGS_CACHE_SECONDS = 60 * 60 * 24
-DEFAULT_SCAN_LOOKBACK_DAYS = 70
-DEFAULT_MIN_MARKET_CAP_100M_USD = 200
-DEFAULT_MAX_SCAN_SYMBOLS = 500
-DEFAULT_HIDE_WEAK_CANDIDATES = True
-REPORT_RETENTION_DAYS = 30
-REPORT_RETENTION_MAX_FILES = 120
-
-
-def field(params: dict[str, list[str]], name: str, default: str) -> str:
-    return params.get(name, [default])[0].strip()
-
-
-def number_field(params: dict[str, list[str]], name: str, default: float) -> float:
-    return float(field(params, name, str(default)))
-
-
-def min_backtest_days(vol_length: int) -> int:
-    return max(30, vol_length + 10)
-
-
-def validate_backtest_range(start: str, end: str, vol_length: int) -> None:
-    start_date = date.fromisoformat(start)
-    end_date = date.fromisoformat(end)
-    minimum_days = min_backtest_days(vol_length)
-    if end_date <= start_date:
-        raise ValueError("结束日期必须晚于开始日期。")
-    actual_days = (end_date - start_date).days
-    if actual_days < minimum_days:
-        raise ValueError(f"回测区间过短。当前均量周期为 {vol_length}，至少需要 {minimum_days} 天。")
-
-
-def validate_scan_range(start: str, end: str) -> None:
-    start_date = date.fromisoformat(start)
-    end_date = date.fromisoformat(end)
-    if end_date <= start_date:
-        raise ValueError("选股结束日期必须晚于开始日期。")
-    if (end_date - start_date).days < 30:
-        raise ValueError("选股区间过短。开始日期和结束日期至少需要间隔 1 个月。")
-
-
-def safe_name(value: str) -> str:
-    return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in value)
 
 
 def cleanup_old_reports() -> None:
@@ -148,40 +124,6 @@ def job_stop_requested(job_id: str) -> bool:
     return bool(job and job.get("stop_requested"))
 
 
-def start_for_preset(preset: str, end: date) -> date:
-    if preset == "6m":
-        return end - timedelta(days=183)
-    if preset == "1y":
-        return end - timedelta(days=365)
-    if preset == "3y":
-        return end - timedelta(days=365 * 3)
-    if preset == "5y":
-        return end - timedelta(days=365 * 5)
-    return end - timedelta(days=365)
-
-
-def default_scan_end_date() -> date:
-    end = date.today() - timedelta(days=1)
-    while end.weekday() >= 5:
-        end -= timedelta(days=1)
-    return end
-
-
-def default_scan_start_date(end: date) -> date:
-    return end - timedelta(days=DEFAULT_SCAN_LOOKBACK_DAYS)
-
-
-def current_signal_date() -> str:
-    return default_scan_end_date().isoformat()
-
-
-def next_market_weekday(day: date) -> date:
-    next_day = day + timedelta(days=1)
-    while next_day.weekday() >= 5:
-        next_day += timedelta(days=1)
-    return next_day
-
-
 def build_benchmark(symbol: str, start: str, end: str, initial_cash: float) -> dict[str, object]:
     bars = fetch_bars("yfinance", symbol, start, end, "qfq", None)
     first_close = bars[0].close
@@ -197,6 +139,22 @@ def market_environment(symbol: str = "QQQ") -> dict[str, object]:
     start = end - timedelta(days=120)
     try:
         bars = fetch_bars("yfinance", symbol, start.isoformat(), end.isoformat(), "qfq", None)
+        vix_value = 0.0
+        vix_label = "Unavailable"
+        try:
+            vix_bars = fetch_bars("yfinance", "^VIX", start.isoformat(), end.isoformat(), "qfq", None)
+            if vix_bars:
+                vix_value = vix_bars[-1].close
+                if vix_value >= 30:
+                    vix_label = "高恐慌"
+                elif vix_value >= 20:
+                    vix_label = "风险升温"
+                elif vix_value >= 15:
+                    vix_label = "正常偏谨慎"
+                else:
+                    vix_label = "低波动"
+        except Exception:
+            pass
         closes = [bar.close for bar in bars]
         ma20 = rolling_sma(closes, 20)
         ma50 = rolling_sma(closes, 50)
@@ -207,14 +165,18 @@ def market_environment(symbol: str = "QQQ") -> dict[str, object]:
         dist20 = (latest.close / ma20_now - 1) * 100 if ma20_now else 0.0
         dist50 = (latest.close / ma50_now - 1) * 100 if ma50_now else 0.0
         ma20_rising = bool(ma20_now and ma20_prev and ma20_now >= ma20_prev)
-        if dist20 >= 0 and ma20_rising and dist50 >= -1:
+        if vix_value >= 30:
+            state = "Risk-Off"
+            tone = "bad"
+            message = "VIX 高位，候选保留，但建议显著降低仓位和追高优先级"
+        elif dist20 >= 0 and ma20_rising and dist50 >= -1 and vix_value < 20:
             state = "Risk-On"
             tone = "good"
             message = "环境支持正常选股"
-        elif dist20 < -1.5 or not ma20_rising:
+        elif dist20 < -1.5 or not ma20_rising or vix_value >= 20:
             state = "Risk-Off"
-            tone = "bad"
-            message = "候选保留，但建议降低追高优先级"
+            tone = "bad" if vix_value >= 20 else "warn"
+            message = "候选保留，但建议降低仓位和追高优先级"
         else:
             state = "Neutral"
             tone = "warn"
@@ -227,6 +189,8 @@ def market_environment(symbol: str = "QQQ") -> dict[str, object]:
             "dist20": dist20,
             "dist50": dist50,
             "ma20_direction": "上行" if ma20_rising else "下行",
+            "vix": vix_value,
+            "vix_label": vix_label,
             "message": message,
         }
     except Exception as exc:
@@ -238,6 +202,8 @@ def market_environment(symbol: str = "QQQ") -> dict[str, object]:
             "dist20": 0.0,
             "dist50": 0.0,
             "ma20_direction": "-",
+            "vix": 0.0,
+            "vix_label": "Unavailable",
             "message": f"大盘环境暂不可用：{exc}",
         }
 
@@ -251,7 +217,7 @@ def render_market_environment_bar(env: dict[str, object] | None = None) -> str:
     <strong>{html.escape(str(env.get("state", "Unavailable")))}</strong>
     <span>{html.escape(str(env.get("symbol", "QQQ")))} {html.escape(str(env.get("date", "-")))}</span>
   </div>
-  <p>{html.escape(str(env.get("symbol", "QQQ")))} 距20MA {float(env.get("dist20", 0.0)):.2f}% / 距50MA {float(env.get("dist50", 0.0)):.2f}% / 20MA {html.escape(str(env.get("ma20_direction", "-")))}。{html.escape(str(env.get("message", "")))}</p>
+  <p>{html.escape(str(env.get("symbol", "QQQ")))} 距20MA {float(env.get("dist20", 0.0)):.2f}% / 距50MA {float(env.get("dist50", 0.0)):.2f}% / 20MA {html.escape(str(env.get("ma20_direction", "-")))} / VIX {float(env.get("vix", 0.0)):.1f} {html.escape(str(env.get("vix_label", "")))}。{html.escape(str(env.get("message", "")))}</p>
 </section>
 """
 
@@ -391,17 +357,6 @@ def update_watchlist_symbol(symbol: str, group: str, note: str) -> list[str]:
     raise ValueError(f"{clean} 不在自选池中。")
 
 
-def chart_start_for_preset(preset: str, end: date) -> date:
-    return {
-        "1m": end - timedelta(days=30),
-        "3m": end - timedelta(days=90),
-        "6m": end - timedelta(days=183),
-        "1y": end - timedelta(days=365),
-        "3y": end - timedelta(days=365 * 3),
-        "5y": end - timedelta(days=365 * 5),
-    }.get(preset, end - timedelta(days=365))
-
-
 def price_cache_summary(symbols: list[str]) -> dict[str, object]:
     files = list(PRICE_CACHE_DIR.glob("*.csv")) if PRICE_CACHE_DIR.exists() else []
     total_size = sum(path.stat().st_size for path in files if path.exists())
@@ -421,11 +376,15 @@ def price_cache_summary(symbols: list[str]) -> dict[str, object]:
     }
 
 
-def page_shell(content: str, active: str = "backtest") -> bytes:
+def page_shell(content: str, active: str = "backtest", market: str = "us") -> bytes:
+    prefix = "/cn" if market == "cn" else "/us"
+    home_active = " active" if active == "home" else ""
     backtest_active = " active" if active == "backtest" else ""
     scanner_active = " active" if active == "scanner" else ""
     batch_active = " active" if active == "batch" else ""
     watchlist_active = " active" if active == "watchlist" else ""
+    us_market_active = " active" if market == "us" else ""
+    cn_market_active = " active" if market == "cn" else ""
     text = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -439,6 +398,11 @@ main {{ width: 100%; max-width: 1680px; margin: 0 auto; padding: 0 16px 24px; }}
 .app-topbar {{ position: sticky; top: 0; z-index: 20; display: flex; justify-content: space-between; align-items: center; gap: 16px; height: 54px; margin: 0 -16px 16px; padding: 0 18px; background: #131722; border-bottom: 1px solid #2a2e39; box-shadow: 0 1px 3px rgba(19, 23, 34, .18); }}
 .brand {{ display: flex; flex-direction: column; line-height: 1.1; color: #f8fafc; font-weight: 800; letter-spacing: 0; }}
 .brand span {{ color: #9ca3af; font-size: 11px; font-weight: 600; margin-top: 3px; }}
+.topbar-actions {{ display: flex; align-items: center; gap: 14px; min-width: 0; }}
+.market-switch {{ display: flex; gap: 2px; padding: 2px; border: 1px solid #2a2e39; border-radius: 6px; background: #0f131d; }}
+.market-switch a {{ padding: 6px 10px; border-radius: 4px; color: #d1d4dc; text-decoration: none; font-size: 12px; font-weight: 900; white-space: nowrap; }}
+.market-switch a:hover {{ background: #1f2430; color: #fff; }}
+.market-switch a.active {{ background: #2962ff; color: #fff; }}
 .tabs {{ display: flex; gap: 2px; margin: 0; }}
 .tabs a {{ padding: 8px 12px; border: 1px solid transparent; border-radius: 4px; color: #d1d4dc; text-decoration: none; font-size: 13px; font-weight: 700; }}
 .tabs a:hover {{ background: #1f2430; color: #fff; }}
@@ -520,6 +484,10 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .watchlist-list-wrap {{ max-height: 760px; overflow: auto; }}
 .watch-row-button {{ width: 100%; justify-content: flex-start; border: 0; background: transparent; color: #131722; padding: 0; min-height: 0; text-align: left; }}
 .watch-row-button:hover {{ background: transparent; color: #2962ff; }}
+.watch-row-cell {{ min-width: 220px; }}
+.watch-row-head {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }}
+.watch-row-actions {{ display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }}
+.watch-row-actions .delete-link {{ min-height: 22px; padding: 2px 6px; font-size: 11px; }}
 .watch-symbol-line {{ display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 900; }}
 .watch-meta-line {{ margin-top: 4px; color: #64748b; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }}
 .watch-detail-grid {{ display: grid; grid-template-columns: repeat(4, minmax(110px, 1fr)); gap: 8px; margin: 10px 0 12px; }}
@@ -574,18 +542,25 @@ th.resizable {{ position: sticky; user-select: none; }}
 th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5), th:nth-child(6), td:nth-child(6), th:nth-child(7), td:nth-child(7) {{ text-align: left; }}
 .empty {{ text-align: center; color: #607080; }}
 @media (max-width: 1200px) {{ .form {{ grid-template-columns: repeat(4, 1fr); }} .watchlist-grid {{ grid-template-columns: 1fr; }} .watchlist-chart-shell {{ min-width: 0; }} }}
-@media (max-width: 760px) {{ main {{ padding: 0 10px 18px; }} .app-topbar {{ margin: 0 -10px 12px; height: auto; padding: 10px; align-items: flex-start; flex-direction: column; }} .tabs {{ width: 100%; overflow-x: auto; }} .form, .status-strip {{ grid-template-columns: repeat(2, 1fr); }} .wide {{ grid-column: span 2; }} .page-head {{ display: block; }} }}
+@media (max-width: 760px) {{ main {{ padding: 0 10px 18px; }} .app-topbar {{ margin: 0 -10px 12px; height: auto; padding: 10px; align-items: flex-start; flex-direction: column; }} .topbar-actions {{ width: 100%; flex-direction: column; align-items: stretch; gap: 8px; }} .market-switch, .tabs {{ width: 100%; overflow-x: auto; }} .form, .status-strip {{ grid-template-columns: repeat(2, 1fr); }} .wide {{ grid-column: span 2; }} .page-head {{ display: block; }} }}
 </style>
 </head>
 <body><main>
 <header class="app-topbar">
   <div class="brand">MA5 Strategy Lab<span>选股 | 自选 | 回测</span></div>
-  <nav class="tabs">
-    <a class="{scanner_active}" href="/scanner">选股器</a>
-    <a class="{watchlist_active}" href="/watchlist">自选池</a>
-    <a class="{backtest_active}" href="/backtest">回测</a>
-    <a class="{batch_active}" href="/batch">批量回测</a>
-  </nav>
+  <div class="topbar-actions">
+    <nav class="market-switch" aria-label="市场切换">
+      <a class="{us_market_active}" href="/us">美股</a>
+      <a class="{cn_market_active}" href="/cn">A股</a>
+    </nav>
+    <nav class="tabs">
+      <a class="{home_active}" href="{prefix}">首页</a>
+      <a class="{scanner_active}" href="{prefix}/scanner">选股器</a>
+      <a class="{watchlist_active}" href="{prefix}/watchlist">自选池</a>
+      <a class="{backtest_active}" href="{prefix}/backtest">回测</a>
+      <a class="{batch_active}" href="{prefix}/batch">批量回测</a>
+    </nav>
+  </div>
 </header>
 {content}
 <div class="toast-stack" id="toast-stack"></div>
@@ -752,8 +727,8 @@ def render_dashboard() -> str:
       <div class="stat-card"><div class="stat-label">Medium</div><div class="stat-value">{latest_medium}</div></div>
     </section>
     <div class="quick-actions">
-      <a class="btn" href="/scanner">开始选股</a>
-      <a class="btn btn-secondary" href="/scan/latest">查看今日结果</a>
+      <a class="btn" href="/us/scanner">开始选股</a>
+      <a class="btn btn-secondary" href="/us/scan/latest">查看今日结果</a>
     </div>
   </div>
   <div class="dashboard-panel">
@@ -765,27 +740,209 @@ def render_dashboard() -> str:
       <div class="stat-card"><div class="stat-label">数据最新</div><div class="stat-value">{html.escape(str(cache["latest"]))}</div></div>
     </section>
     <div class="quick-actions">
-      <a class="btn" href="/watchlist">打开自选池</a>
-      <a class="btn btn-secondary" href="/backtest">单票回测</a>
-      <a class="btn btn-secondary" href="/batch">批量回测</a>
+      <a class="btn" href="/us/watchlist">打开自选池</a>
+      <a class="btn btn-secondary" href="/us/backtest">单票回测</a>
+      <a class="btn btn-secondary" href="/us/batch">批量回测</a>
     </div>
-  </div>
-  <div class="dashboard-panel">
-    <h2>已记录待讨论</h2>
-    <p class="hint">打分制优化：先做因子验证，再决定总分权重。</p>
-    <p class="hint">消息面打分：后续重点讨论催化剂质量、新闻源、人工确认和保存评级。</p>
-    <p class="hint">自选池加入日期：后续显示加入日期、观察天数并支持排序。</p>
   </div>
   <div class="dashboard-panel">
     <h2>快捷入口</h2>
     <div class="quick-actions">
-      <a class="btn" href="/scanner">选股器</a>
-      <a class="btn btn-secondary" href="/watchlist">自选池</a>
-      <a class="btn btn-secondary" href="/backtest">回测</a>
-      <a class="btn btn-secondary" href="/batch">批量回测</a>
+      <a class="btn" href="/us/scanner">选股器</a>
+      <a class="btn btn-secondary" href="/us/watchlist">自选池</a>
+      <a class="btn btn-secondary" href="/us/backtest">回测</a>
+      <a class="btn btn-secondary" href="/us/batch">批量回测</a>
     </div>
   </div>
 </section>
+"""
+
+
+def render_market_placeholder(active: str = "home") -> str:
+    labels = {
+        "home": ("A股复盘面板", "后续这里会显示 A 股市场环境、A 股扫描摘要和 A 股自选池状态。"),
+        "scanner": ("A股选股器", "后续这里会接入 A 股股票池、A 股策略和 A 股盘后选股。"),
+        "watchlist": ("A股自选池", "后续这里会维护 A 股自选列表，并和美股自选池分开保存。"),
+        "backtest": ("A股回测", "后续这里会使用 A 股独立交易规则、手续费、印花税、涨跌停和复权设置。"),
+        "batch": ("A股批量回测", "后续这里会批量验证 A 股策略参数和股票池表现。"),
+    }
+    title, description = labels.get(active, labels["home"])
+    return f"""
+<section class="page-head">
+  <div>
+    <h1>{html.escape(title)}</h1>
+    <p class="hint">{html.escape(description)}</p>
+  </div>
+  <div class="mode-pill">A Share | Reserved</div>
+</section>
+<section class="result">
+  <h2>暂未开放</h2>
+  <p class="hint">A 股数据源、策略、选股池、回测规则会从独立模块开始实现，不和当前美股 MA5 逻辑混在一起。</p>
+</section>
+"""
+
+
+def render_ashare_scanner(params: dict[str, list[str]]) -> str:
+    mode = field(params, "mode", "single")
+    symbol = field(params, "symbol", "600487")
+    j_threshold = number_field(params, "j_threshold", 14.0)
+    min_market_cap = number_field(params, "min_market_cap", 50.0)
+    max_symbols = int(number_field(params, "max_symbols", 300))
+    result_html = ""
+    if mode == "market":
+        try:
+            scan = scan_ashare_candidates(min_market_cap, max_symbols, j_threshold)
+            rows = []
+            rating_class = {"Strong": "score-Strong", "Medium": "score-Medium", "Watch": "score-Medium"}
+            for row in scan.candidates:
+                cls = rating_class.get(row.candidate_rating, "score-Weak")
+                rows.append(
+                    "<tr>"
+                    f"<td>{html.escape(row.symbol)}</td>"
+                    f"<td>{html.escape(row.name or '-')}</td>"
+                    f"<td><span class=\"score-badge {cls}\">{html.escape(row.candidate_rating)}</span></td>"
+                    f"<td>{row.volume_score:.1f}/5</td>"
+                    f"<td>{row.j_value:.2f}</td>"
+                    f"<td>{row.close:.2f}</td>"
+                    f"<td>{html.escape(row.latest_date)}</td>"
+                    f"<td>{row.recent_peak_to_base:.2f}</td>"
+                    f"<td>{row.recent_avg10_to_base:.2f}</td>"
+                    f"<td>{row.red_avg_to_green_avg:.2f}</td>"
+                    f"<td>{row.top5_red_count}/5</td>"
+                    f"<td>{html.escape(row.data_source)}</td>"
+                    "</tr>"
+                )
+            table_html = (
+                """
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>代码</th><th>名称</th><th>评级</th><th>量能分</th><th>J值</th><th>收盘</th><th>交易日</th><th>峰值/基准</th><th>10日均/基准</th><th>红均/绿均</th><th>Top5红柱</th><th>数据源</th></tr></thead>
+      <tbody>
+"""
+                + "\n".join(rows)
+                + """
+      </tbody>
+    </table>
+  </div>
+"""
+                if rows
+                else '<p class="hint">本次没有筛出候选。可以适当放宽 J 值阈值，或降低市值/扫描数量限制后再试。</p>'
+            )
+            error_note = ""
+            if scan.errors:
+                sample = "; ".join(f"{symbol}: {reason[:80]}" for symbol, reason in scan.errors[:5])
+                error_note = f'<p class="hint">有 {len(scan.errors)} 只股票扫描失败：{html.escape(sample)}</p>'
+            cap_note = "已按总市值过滤" if scan.market_cap_filter_applied else "总市值接口不可用，本次按行情接口取前 N 只，市值过滤未生效"
+            result_html = f"""
+<section class="result">
+  <div class="toolbar">
+    <div>
+      <h2>A股选股结果</h2>
+      <p class="hint">入选硬条件为趋势通过 + J值冰点；量能分用于二次看图确认。股票池来源：{html.escape(scan.universe_source)}。</p>
+    </div>
+  </div>
+  <section class="status-strip">
+    <div class="stat-card"><div class="stat-label">扫描数量</div><div class="stat-value">{scan.scanned}</div></div>
+    <div class="stat-card"><div class="stat-label">候选数量</div><div class="stat-value">{len(scan.candidates)}</div></div>
+    <div class="stat-card"><div class="stat-label">市值过滤</div><div class="stat-value">{html.escape(cap_note)}</div></div>
+    <div class="stat-card"><div class="stat-label">失败数量</div><div class="stat-value">{len(scan.errors)}</div></div>
+  </section>
+  {table_html}
+  {error_note}
+</section>
+"""
+        except Exception as exc:
+            result_html = f'<div class="error">{html.escape(str(exc))}</div>'
+    elif symbol.strip():
+        try:
+            snapshot = latest_ashare_signal(symbol, j_threshold)
+
+            def status_badge(value: bool) -> str:
+                cls = "score-Strong" if value else "score-Weak"
+                text = "通过" if value else "未通过"
+                return f'<span class="score-badge {cls}">{text}</span>'
+
+            rating_cls = "score-Strong" if snapshot.candidate_rating == "Strong" else "score-Medium" if snapshot.candidate_rating in ("Medium", "Watch") else "score-Weak"
+            signal_text = {
+                "Strong": "强候选",
+                "Medium": "中等候选",
+                "Watch": "待看图",
+                "None": "未入选",
+            }.get(snapshot.candidate_rating, snapshot.candidate_rating)
+            name = f" / {snapshot.name}" if snapshot.name else ""
+            result_html = f"""
+<section class="result">
+  <div class="toolbar">
+    <div>
+      <h2>{html.escape(snapshot.symbol)}{html.escape(name)} 策略验证</h2>
+      <p class="hint">当前只做单票验证，用于确认 A 股策略指标和量能结构；全市场扫描会在这个模块稳定后接入。</p>
+    </div>
+    <span class="score-badge {rating_cls}">{signal_text}</span>
+  </div>
+  <section class="status-strip">
+    <div class="stat-card"><div class="stat-label">最新交易日</div><div class="stat-value">{html.escape(snapshot.latest_date)}</div></div>
+    <div class="stat-card"><div class="stat-label">收盘价</div><div class="stat-value">{snapshot.close:.2f}</div></div>
+    <div class="stat-card"><div class="stat-label">量能评分</div><div class="stat-value">{snapshot.volume_score:.1f}/5</div></div>
+    <div class="stat-card"><div class="stat-label">数据源 / 日K</div><div class="stat-value">{html.escape(snapshot.data_source)} / {snapshot.bars_count}</div></div>
+  </section>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>条件</th><th>结果</th><th>关键数值</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>趋势条件</td>
+          <td>{status_badge(snapshot.trend_ok)}</td>
+          <td>短期趋势 {snapshot.zx_short_trend:.2f} / 多空线 {snapshot.zx_multi_trend:.2f} / 斜率 {snapshot.zx_multi_slope:.2f}</td>
+          <td>短期趋势线在多空线之上，且多空线向上。</td>
+        </tr>
+        <tr>
+          <td>KDJ J 超卖</td>
+          <td>{status_badge(snapshot.j_oversold)}</td>
+          <td>J={snapshot.j_value:.2f} / 阈值 {j_threshold:.2f}</td>
+          <td>用于寻找强趋势中的短线冰点。</td>
+        </tr>
+        <tr>
+          <td>红长绿短量能</td>
+          <td><span class="score-badge {rating_cls}">{snapshot.volume_score:.1f}/5</span></td>
+          <td>峰值/基准 {snapshot.recent_peak_to_base:.2f}，10日均量/基准 {snapshot.recent_avg10_to_base:.2f}，红均/绿均 {snapshot.red_avg_to_green_avg:.2f}</td>
+          <td>该项用于二次看图确认强弱，不再作为入选硬条件。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <section class="status-strip">
+    <div class="stat-card"><div class="stat-label">基准均量</div><div class="stat-value">{snapshot.base_volume / 10000:.1f}万</div></div>
+    <div class="stat-card"><div class="stat-label">近20日峰值量</div><div class="stat-value">{snapshot.recent_peak_volume / 10000:.1f}万</div></div>
+    <div class="stat-card"><div class="stat-label">红 / 绿天数</div><div class="stat-value">{snapshot.red_days} / {snapshot.green_days}</div></div>
+    <div class="stat-card"><div class="stat-label">Top5 红柱数</div><div class="stat-value">{snapshot.top5_red_count} / 5</div></div>
+  </section>
+</section>
+"""
+        except Exception as exc:
+            result_html = f'<div class="error">{html.escape(str(exc))}</div>'
+
+    return f"""
+<section class="page-head">
+  <div>
+    <h1>A股选股器</h1>
+    <p class="hint">趋势条件 + J值冰点作为候选硬条件，红长绿短量能用于二次看图确认强弱。当前先做盘后选股，不做回测。</p>
+  </div>
+  <div class="mode-pill">A Share | Scanner</div>
+</section>
+<form class="form" action="/cn/scanner" method="get">
+  <input type="hidden" name="mode" value="single">
+  <label>股票代码<input name="symbol" value="{html.escape(symbol)}" placeholder="600487"></label>
+  <label>J值阈值<input type="number" step="0.1" name="j_threshold" value="{j_threshold:g}"></label>
+  <button type="submit">单票验证</button>
+</form>
+<form class="form" action="/cn/scanner" method="get">
+  <input type="hidden" name="mode" value="market">
+  <label>最低市值（亿元）<input type="number" step="1" name="min_market_cap" value="{min_market_cap:g}"></label>
+  <label>最多扫描<input type="number" step="1" name="max_symbols" value="{max_symbols}"></label>
+  <label>J值阈值<input type="number" step="0.1" name="j_threshold" value="{j_threshold:g}"></label>
+  <button type="submit">开始选股</button>
+</form>
+{result_html}
 """
 
 
@@ -2628,10 +2785,14 @@ def watchlist_row(item: dict[str, str], metadata: dict[str, object] | None) -> s
     )
     return (
         "<tr>"
-        f'<td><button type="button" class="watch-row-button" data-watch-symbol="{html.escape(symbol)}" {data_attrs}><span class="watch-symbol-line"><span>{html.escape(symbol)}</span><span>{html.escape(change_pct)}</span></span><span class="watch-meta-line">{html.escape(company)} · {html.escape(group)}</span></button></td>'
+        '<td class="watch-row-cell">'
+        '<div class="watch-row-head">'
+        f'<button type="button" class="watch-row-button" data-watch-symbol="{html.escape(symbol)}" {data_attrs}><span class="watch-symbol-line"><span>{html.escape(symbol)}</span><span>{html.escape(change_pct)}</span></span><span class="watch-meta-line">{html.escape(company)} · {html.escape(group)}</span></button>'
+        f'<span class="watch-row-actions"><a class="delete-link" href="/watchlist/delete?symbol={quote(symbol)}" onclick="return confirm(\'确认从自选池删除 {html.escape(symbol)}？\');">删除</a></span>'
+        "</div>"
+        "</td>"
         f"<td>{latest_close}</td>"
         f"<td>{html.escape(tag_text)}</td>"
-        f'<td><form id="{form_id}" action="/watchlist/update" method="get"><input type="hidden" name="symbol" value="{html.escape(symbol)}"><input type="hidden" name="group" value="{html.escape(group)}"><input type="hidden" name="note" value="{html.escape(note)}"><button type="submit" class="secondary btn-small">保存</button></form><a class="delete-link" href="/watchlist/delete?symbol={quote(symbol)}" onclick="return confirm(\'确认从自选池删除 {html.escape(symbol)}？\');">删除</a></td>'
         "</tr>"
     )
 
@@ -2643,7 +2804,7 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
     metadata = watchlist_metadata_by_symbol(symbols)
     rows = "\n".join(watchlist_row(item, metadata.get(item["symbol"].upper())) for item in items)
     if not rows:
-        rows = '<tr><td colspan="4" class="empty">暂无自选股。先在上方添加股票代码。</td></tr>'
+        rows = '<tr><td colspan="3" class="empty">暂无自选股。先在上方添加股票代码。</td></tr>'
     default_symbol = symbols[0] if symbols else ""
     cache = price_cache_summary(symbols)
     return f"""
@@ -2672,7 +2833,7 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
   <div class="watchlist-panel">
     <div class="table-wrap watchlist-list-wrap">
       <table id="watchlist-table">
-        <thead><tr><th>自选</th><th>Close</th><th>Tags</th><th>Action</th></tr></thead>
+        <thead><tr><th>自选</th><th>Close</th><th>Tags</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </div>
@@ -3134,57 +3295,82 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
+        raw_path = parsed.path
+        market = "us"
+        route_path = raw_path
+        if raw_path == ASHARE_ROUTE:
+            market = "cn"
+            route_path = "/scanner"
+        elif raw_path == "/us" or raw_path.startswith("/us/"):
+            market = "us"
+            route_path = raw_path[3:] or "/"
+        elif raw_path == "/cn" or raw_path.startswith("/cn/"):
+            market = "cn"
+            route_path = raw_path[3:] or "/"
         try:
-            if parsed.path == "/":
-                self.send_bytes(page_shell(render_dashboard(), "home"))
-            elif parsed.path == "/backtest":
-                self.send_bytes(page_shell(render_backtest_form(params), "backtest"))
-            elif parsed.path == "/run":
-                self.send_bytes(page_shell(run_strategy(params), "backtest"))
-            elif parsed.path == "/batch":
-                self.send_bytes(page_shell(render_batch_form(params), "batch"))
-            elif parsed.path == "/batch/run":
-                self.send_bytes(page_shell(run_batch_backtest(params), "batch"))
-            elif parsed.path == "/watchlist":
-                self.send_bytes(page_shell(render_watchlist_page(params), "watchlist"))
-            elif parsed.path == "/watchlist/add":
+            if market == "cn":
+                if route_path in ("/", ""):
+                    self.send_bytes(page_shell(render_market_placeholder("home"), "home", "cn"))
+                elif route_path == "/scanner":
+                    self.send_bytes(page_shell(render_ashare_scanner(params), "scanner", "cn"))
+                elif route_path == "/watchlist":
+                    self.send_bytes(page_shell(render_market_placeholder("watchlist"), "watchlist", "cn"))
+                elif route_path == "/backtest":
+                    self.send_bytes(page_shell(render_market_placeholder("backtest"), "backtest", "cn"))
+                elif route_path == "/batch":
+                    self.send_bytes(page_shell(render_market_placeholder("batch"), "batch", "cn"))
+                else:
+                    self.send_error(404)
+            elif route_path == "/":
+                self.send_bytes(page_shell(render_dashboard(), "home", "us"))
+            elif route_path == "/backtest":
+                self.send_bytes(page_shell(render_backtest_form(params), "backtest", "us"))
+            elif route_path == "/run":
+                self.send_bytes(page_shell(run_strategy(params), "backtest", "us"))
+            elif route_path == "/batch":
+                self.send_bytes(page_shell(render_batch_form(params), "batch", "us"))
+            elif route_path == "/batch/run":
+                self.send_bytes(page_shell(run_batch_backtest(params), "batch", "us"))
+            elif route_path == "/watchlist":
+                self.send_bytes(page_shell(render_watchlist_page(params), "watchlist", "us"))
+            elif route_path == "/watchlist/add":
                 self.add_watchlist_item(params)
-            elif parsed.path == "/watchlist/add.json":
+            elif route_path == "/watchlist/add.json":
                 self.add_watchlist_item_json(params)
-            elif parsed.path == "/watchlist/update":
+            elif route_path == "/watchlist/update":
                 self.update_watchlist_item(params)
-            elif parsed.path == "/watchlist/delete":
+            elif route_path == "/watchlist/delete":
                 self.delete_watchlist_item(params)
-            elif parsed.path == "/watchlist/chart":
+            elif route_path == "/watchlist/chart":
                 self.send_json(watchlist_chart_payload(params))
-            elif parsed.path == "/scanner":
-                self.send_bytes(page_shell(render_scanner_form(params), "scanner"))
-            elif parsed.path == "/scan":
-                self.send_bytes(page_shell(run_scanner(params), "scanner"))
-            elif parsed.path == "/scan/latest":
-                self.send_bytes(page_shell(latest_scan_to_html(), "scanner"))
-            elif parsed.path == "/scan/delete":
+            elif route_path == "/scanner":
+                self.send_bytes(page_shell(render_scanner_form(params), "scanner", "us"))
+            elif route_path == "/scan":
+                self.send_bytes(page_shell(run_scanner(params), "scanner", "us"))
+            elif route_path == "/scan/latest":
+                self.send_bytes(page_shell(latest_scan_to_html(), "scanner", "us"))
+            elif route_path == "/scan/delete":
                 self.delete_scan_result()
-            elif parsed.path == "/scan/start":
+            elif route_path == "/scan/start":
                 self.start_scan_job(params)
-            elif parsed.path == "/scan/pause":
+            elif route_path == "/scan/pause":
                 self.pause_scan_job(params)
-            elif parsed.path == "/scan/resume":
+            elif route_path == "/scan/resume":
                 self.resume_scan_job(params)
-            elif parsed.path == "/scan/stop":
+            elif route_path == "/scan/stop":
                 self.stop_scan_job(params)
-            elif parsed.path == "/scan/status":
+            elif route_path == "/scan/status":
                 self.scan_job_status(params)
-            elif parsed.path == "/candidate":
+            elif route_path == "/candidate":
                 self.send_bytes(render_candidate_detail(params).encode("utf-8"))
-            elif parsed.path.startswith("/reports/"):
-                self.send_report(parsed.path)
+            elif route_path.startswith("/reports/"):
+                self.send_report(route_path)
             else:
                 self.send_error(404)
         except Exception as exc:
-            active = "scanner" if parsed.path in ("/scanner", "/scan") or parsed.path.startswith("/scan/") else "watchlist" if parsed.path.startswith("/watchlist") else "batch" if parsed.path.startswith("/batch") else "backtest"
-            form = render_scanner_form(params) if active == "scanner" else render_watchlist_page(params) if active == "watchlist" else render_batch_form(params) if active == "batch" else render_backtest_form(params)
-            self.send_bytes(page_shell(form + f'<div class="error">{html.escape(str(exc))}</div>', active), 500)
+            active = "scanner" if route_path in ("/scanner", "/scan") or route_path.startswith("/scan/") else "watchlist" if route_path.startswith("/watchlist") else "batch" if route_path.startswith("/batch") else "home" if route_path in ("/", "") else "backtest"
+            form = render_ashare_scanner(params) if market == "cn" and active == "scanner" else render_market_placeholder(active) if market == "cn" else render_scanner_form(params) if active == "scanner" else render_watchlist_page(params) if active == "watchlist" else render_batch_form(params) if active == "batch" else render_dashboard() if active == "home" else render_backtest_form(params)
+            self.send_bytes(page_shell(form + f'<div class="error">{html.escape(str(exc))}</div>', active, market), 500)
 
     def add_watchlist_item(self, params: dict[str, list[str]]) -> None:
         symbol = field(params, "symbol", "")
