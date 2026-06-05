@@ -438,6 +438,60 @@ def load_ashare_universe_with_meta(min_market_cap_100m: float = 50.0, max_symbol
     return items[: max(1, int(max_symbols))], source, has_market_cap
 
 
+def load_ashare_universe_for_scan(min_market_cap_100m: float = 50.0, max_symbols: int = 300) -> tuple[list[AShareUniverseItem], str, bool]:
+    try:
+        import akshare as ak
+
+        df = ak.stock_zh_a_spot_em()
+        source = "akshare.stock_zh_a_spot_em"
+        has_market_cap = True
+    except Exception as exc:
+        try:
+            import akshare as ak
+
+            df = ak.stock_zh_a_spot()
+            source = f"akshare.stock_zh_a_spot fallback：总市值接口失败，{exc}"
+            has_market_cap = False
+        except Exception as fallback_exc:
+            raise RuntimeError(f"A 股股票池拉取失败：{fallback_exc}") from fallback_exc
+
+    sector_map = load_ashare_sector_map()
+    items: list[AShareUniverseItem] = []
+    for _, row in df.iterrows():
+        try:
+            raw_symbol = str(row.get("代码", row.get("code", row.iloc[0])))
+            symbol = normalize_ashare_symbol(raw_symbol)
+            name = str(row.get("名称", row.get("name", row.iloc[1])) or "")
+            if not name or "ST" in name.upper() or "退" in name:
+                continue
+            latest = row.get("最新价", row.get("price", row.iloc[2] if len(row) > 2 else ""))
+            if str(latest).strip() in ("", "-", "--", "nan", "None"):
+                continue
+            if float(latest or 0) <= 0:
+                continue
+            market_cap = float(row.get("总市值", row.get("market_cap", 0.0)) or 0.0) / 100_000_000 if has_market_cap else 0.0
+            if has_market_cap and market_cap < min_market_cap_100m:
+                continue
+            turnover = float(row.get("成交额", row.get("amount", row.iloc[12] if len(row) > 12 else 0.0)) or 0.0)
+            items.append(
+                AShareUniverseItem(
+                    symbol=symbol,
+                    name=name,
+                    sector=sector_map.get(symbol, ""),
+                    market_cap_100m=market_cap,
+                    exchange=ashare_exchange(symbol),
+                    turnover=turnover,
+                )
+            )
+        except Exception:
+            continue
+    if has_market_cap:
+        items.sort(key=lambda item: item.market_cap_100m, reverse=True)
+    else:
+        items.sort(key=lambda item: item.turnover, reverse=True)
+    return items[: max(1, int(max_symbols))], source, has_market_cap
+
+
 def latest_ashare_signal(symbol: str, j_threshold: float = 14.0, fetch_name_value: bool = True) -> AShareSignalSnapshot:
     clean = normalize_ashare_symbol(symbol)
     bars, source = fetch_ashare_bars(clean)
@@ -570,7 +624,7 @@ def scan_ashare_candidates(
 ) -> AShareScanResult:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    universe, universe_source, market_cap_filter_applied = load_ashare_universe_with_meta(min_market_cap_100m, max_symbols)
+    universe, universe_source, market_cap_filter_applied = load_ashare_universe_for_scan(min_market_cap_100m, max_symbols)
     by_symbol = {item.symbol: item for item in universe}
     candidates: list[AShareSignalSnapshot] = []
     errors: list[tuple[str, str]] = []

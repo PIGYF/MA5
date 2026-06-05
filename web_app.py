@@ -61,7 +61,14 @@ from ma5_config import (
     validate_backtest_range,
     validate_scan_range,
 )
-from ashare_lab import ASHARE_ROUTE, ashare_chart_payload, latest_ashare_signal, scan_ashare_candidates
+from ashare_lab import (
+    ASHARE_ROUTE,
+    AShareSignalSnapshot,
+    ashare_chart_payload,
+    latest_ashare_signal,
+    load_ashare_universe_for_scan,
+    scan_ashare_candidates,
+)
 from scan_next_b import SignalResult, latest_b_signal, load_symbols, unique_symbols, write_html
 
 
@@ -810,6 +817,75 @@ def render_market_placeholder(active: str = "home") -> str:
 """
 
 
+def render_ashare_scan_result(
+    candidates: list[AShareSignalSnapshot],
+    errors: list[tuple[str, str]],
+    scanned: int,
+    universe_source: str,
+    market_cap_filter_applied: bool,
+) -> str:
+    rows = []
+    rating_class = {"Strong": "score-Strong", "Medium": "score-Medium", "Watch": "score-Medium"}
+    for row in candidates:
+        cls = rating_class.get(row.candidate_rating, "score-Weak")
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(row.symbol)}</td>"
+            f"<td>{html.escape(row.name or '-')}</td>"
+            f"<td>{html.escape(row.sector or '-')}</td>"
+            f"<td><span class=\"score-badge {cls}\">{html.escape(row.candidate_rating)}</span></td>"
+            f"<td>{row.volume_score:.1f}/5</td>"
+            f"<td>{row.j_value:.2f}</td>"
+            f"<td>{row.close:.2f}</td>"
+            f"<td>{html.escape(row.latest_date)}</td>"
+            f"<td>{row.recent_peak_to_base:.2f}</td>"
+            f"<td>{row.recent_avg10_to_base:.2f}</td>"
+            f"<td>{row.red_avg_to_green_avg:.2f}</td>"
+            f"<td>{row.top5_red_count}/5</td>"
+            f"<td>{html.escape(row.data_source)}</td>"
+            "</tr>"
+        )
+    table_html = (
+        """
+  <div class="table-wrap">
+    <table class="sortable resizable-table">
+      <thead><tr><th>代码</th><th>名称</th><th>板块</th><th>评级</th><th>量能分</th><th>J值</th><th>收盘</th><th>交易日</th><th>峰值/基准</th><th>10日均/基准</th><th>红均/绿均</th><th>Top5红柱</th><th>数据源</th></tr></thead>
+      <tbody>
+"""
+        + "\n".join(rows)
+        + """
+      </tbody>
+    </table>
+  </div>
+"""
+        if rows
+        else '<p class="hint">本次没有筛出候选。可以适当放宽 J 值阈值，或降低市值/扫描数量限制后再试。</p>'
+    )
+    error_note = ""
+    if errors:
+        sample = "; ".join(f"{symbol}: {reason[:80]}" for symbol, reason in errors[:5])
+        error_note = f'<p class="hint">有 {len(errors)} 只股票扫描失败：{html.escape(sample)}</p>'
+    cap_note = "已按总市值过滤" if market_cap_filter_applied else "总市值接口不可用，本次按行情接口取前 N 只，市值过滤未生效"
+    return f"""
+<section class="result">
+  <div class="toolbar">
+    <div>
+      <h2>A股选股结果</h2>
+      <p class="hint">入选硬条件为趋势通过 + J值冰点；量能分用于二次看图确认。股票池来源：{html.escape(universe_source)}。</p>
+    </div>
+  </div>
+  <section class="status-strip">
+    <div class="stat-card"><div class="stat-label">扫描数量</div><div class="stat-value">{scanned}</div></div>
+    <div class="stat-card"><div class="stat-label">候选数量</div><div class="stat-value">{len(candidates)}</div></div>
+    <div class="stat-card"><div class="stat-label">市值过滤</div><div class="stat-value">{html.escape(cap_note)}</div></div>
+    <div class="stat-card"><div class="stat-label">失败数量</div><div class="stat-value">{len(errors)}</div></div>
+  </section>
+  {table_html}
+  {error_note}
+</section>
+"""
+
+
 def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     mode = field(params, "mode", "")
     symbol = field(params, "symbol", "600487")
@@ -820,66 +896,13 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     if mode == "market":
         try:
             scan = scan_ashare_candidates(min_market_cap, max_symbols, j_threshold)
-            rows = []
-            rating_class = {"Strong": "score-Strong", "Medium": "score-Medium", "Watch": "score-Medium"}
-            for row in scan.candidates:
-                cls = rating_class.get(row.candidate_rating, "score-Weak")
-                rows.append(
-                    "<tr>"
-                    f"<td>{html.escape(row.symbol)}</td>"
-                    f"<td>{html.escape(row.name or '-')}</td>"
-                    f"<td>{html.escape(row.sector or '-')}</td>"
-                    f"<td><span class=\"score-badge {cls}\">{html.escape(row.candidate_rating)}</span></td>"
-                    f"<td>{row.volume_score:.1f}/5</td>"
-                    f"<td>{row.j_value:.2f}</td>"
-                    f"<td>{row.close:.2f}</td>"
-                    f"<td>{html.escape(row.latest_date)}</td>"
-                    f"<td>{row.recent_peak_to_base:.2f}</td>"
-                    f"<td>{row.recent_avg10_to_base:.2f}</td>"
-                    f"<td>{row.red_avg_to_green_avg:.2f}</td>"
-                    f"<td>{row.top5_red_count}/5</td>"
-                    f"<td>{html.escape(row.data_source)}</td>"
-                    "</tr>"
-                )
-            table_html = (
-                """
-  <div class="table-wrap">
-    <table>
-      <thead><tr><th>代码</th><th>名称</th><th>板块</th><th>评级</th><th>量能分</th><th>J值</th><th>收盘</th><th>交易日</th><th>峰值/基准</th><th>10日均/基准</th><th>红均/绿均</th><th>Top5红柱</th><th>数据源</th></tr></thead>
-      <tbody>
-"""
-                + "\n".join(rows)
-                + """
-      </tbody>
-    </table>
-  </div>
-"""
-                if rows
-                else '<p class="hint">本次没有筛出候选。可以适当放宽 J 值阈值，或降低市值/扫描数量限制后再试。</p>'
+            result_html = render_ashare_scan_result(
+                scan.candidates,
+                scan.errors,
+                scan.scanned,
+                scan.universe_source,
+                scan.market_cap_filter_applied,
             )
-            error_note = ""
-            if scan.errors:
-                sample = "; ".join(f"{symbol}: {reason[:80]}" for symbol, reason in scan.errors[:5])
-                error_note = f'<p class="hint">有 {len(scan.errors)} 只股票扫描失败：{html.escape(sample)}</p>'
-            cap_note = "已按总市值过滤" if scan.market_cap_filter_applied else "总市值接口不可用，本次按行情接口取前 N 只，市值过滤未生效"
-            result_html = f"""
-<section class="result">
-  <div class="toolbar">
-    <div>
-      <h2>A股选股结果</h2>
-      <p class="hint">入选硬条件为趋势通过 + J值冰点；量能分用于二次看图确认。股票池来源：{html.escape(scan.universe_source)}。</p>
-    </div>
-  </div>
-  <section class="status-strip">
-    <div class="stat-card"><div class="stat-label">扫描数量</div><div class="stat-value">{scan.scanned}</div></div>
-    <div class="stat-card"><div class="stat-label">候选数量</div><div class="stat-value">{len(scan.candidates)}</div></div>
-    <div class="stat-card"><div class="stat-label">市值过滤</div><div class="stat-value">{html.escape(cap_note)}</div></div>
-    <div class="stat-card"><div class="stat-label">失败数量</div><div class="stat-value">{len(scan.errors)}</div></div>
-  </section>
-  {table_html}
-  {error_note}
-</section>
-"""
         except Exception as exc:
             result_html = f'<div class="error">{html.escape(str(exc))}</div>'
     elif mode == "single" and symbol.strip():
@@ -1092,13 +1115,73 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
   <label>J值阈值<input type="number" step="0.1" name="j_threshold" value="{j_threshold:g}"></label>
   <button type="submit">单票验证</button>
 </form>
-<form class="form" action="/cn/scanner" method="get">
+<form class="form" id="ashare-scanner-form" action="/cn/scanner" method="get">
   <input type="hidden" name="mode" value="market">
   <label>最低市值（亿元）<input type="number" step="1" name="min_market_cap" value="{min_market_cap:g}"></label>
   <label>最多扫描<input type="number" step="1" name="max_symbols" value="{max_symbols}"></label>
+  <label>并发数<input type="number" step="1" name="max_workers" value="{int(number_field(params, "max_workers", 6))}"></label>
   <label>J值阈值<input type="number" step="0.1" name="j_threshold" value="{j_threshold:g}"></label>
   <button type="submit">开始选股</button>
 </form>
+<section class="progress-box" id="ashare-scan-progress">
+  <div class="progress-meta" id="ashare-scan-status">准备开始</div>
+  <div class="progress-track"><div class="progress-bar" id="ashare-scan-bar"></div></div>
+  <div class="progress-meta" id="ashare-scan-detail"></div>
+</section>
+<section id="ashare-scan-result"></section>
+<script>
+(function() {{
+  const form = document.getElementById("ashare-scanner-form");
+  const progressBox = document.getElementById("ashare-scan-progress");
+  const progressBar = document.getElementById("ashare-scan-bar");
+  const status = document.getElementById("ashare-scan-status");
+  const detail = document.getElementById("ashare-scan-detail");
+  const result = document.getElementById("ashare-scan-result");
+  let jobId = "";
+  function update(job) {{
+    const total = Number(job.total || 0);
+    const scanned = Number(job.scanned || 0);
+    const percent = total > 0 ? Math.round(scanned / total * 100) : 0;
+    progressBar.style.width = percent + "%";
+    status.textContent = job.message || "扫描中";
+    detail.textContent = `已扫描 ${{scanned}} / ${{total}}，候选 ${{job.candidates || 0}}，失败 ${{job.errors || 0}}，当前 ${{job.current || "-"}}`;
+  }}
+  async function poll() {{
+    if (!jobId) return;
+    const res = await fetch(`/cn/scan/status?job_id=${{encodeURIComponent(jobId)}}`);
+    const job = await res.json();
+    update(job);
+    if (job.result_html) {{
+      result.innerHTML = job.result_html;
+      if (window.initializeResizableTables) initializeResizableTables(result);
+      if (window.initializeSortableTables) initializeSortableTables(result);
+    }}
+    if (["done", "error", "stopped"].includes(job.status)) {{
+      if (job.status === "error") result.innerHTML = `<div class="error">${{job.error || "扫描失败"}}</div>`;
+      jobId = "";
+      return;
+    }}
+    setTimeout(poll, 800);
+  }}
+  form.addEventListener("submit", async event => {{
+    event.preventDefault();
+    result.innerHTML = "";
+    progressBox.classList.add("active");
+    progressBar.style.width = "0%";
+    status.textContent = "正在启动 A 股扫描";
+    detail.textContent = "";
+    const params = new URLSearchParams(new FormData(form));
+    const res = await fetch(`/cn/scan/start?${{params.toString()}}`);
+    const data = await res.json();
+    if (data.status === "error") {{
+      result.innerHTML = `<div class="error">${{data.error || "无法启动扫描"}}</div>`;
+      return;
+    }}
+    jobId = data.job_id;
+    poll();
+  }});
+}})();
+</script>
 {result_html}
 """
 
@@ -3448,6 +3531,57 @@ def execute_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
         set_job(job_id, status="error", message="扫描失败", error=str(exc))
 
 
+def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
+    try:
+        set_job(job_id, status="running", message="正在准备 A 股股票池", total=0, scanned=0, candidates=0, errors=0, current="")
+        min_market_cap = number_field(params, "min_market_cap", 50.0)
+        max_symbols = int(number_field(params, "max_symbols", 300))
+        max_workers = max(1, min(12, int(number_field(params, "max_workers", 6))))
+        j_threshold = number_field(params, "j_threshold", 14.0)
+        universe, universe_source, market_cap_filter_applied = load_ashare_universe_for_scan(min_market_cap, max_symbols)
+
+        candidates: list[AShareSignalSnapshot] = []
+        errors: list[tuple[str, str]] = []
+        scanned = 0
+        set_job(job_id, message="正在扫描 A 股候选", total=len(universe), scanned=0, candidates=0, errors=0)
+
+        def run_one(item) -> AShareSignalSnapshot:
+            snapshot = latest_ashare_signal(item.symbol, j_threshold, fetch_name_value=False)
+            snapshot.name = item.name
+            snapshot.sector = item.sector
+            return snapshot
+
+        with ThreadPoolExecutor(max_workers=min(max_workers, max(1, len(universe)))) as executor:
+            future_map = {executor.submit(run_one, item): item for item in universe}
+            for future in as_completed(future_map):
+                item = future_map[future]
+                set_job(job_id, current=f"{item.symbol} {item.name}")
+                try:
+                    snapshot = future.result()
+                    if snapshot.signal:
+                        candidates.append(snapshot)
+                except Exception as exc:
+                    errors.append((f"{item.symbol} {item.name}", str(exc)))
+                scanned += 1
+                set_job(job_id, scanned=scanned, candidates=len(candidates), errors=len(errors))
+
+        rating_order = {"Strong": 0, "Medium": 1, "Watch": 2, "None": 3}
+        candidates.sort(key=lambda row: (rating_order.get(row.candidate_rating, 9), -row.volume_score, row.j_value))
+        result_html = render_ashare_scan_result(candidates, errors, scanned, universe_source, market_cap_filter_applied)
+        set_job(
+            job_id,
+            status="done",
+            message="A 股扫描完成",
+            current="",
+            scanned=scanned,
+            candidates=len(candidates),
+            errors=len(errors),
+            result_html=result_html,
+        )
+    except Exception as exc:
+        set_job(job_id, status="error", message="A 股扫描失败", error=str(exc))
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -3470,6 +3604,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_bytes(page_shell(render_market_placeholder("home"), "home", "cn"))
                 elif route_path == "/scanner":
                     self.send_bytes(page_shell(render_ashare_scanner(params), "scanner", "cn"))
+                elif route_path == "/scan/start":
+                    self.start_ashare_scan_job(params)
+                elif route_path == "/scan/status":
+                    self.ashare_scan_job_status(params)
                 elif route_path == "/watchlist":
                     self.send_bytes(page_shell(render_market_placeholder("watchlist"), "watchlist", "cn"))
                 elif route_path == "/backtest":
@@ -3562,6 +3700,32 @@ class Handler(BaseHTTPRequestHandler):
         symbol = field(params, "symbol", "")
         delete_watchlist_symbol(symbol)
         self.send_bytes(page_shell(render_watchlist_page({}), "watchlist"))
+
+    def start_ashare_scan_job(self, params: dict[str, list[str]]) -> None:
+        active = active_scan_job()
+        if active:
+            job_id, _ = active
+            self.send_json(
+                {
+                    "status": "error",
+                    "error": f"已有扫描任务正在运行：{job_id}。请等待完成后再启动 A 股扫描。",
+                },
+                status=409,
+            )
+            return
+        job_id = f"ashare-{uuid.uuid4().hex[:10]}"
+        set_job(job_id, status="queued", message="排队中", total=0, scanned=0, candidates=0, errors=0, current="")
+        worker = threading.Thread(target=execute_ashare_scan_job, args=(job_id, params), daemon=True)
+        worker.start()
+        self.send_json({"status": "queued", "job_id": job_id})
+
+    def ashare_scan_job_status(self, params: dict[str, list[str]]) -> None:
+        job_id = field(params, "job_id", "")
+        job = get_job(job_id)
+        if not job:
+            self.send_json({"status": "error", "error": "找不到 A 股扫描任务"}, status=404)
+            return
+        self.send_json(job)
 
     def start_scan_job(self, params: dict[str, list[str]]) -> None:
         scan_end = default_scan_end_date()
