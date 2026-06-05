@@ -759,6 +759,34 @@ def render_dashboard() -> str:
 
 
 def render_market_placeholder(active: str = "home") -> str:
+    if active == "home":
+        return """
+<section class="page-head">
+  <div>
+    <h1>A股复盘面板</h1>
+    <p class="hint">当前已开放 A 股选股器：支持单票验证和盘后批量选股。A 股自选池、回测和批量回测后续再独立实现。</p>
+  </div>
+  <div class="mode-pill">A Share | Scanner Ready</div>
+</section>
+<section class="dashboard-grid">
+  <div class="dashboard-panel">
+    <h2>A股选股器</h2>
+    <p class="hint">硬条件为趋势通过 + J值冰点，红长绿短量能用于二次看图确认强弱。</p>
+    <div class="quick-actions">
+      <a class="btn" href="/cn/scanner">打开 A 股选股器</a>
+      <a class="btn btn-secondary" href="/cn/scanner?symbol=600487&j_threshold=14">验证 600487</a>
+    </div>
+  </div>
+  <div class="dashboard-panel">
+    <h2>暂未开放</h2>
+    <p class="hint">A 股自选池、回测、批量回测会使用独立数据源、手续费、印花税、涨跌停和停牌规则，不复用美股交易规则。</p>
+    <div class="quick-actions">
+      <a class="btn btn-secondary" href="/cn/watchlist">A 股自选池占位</a>
+      <a class="btn btn-secondary" href="/cn/backtest">A 股回测占位</a>
+    </div>
+  </div>
+</section>
+"""
     labels = {
         "home": ("A股复盘面板", "后续这里会显示 A 股市场环境、A 股扫描摘要和 A 股自选池状态。"),
         "scanner": ("A股选股器", "后续这里会接入 A 股股票池、A 股策略和 A 股盘后选股。"),
