@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import json
+import os
+import time
 from dataclasses import dataclass
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 
 
 ASHARE_ROUTE = "/ashare"
+ROOT = Path(__file__).resolve().parent
+ASHARE_CACHE_DIR = Path(os.environ.get("MA5_DATA_DIR", ROOT / "data")).expanduser().resolve() / "ashare"
+ASHARE_SECTOR_CACHE_PATH = ASHARE_CACHE_DIR / "sector_map.json"
+ASHARE_SECTOR_CACHE_SECONDS = 7 * 24 * 60 * 60
 
 
 @dataclass
@@ -23,6 +31,7 @@ class AShareBar:
 class AShareSignalSnapshot:
     symbol: str
     name: str
+    sector: str
     data_source: str
     latest_date: str
     close: float
@@ -51,6 +60,7 @@ class AShareSignalSnapshot:
 class AShareUniverseItem:
     symbol: str
     name: str
+    sector: str
     market_cap_100m: float
     exchange: str
     turnover: float = 0.0
@@ -64,6 +74,91 @@ class AShareScanResult:
     errors: list[tuple[str, str]]
     universe_source: str
     market_cap_filter_applied: bool
+
+
+def ashare_indicator_series(bars: list[AShareBar], j_threshold: float = 14.0) -> list[dict[str, object]]:
+    closes = [bar.close for bar in bars]
+    highs = [bar.high for bar in bars]
+    lows = [bar.low for bar in bars]
+
+    ma14 = sma(closes, 14)
+    ma28 = sma(closes, 28)
+    ma57 = sma(closes, 57)
+    ma114 = sma(closes, 114)
+    ema1 = ema(closes, 10)
+    zx_short = ema(ema1, 10)
+    zx_multi: list[float | None] = [
+        None if any(value is None for value in group) else sum(value for value in group if value is not None) / 4
+        for group in zip(ma14, ma28, ma57, ma114)
+    ]
+
+    rsv: list[float] = []
+    for i, close in enumerate(closes):
+        if i < 8:
+            rsv.append(50.0)
+            continue
+        high = max(highs[i - 8 : i + 1])
+        low = min(lows[i - 8 : i + 1])
+        rsv.append(50.0 if high == low else 100 * (close - low) / (high - low))
+    k = sma(rsv, 3)
+    k_clean = [50.0 if value is None else value for value in k]
+    d = sma(k_clean, 3)
+    j = [None if k[i] is None or d[i] is None else 3 * k[i] - 2 * d[i] for i in range(len(closes))]
+
+    points: list[dict[str, object]] = []
+    for i, bar in enumerate(bars):
+        trend_ok = bool(
+            i > 0
+            and zx_multi[i] is not None
+            and zx_multi[i - 1] is not None
+            and zx_short[i] > float(zx_multi[i])
+            and float(zx_multi[i]) > float(zx_multi[i - 1])
+        )
+        j_oversold = bool(j[i] is not None and j[i] < j_threshold)
+        points.append(
+            {
+                "time": bar.date,
+                "zx_short_trend": zx_short[i],
+                "zx_multi_trend": zx_multi[i],
+                "k": k[i],
+                "d": d[i],
+                "j": j[i],
+                "signal": trend_ok and j_oversold,
+            }
+        )
+    return points
+
+
+def ashare_chart_payload(symbol: str, j_threshold: float = 14.0) -> dict[str, object]:
+    clean = normalize_ashare_symbol(symbol)
+    bars, source = fetch_ashare_bars(clean)
+    points = ashare_indicator_series(bars, j_threshold)
+    name, sector = fetch_ashare_profile(clean)
+    return {
+        "symbol": clean,
+        "name": name,
+        "sector": sector,
+        "source": source,
+        "ohlc": [{"x": bar.date, "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close} for bar in bars],
+        "volume": [
+            {
+                "x": bar.date,
+                "y": bar.volume,
+                "color": "#ef4444" if i > 0 and bar.close >= bars[i - 1].close else "#06b6d4",
+            }
+            for i, bar in enumerate(bars)
+        ],
+        "zx_short_trend": [{"x": point["time"], "y": point["zx_short_trend"]} for point in points if point["zx_short_trend"] is not None],
+        "zx_multi_trend": [{"x": point["time"], "y": point["zx_multi_trend"]} for point in points if point["zx_multi_trend"] is not None],
+        "k": [{"x": point["time"], "y": point["k"]} for point in points if point["k"] is not None],
+        "d": [{"x": point["time"], "y": point["d"]} for point in points if point["d"] is not None],
+        "j": [{"x": point["time"], "y": point["j"]} for point in points if point["j"] is not None],
+        "signals": [
+            {"x": bar.date, "y": bar.low, "text": "B"}
+            for bar, point in zip(bars, points)
+            if point["signal"]
+        ],
+    }
 
 
 def normalize_ashare_symbol(symbol: str) -> str:
@@ -193,7 +288,84 @@ def fetch_ashare_name(symbol: str) -> str:
             return str(row.iloc[0].get("名称", ""))
     except Exception:
         pass
+    try:
+        import akshare as ak
+
+        names = ak.stock_info_a_code_name()
+        row = names[names["code"].astype(str) == clean]
+        if not row.empty:
+            return str(row.iloc[0].get("name", ""))
+    except Exception:
+        pass
+    try:
+        import akshare as ak
+
+        spot = ak.stock_zh_a_spot()
+        normalized = spot["代码"].astype(str).map(lambda value: "".join(ch for ch in value.upper() if ch.isalnum())[-6:])
+        row = spot[normalized == clean]
+        if not row.empty:
+            return str(row.iloc[0].get("名称", ""))
+    except Exception:
+        pass
     return ""
+
+
+def read_json_cache(path: Path, max_age_seconds: int) -> dict[str, Any] | None:
+    try:
+        if not path.exists():
+            return None
+        if time.time() - path.stat().st_mtime > max_age_seconds:
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def write_json_cache(path: Path, payload: dict[str, Any]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def load_ashare_sector_map() -> dict[str, str]:
+    cached = read_json_cache(ASHARE_SECTOR_CACHE_PATH, ASHARE_SECTOR_CACHE_SECONDS)
+    if cached and isinstance(cached.get("sectors"), dict):
+        return {str(k): str(v) for k, v in cached["sectors"].items()}
+
+    sectors: dict[str, str] = {}
+    try:
+        import akshare as ak
+
+        boards = ak.stock_sector_spot()
+        for _, board in boards.iterrows():
+            label = str(board.get("label", "") or "")
+            sector_name = str(board.get("板块", "") or "")
+            if not label or not sector_name:
+                continue
+            try:
+                detail = ak.stock_sector_detail(sector=label)
+            except Exception:
+                continue
+            for _, row in detail.iterrows():
+                try:
+                    symbol = normalize_ashare_symbol(str(row.get("code", row.get("代码", ""))))
+                    sectors.setdefault(symbol, sector_name)
+                except Exception:
+                    continue
+    except Exception:
+        return {}
+
+    write_json_cache(ASHARE_SECTOR_CACHE_PATH, {"updated_at": date.today().isoformat(), "sectors": sectors})
+    return sectors
+
+
+def fetch_ashare_profile(symbol: str) -> tuple[str, str]:
+    clean = normalize_ashare_symbol(symbol)
+    name = fetch_ashare_name(clean)
+    sector_map = load_ashare_sector_map()
+    return name, sector_map.get(clean, "")
 
 
 def ashare_exchange(symbol: str) -> str:
@@ -232,6 +404,7 @@ def load_ashare_universe_with_meta(min_market_cap_100m: float = 50.0, max_symbol
         except Exception as fallback_exc:
             raise RuntimeError(f"A 股股票池拉取失败：{fallback_exc}") from fallback_exc
 
+    sector_map = load_ashare_sector_map()
     items: list[AShareUniverseItem] = []
     for _, row in df.iterrows():
         try:
@@ -246,7 +419,16 @@ def load_ashare_universe_with_meta(min_market_cap_100m: float = 50.0, max_symbol
             if has_market_cap and market_cap < min_market_cap_100m:
                 continue
             turnover = float(row.get("成交额", row.get("amount", 0.0)))
-            items.append(AShareUniverseItem(symbol=symbol, name=name, market_cap_100m=market_cap, exchange=ashare_exchange(symbol), turnover=turnover))
+            items.append(
+                AShareUniverseItem(
+                    symbol=symbol,
+                    name=name,
+                    sector=sector_map.get(symbol, ""),
+                    market_cap_100m=market_cap,
+                    exchange=ashare_exchange(symbol),
+                    turnover=turnover,
+                )
+            )
         except Exception:
             continue
     if has_market_cap:
@@ -347,9 +529,14 @@ def latest_ashare_signal(symbol: str, j_threshold: float = 14.0, fetch_name_valu
     else:
         candidate_rating = "None"
 
+    name = ""
+    sector = ""
+    if fetch_name_value:
+        name, sector = fetch_ashare_profile(clean)
     return AShareSignalSnapshot(
         symbol=clean,
-        name=fetch_ashare_name(clean) if fetch_name_value else "",
+        name=name,
+        sector=sector,
         data_source=source,
         latest_date=bars[i].date,
         close=bars[i].close,
@@ -391,6 +578,7 @@ def scan_ashare_candidates(
     def run_one(item: AShareUniverseItem) -> AShareSignalSnapshot:
         snapshot = latest_ashare_signal(item.symbol, j_threshold, fetch_name_value=False)
         snapshot.name = item.name
+        snapshot.sector = item.sector
         return snapshot
 
     workers = max(1, min(max_workers, len(universe)))

@@ -61,7 +61,7 @@ from ma5_config import (
     validate_backtest_range,
     validate_scan_range,
 )
-from ashare_lab import ASHARE_ROUTE, latest_ashare_signal, scan_ashare_candidates
+from ashare_lab import ASHARE_ROUTE, ashare_chart_payload, latest_ashare_signal, scan_ashare_candidates
 from scan_next_b import SignalResult, latest_b_signal, load_symbols, unique_symbols, write_html
 
 
@@ -774,7 +774,7 @@ def render_market_placeholder(active: str = "home") -> str:
     <p class="hint">硬条件为趋势通过 + J值冰点，红长绿短量能用于二次看图确认强弱。</p>
     <div class="quick-actions">
       <a class="btn" href="/cn/scanner">打开 A 股选股器</a>
-      <a class="btn btn-secondary" href="/cn/scanner?symbol=600487&j_threshold=14">验证 600487</a>
+      <a class="btn btn-secondary" href="/cn/scanner?mode=single&symbol=600487&j_threshold=14">验证 600487</a>
     </div>
   </div>
   <div class="dashboard-panel">
@@ -811,7 +811,7 @@ def render_market_placeholder(active: str = "home") -> str:
 
 
 def render_ashare_scanner(params: dict[str, list[str]]) -> str:
-    mode = field(params, "mode", "single")
+    mode = field(params, "mode", "")
     symbol = field(params, "symbol", "600487")
     j_threshold = number_field(params, "j_threshold", 14.0)
     min_market_cap = number_field(params, "min_market_cap", 50.0)
@@ -828,6 +828,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
                     "<tr>"
                     f"<td>{html.escape(row.symbol)}</td>"
                     f"<td>{html.escape(row.name or '-')}</td>"
+                    f"<td>{html.escape(row.sector or '-')}</td>"
                     f"<td><span class=\"score-badge {cls}\">{html.escape(row.candidate_rating)}</span></td>"
                     f"<td>{row.volume_score:.1f}/5</td>"
                     f"<td>{row.j_value:.2f}</td>"
@@ -844,7 +845,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
                 """
   <div class="table-wrap">
     <table>
-      <thead><tr><th>代码</th><th>名称</th><th>评级</th><th>量能分</th><th>J值</th><th>收盘</th><th>交易日</th><th>峰值/基准</th><th>10日均/基准</th><th>红均/绿均</th><th>Top5红柱</th><th>数据源</th></tr></thead>
+      <thead><tr><th>代码</th><th>名称</th><th>板块</th><th>评级</th><th>量能分</th><th>J值</th><th>收盘</th><th>交易日</th><th>峰值/基准</th><th>10日均/基准</th><th>红均/绿均</th><th>Top5红柱</th><th>数据源</th></tr></thead>
       <tbody>
 """
                 + "\n".join(rows)
@@ -881,9 +882,10 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
 """
         except Exception as exc:
             result_html = f'<div class="error">{html.escape(str(exc))}</div>'
-    elif symbol.strip():
+    elif mode == "single" and symbol.strip():
         try:
             snapshot = latest_ashare_signal(symbol, j_threshold)
+            chart_payload = ashare_chart_payload(symbol, j_threshold)
 
             def status_badge(value: bool) -> str:
                 cls = "score-Strong" if value else "score-Weak"
@@ -898,6 +900,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
                 "None": "未入选",
             }.get(snapshot.candidate_rating, snapshot.candidate_rating)
             name = f" / {snapshot.name}" if snapshot.name else ""
+            sector = snapshot.sector or "-"
             result_html = f"""
 <section class="result">
   <div class="toolbar">
@@ -911,8 +914,9 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     <div class="stat-card"><div class="stat-label">最新交易日</div><div class="stat-value">{html.escape(snapshot.latest_date)}</div></div>
     <div class="stat-card"><div class="stat-label">收盘价</div><div class="stat-value">{snapshot.close:.2f}</div></div>
     <div class="stat-card"><div class="stat-label">量能评分</div><div class="stat-value">{snapshot.volume_score:.1f}/5</div></div>
-    <div class="stat-card"><div class="stat-label">数据源 / 日K</div><div class="stat-value">{html.escape(snapshot.data_source)} / {snapshot.bars_count}</div></div>
+    <div class="stat-card"><div class="stat-label">板块</div><div class="stat-value">{html.escape(sector)}</div></div>
   </section>
+  <p class="hint">数据源 / 日K：{html.escape(snapshot.data_source)} / {snapshot.bars_count}</p>
   <div class="table-wrap">
     <table>
       <thead><tr><th>条件</th><th>结果</th><th>关键数值</th><th>说明</th></tr></thead>
@@ -944,6 +948,130 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     <div class="stat-card"><div class="stat-label">红 / 绿天数</div><div class="stat-value">{snapshot.red_days} / {snapshot.green_days}</div></div>
     <div class="stat-card"><div class="stat-label">Top5 红柱数</div><div class="stat-value">{snapshot.top5_red_count} / 5</div></div>
   </section>
+  <section class="result">
+    <div class="toolbar">
+      <div>
+        <h2>策略图表</h2>
+        <p class="hint">主图显示 K 线、知行短期趋势、知行多空线；下方显示成交量与 KDJ。</p>
+      </div>
+    </div>
+    <div id="ashare-chart" style="height:780px;width:100%;"></div>
+  </section>
+  <script type="application/json" id="ashare-chart-data">{json.dumps(chart_payload, ensure_ascii=False)}</script>
+  <script>
+  (function() {{
+    const payload = JSON.parse(document.getElementById("ashare-chart-data").textContent);
+    const ohlc = payload.ohlc || [];
+    const volume = payload.volume || [];
+    const traces = [
+      {{
+        type: "candlestick",
+        x: ohlc.map(row => row.x),
+        open: ohlc.map(row => row.open),
+        high: ohlc.map(row => row.high),
+        low: ohlc.map(row => row.low),
+        close: ohlc.map(row => row.close),
+        name: "K线",
+        increasing: {{ line: {{ color: "#ef4444" }}, fillcolor: "rgba(239,68,68,.28)" }},
+        decreasing: {{ line: {{ color: "#06b6d4" }}, fillcolor: "rgba(6,182,212,.28)" }},
+        xaxis: "x",
+        yaxis: "y"
+      }},
+      {{
+        type: "scatter",
+        mode: "lines",
+        x: payload.zx_short_trend.map(row => row.x),
+        y: payload.zx_short_trend.map(row => row.y),
+        name: "知行短期趋势",
+        line: {{ color: "#2563eb", width: 2 }},
+        xaxis: "x",
+        yaxis: "y"
+      }},
+      {{
+        type: "scatter",
+        mode: "lines",
+        x: payload.zx_multi_trend.map(row => row.x),
+        y: payload.zx_multi_trend.map(row => row.y),
+        name: "知行多空线",
+        line: {{ color: "#dc2626", width: 2 }},
+        xaxis: "x",
+        yaxis: "y"
+      }},
+      {{
+        type: "scatter",
+        mode: "markers+text",
+        x: payload.signals.map(row => row.x),
+        y: payload.signals.map(row => row.y),
+        text: payload.signals.map(row => row.text),
+        textposition: "bottom center",
+        marker: {{ color: "#16a34a", size: 10, symbol: "triangle-up" }},
+        name: "B信号",
+        xaxis: "x",
+        yaxis: "y"
+      }},
+      {{
+        type: "bar",
+        x: volume.map(row => row.x),
+        y: volume.map(row => row.y),
+        marker: {{ color: volume.map(row => row.color) }},
+        name: "成交量",
+        xaxis: "x2",
+        yaxis: "y2"
+      }},
+      {{
+        type: "scatter",
+        mode: "lines",
+        x: payload.k.map(row => row.x),
+        y: payload.k.map(row => row.y),
+        name: "K",
+        line: {{ color: "#2563eb", width: 1.5 }},
+        xaxis: "x3",
+        yaxis: "y3"
+      }},
+      {{
+        type: "scatter",
+        mode: "lines",
+        x: payload.d.map(row => row.x),
+        y: payload.d.map(row => row.y),
+        name: "D",
+        line: {{ color: "#f59e0b", width: 1.5 }},
+        xaxis: "x3",
+        yaxis: "y3"
+      }},
+      {{
+        type: "scatter",
+        mode: "lines",
+        x: payload.j.map(row => row.x),
+        y: payload.j.map(row => row.y),
+        name: "J",
+        line: {{ color: "#7c3aed", width: 1.8 }},
+        xaxis: "x3",
+        yaxis: "y3"
+      }}
+    ];
+    const layout = {{
+      margin: {{ l: 54, r: 24, t: 18, b: 32 }},
+      paper_bgcolor: "#fff",
+      plot_bgcolor: "#fff",
+      hovermode: "x unified",
+      dragmode: "pan",
+      showlegend: true,
+      legend: {{ orientation: "h", x: 0, y: 1.05 }},
+      font: {{ family: "Inter, Microsoft YaHei UI, PingFang SC, Arial, sans-serif", size: 12, color: "#131722" }},
+      grid: {{ rows: 3, columns: 1, pattern: "independent", roworder: "top to bottom" }},
+      xaxis: {{ rangeslider: {{ visible: false }}, showgrid: true, gridcolor: "#eef1f5" }},
+      yaxis: {{ domain: [0.42, 1], showgrid: true, gridcolor: "#eef1f5" }},
+      xaxis2: {{ matches: "x", showticklabels: false, showgrid: true, gridcolor: "#eef1f5" }},
+      yaxis2: {{ domain: [0.24, 0.38], showgrid: true, gridcolor: "#eef1f5" }},
+      xaxis3: {{ matches: "x", showgrid: true, gridcolor: "#eef1f5" }},
+      yaxis3: {{ domain: [0, 0.2], showgrid: true, gridcolor: "#eef1f5", range: [-20, 120] }},
+      shapes: [
+        {{ type: "line", xref: "paper", x0: 0, x1: 1, yref: "y3", y0: {j_threshold}, y1: {j_threshold}, line: {{ color: "#ef4444", width: 1, dash: "dot" }} }}
+      ]
+    }};
+    Plotly.newPlot("ashare-chart", traces, layout, {{ responsive: true, displaylogo: false, scrollZoom: true }});
+  }})();
+  </script>
 </section>
 """
         except Exception as exc:
@@ -953,10 +1081,11 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
 <section class="page-head">
   <div>
     <h1>A股选股器</h1>
-    <p class="hint">趋势条件 + J值冰点作为候选硬条件，红长绿短量能用于二次看图确认强弱。当前先做盘后选股，不做回测。</p>
+    <p class="hint">趋势条件 + J值冰点作为候选硬条件，红长绿短量能用于二次看图确认强弱。首次进入不拉行情，点击按钮后才开始请求数据。</p>
   </div>
   <div class="mode-pill">A Share | Scanner</div>
 </section>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <form class="form" action="/cn/scanner" method="get">
   <input type="hidden" name="mode" value="single">
   <label>股票代码<input name="symbol" value="{html.escape(symbol)}" placeholder="600487"></label>
