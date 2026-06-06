@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 ASHARE_ROUTE = "/ashare"
@@ -382,12 +382,157 @@ def ashare_exchange(symbol: str) -> str:
     return "-"
 
 
+def fetch_eastmoney_ashare_universe(
+    min_market_cap_100m: float = 50.0,
+    max_symbols: int = 300,
+    progress: Callable[[str], None] | None = None,
+) -> tuple[list[AShareUniverseItem], str, bool]:
+    import requests
+
+    urls = [
+        "http://82.push2.eastmoney.com/api/qt/clist/get",
+        "http://33.push2.eastmoney.com/api/qt/clist/get",
+        "https://33.push2.eastmoney.com/api/qt/clist/get",
+        "https://82.push2.eastmoney.com/api/qt/clist/get",
+        "https://18.push2.eastmoney.com/api/qt/clist/get",
+        "https://push2.eastmoney.com/api/qt/clist/get",
+    ]
+    fields = "f12,f14,f2,f6,f20,f8"
+    fs = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+    page_size = max(100, min(500, int(max_symbols) * 2))
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/plain,*/*",
+        "Referer": "https://quote.eastmoney.com/",
+    }
+    last_error: Exception | None = None
+    rows: list[dict[str, Any]] = []
+    source_url = ""
+    for attempt in range(3):
+        if attempt:
+            if progress:
+                progress(f"东方财富股票池重试中，第 {attempt + 1} 次")
+            time.sleep(0.8 * attempt)
+        for url in urls:
+            try:
+                rows = []
+                source_url = url.split("//", 1)[-1].split("/", 1)[0]
+                if progress:
+                    progress(f"正在尝试东方财富节点：{source_url}")
+                for page in range(1, 8):
+                    params = {
+                        "pn": page,
+                        "pz": page_size,
+                        "po": 1,
+                        "np": 1,
+                        "fltt": 2,
+                        "invt": 2,
+                        "fid": "f20",
+                        "fs": fs,
+                        "fields": fields,
+                        "_": int(time.time() * 1000),
+                    }
+                    response = requests.get(url, params=params, headers=headers, timeout=12)
+                    response.raise_for_status()
+                    payload = response.json()
+                    data = payload.get("data") or {}
+                    diff = data.get("diff") or []
+                    if not diff:
+                        break
+                    rows.extend(diff)
+                    if len(rows) >= max(1000, int(max_symbols)):
+                        break
+                if rows:
+                    if progress:
+                        progress(f"东方财富股票池已返回 {len(rows)} 条原始记录")
+                    break
+            except Exception as exc:
+                last_error = exc
+                if progress:
+                    progress(f"{source_url or '东方财富节点'} 暂不可用，切换下一个数据源")
+                rows = []
+                continue
+        if rows:
+            break
+    if not rows:
+        raise RuntimeError(str(last_error) if last_error else "东方财富股票池返回为空")
+
+    items: list[AShareUniverseItem] = []
+    for row in rows:
+        try:
+            symbol = normalize_ashare_symbol(str(row.get("f12", "")))
+            name = str(row.get("f14", "") or "")
+            if not name or "ST" in name.upper() or "退" in name:
+                continue
+            latest = row.get("f2")
+            if latest in (None, "", "-", "--") or float(latest) <= 0:
+                continue
+            market_cap = float(row.get("f20") or 0.0) / 100_000_000
+            if market_cap < min_market_cap_100m and len(items) >= max(1, int(max_symbols)):
+                break
+            if market_cap < min_market_cap_100m:
+                continue
+            items.append(
+                AShareUniverseItem(
+                    symbol=symbol,
+                    name=name,
+                    sector="",
+                    market_cap_100m=market_cap,
+                    exchange=ashare_exchange(symbol),
+                    turnover=float(row.get("f6") or 0.0),
+                )
+            )
+        except Exception:
+            continue
+    items.sort(key=lambda item: item.market_cap_100m, reverse=True)
+    return items[: max(1, int(max_symbols))], f"eastmoney.qt.clist {source_url}", True
+
+
+def fetch_akshare_code_name_universe(max_symbols: int = 300) -> tuple[list[AShareUniverseItem], str, bool]:
+    import akshare as ak
+
+    df = ak.stock_info_a_code_name()
+    items: list[AShareUniverseItem] = []
+    sector_map = load_ashare_sector_map()
+    for _, row in df.iterrows():
+        try:
+            symbol = normalize_ashare_symbol(str(row.get("code", row.iloc[0])))
+            name = str(row.get("name", row.iloc[1] if len(row) > 1 else "") or "")
+            if not name or "ST" in name.upper() or "退" in name:
+                continue
+            items.append(
+                AShareUniverseItem(
+                    symbol=symbol,
+                    name=name,
+                    sector=sector_map.get(symbol, ""),
+                    market_cap_100m=0.0,
+                    exchange=ashare_exchange(symbol),
+                    turnover=0.0,
+                )
+            )
+        except Exception:
+            continue
+    exchange_order = {"SH": 0, "SZ": 1, "STAR": 2, "BJ": 3}
+    items.sort(key=lambda item: (exchange_order.get(item.exchange, 9), item.symbol))
+    return items[: max(1, int(max_symbols))], "akshare.stock_info_a_code_name fallback", False
+
+
 def load_ashare_universe(min_market_cap_100m: float = 50.0, max_symbols: int = 300) -> list[AShareUniverseItem]:
     items, _, _ = load_ashare_universe_with_meta(min_market_cap_100m, max_symbols)
     return items
 
 
-def load_ashare_universe_with_meta(min_market_cap_100m: float = 50.0, max_symbols: int = 300) -> tuple[list[AShareUniverseItem], str, bool]:
+def load_ashare_universe_with_meta(
+    min_market_cap_100m: float = 50.0,
+    max_symbols: int = 300,
+    progress: Callable[[str], None] | None = None,
+) -> tuple[list[AShareUniverseItem], str, bool]:
+    try:
+        return fetch_eastmoney_ashare_universe(min_market_cap_100m, max_symbols, progress)
+    except Exception as eastmoney_exc:
+        eastmoney_error = eastmoney_exc
+        if progress:
+            progress("东方财富股票池不可用，正在尝试 akshare 总市值接口")
     try:
         import akshare as ak
 
@@ -398,11 +543,18 @@ def load_ashare_universe_with_meta(min_market_cap_100m: float = 50.0, max_symbol
         try:
             import akshare as ak
 
+            if progress:
+                progress("akshare 总市值接口不可用，正在尝试普通行情接口")
             df = ak.stock_zh_a_spot()
-            source = f"akshare.stock_zh_a_spot fallback：总市值接口失败，{exc}"
+            source = "akshare.stock_zh_a_spot fallback"
             has_market_cap = False
         except Exception as fallback_exc:
-            raise RuntimeError(f"A 股股票池拉取失败：{fallback_exc}") from fallback_exc
+            if progress:
+                progress("akshare 行情接口不可用，切换代码/名称表兜底")
+            try:
+                return fetch_akshare_code_name_universe(max_symbols)
+            except Exception as code_name_exc:
+                raise RuntimeError(f"A 股股票池拉取失败：东方财富 {eastmoney_error}；akshare {fallback_exc}；代码表 {code_name_exc}") from code_name_exc
 
     sector_map = load_ashare_sector_map()
     items: list[AShareUniverseItem] = []
@@ -438,7 +590,17 @@ def load_ashare_universe_with_meta(min_market_cap_100m: float = 50.0, max_symbol
     return items[: max(1, int(max_symbols))], source, has_market_cap
 
 
-def load_ashare_universe_for_scan(min_market_cap_100m: float = 50.0, max_symbols: int = 300) -> tuple[list[AShareUniverseItem], str, bool]:
+def load_ashare_universe_for_scan(
+    min_market_cap_100m: float = 50.0,
+    max_symbols: int = 300,
+    progress: Callable[[str], None] | None = None,
+) -> tuple[list[AShareUniverseItem], str, bool]:
+    try:
+        return fetch_eastmoney_ashare_universe(min_market_cap_100m, max_symbols, progress)
+    except Exception as eastmoney_exc:
+        eastmoney_error = eastmoney_exc
+        if progress:
+            progress("东方财富股票池不可用，正在尝试 akshare 总市值接口")
     try:
         import akshare as ak
 
@@ -449,11 +611,18 @@ def load_ashare_universe_for_scan(min_market_cap_100m: float = 50.0, max_symbols
         try:
             import akshare as ak
 
+            if progress:
+                progress("akshare 总市值接口不可用，正在尝试普通行情接口")
             df = ak.stock_zh_a_spot()
-            source = f"akshare.stock_zh_a_spot fallback：总市值接口失败，{exc}"
+            source = "akshare.stock_zh_a_spot fallback"
             has_market_cap = False
         except Exception as fallback_exc:
-            raise RuntimeError(f"A 股股票池拉取失败：{fallback_exc}") from fallback_exc
+            if progress:
+                progress("akshare 行情接口不可用，切换代码/名称表兜底")
+            try:
+                return fetch_akshare_code_name_universe(max_symbols)
+            except Exception as code_name_exc:
+                raise RuntimeError(f"A 股股票池拉取失败：东方财富 {eastmoney_error}；akshare {fallback_exc}；代码表 {code_name_exc}") from code_name_exc
 
     sector_map = load_ashare_sector_map()
     items: list[AShareUniverseItem] = []

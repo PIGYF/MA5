@@ -65,6 +65,7 @@ from ashare_lab import (
     ASHARE_ROUTE,
     AShareSignalSnapshot,
     ashare_chart_payload,
+    fetch_ashare_profile,
     latest_ashare_signal,
     load_ashare_universe_for_scan,
     scan_ashare_candidates,
@@ -362,6 +363,114 @@ def update_watchlist_symbol(symbol: str, group: str, note: str) -> list[str]:
             save_watchlist_items(items)
             return [row["symbol"] for row in items]
     raise ValueError(f"{clean} 不在自选池中。")
+
+
+def ashare_watchlist_path() -> Path:
+    return DATA_DIR / "ashare" / "watchlist.json"
+
+
+def normalize_ashare_code_for_storage(symbol: str) -> str:
+    clean = "".join(ch for ch in symbol.strip().upper() if ch.isalnum())
+    if clean.startswith(("SH", "SS", "SZ", "BJ")):
+        clean = clean[2:]
+    if clean.endswith(("SH", "SS", "SZ", "BJ")):
+        clean = clean[:6]
+    if len(clean) != 6 or not clean.isdigit():
+        raise ValueError("请输入 6 位 A 股代码，例如 600487。")
+    return clean
+
+
+def load_ashare_watchlist_items() -> list[dict[str, str]]:
+    path = ashare_watchlist_path()
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in payload.get("items", []):
+        if not isinstance(raw, dict):
+            continue
+        try:
+            symbol = normalize_ashare_code_for_storage(str(raw.get("symbol", "")))
+        except Exception:
+            continue
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        items.append(
+            {
+                "symbol": symbol,
+                "name": str(raw.get("name", "") or ""),
+                "sector": str(raw.get("sector", "") or ""),
+                "group": str(raw.get("group", "") or "观察"),
+                "note": str(raw.get("note", "") or ""),
+                "added_at": str(raw.get("added_at", "") or ""),
+            }
+        )
+    return items
+
+
+def save_ashare_watchlist_items(items: list[dict[str, str]]) -> None:
+    path = ashare_watchlist_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    clean_items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in items:
+        try:
+            symbol = normalize_ashare_code_for_storage(str(item.get("symbol", "")))
+        except Exception:
+            continue
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        clean_items.append(
+            {
+                "symbol": symbol,
+                "name": str(item.get("name", "") or "").strip()[:80],
+                "sector": str(item.get("sector", "") or "").strip()[:80],
+                "group": str(item.get("group", "") or "观察").strip()[:40],
+                "note": str(item.get("note", "") or "").strip()[:240],
+                "added_at": str(item.get("added_at", "") or time.strftime("%Y-%m-%d %H:%M:%S")),
+            }
+        )
+    path.write_text(json.dumps({"items": clean_items, "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def add_ashare_watchlist_symbol(symbol: str, group: str = "观察", note: str = "", name: str = "", sector: str = "") -> list[dict[str, str]]:
+    clean = normalize_ashare_code_for_storage(symbol)
+    if not name or not sector:
+        try:
+            fetched_name, fetched_sector = fetch_ashare_profile(clean)
+            name = name or fetched_name
+            sector = sector or fetched_sector
+        except Exception:
+            pass
+    items = load_ashare_watchlist_items()
+    for item in items:
+        if item["symbol"] == clean:
+            item["name"] = name or item.get("name", "")
+            item["sector"] = sector or item.get("sector", "")
+            item["group"] = group.strip()[:40] or item.get("group", "观察")
+            if note:
+                item["note"] = note.strip()[:240]
+            save_ashare_watchlist_items(items)
+            return items
+    items.append({"symbol": clean, "name": name, "sector": sector, "group": group or "观察", "note": note, "added_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+    save_ashare_watchlist_items(items)
+    return items
+
+
+def delete_ashare_watchlist_symbol(symbol: str) -> list[dict[str, str]]:
+    try:
+        clean = normalize_ashare_code_for_storage(symbol)
+    except Exception:
+        return load_ashare_watchlist_items()
+    items = [item for item in load_ashare_watchlist_items() if item["symbol"] != clean]
+    save_ashare_watchlist_items(items)
+    return items
 
 
 def price_cache_summary(symbols: list[str]) -> dict[str, object]:
@@ -785,10 +894,10 @@ def render_market_placeholder(active: str = "home") -> str:
     </div>
   </div>
   <div class="dashboard-panel">
-    <h2>暂未开放</h2>
-    <p class="hint">A 股自选池、回测、批量回测会使用独立数据源、手续费、印花税、涨跌停和停牌规则，不复用美股交易规则。</p>
+    <h2>A股自选池</h2>
+    <p class="hint">A 股自选池已独立保存，可从选股结果加入，也可以手动添加代码后看策略图。</p>
     <div class="quick-actions">
-      <a class="btn btn-secondary" href="/cn/watchlist">A 股自选池占位</a>
+      <a class="btn btn-secondary" href="/cn/watchlist">打开 A 股自选池</a>
       <a class="btn btn-secondary" href="/cn/backtest">A 股回测占位</a>
     </div>
   </div>
@@ -843,13 +952,14 @@ def render_ashare_scan_result(
             f"<td>{row.red_avg_to_green_avg:.2f}</td>"
             f"<td>{row.top5_red_count}/5</td>"
             f"<td>{html.escape(row.data_source)}</td>"
+            f'<td><a class="btn btn-secondary btn-small" href="/cn/watchlist/add?symbol={quote(row.symbol)}&name={quote(row.name or "")}&sector={quote(row.sector or "")}">加入自选</a></td>'
             "</tr>"
         )
     table_html = (
         """
   <div class="table-wrap">
     <table class="sortable resizable-table">
-      <thead><tr><th>代码</th><th>名称</th><th>板块</th><th>评级</th><th>量能分</th><th>J值</th><th>收盘</th><th>交易日</th><th>峰值/基准</th><th>10日均/基准</th><th>红均/绿均</th><th>Top5红柱</th><th>数据源</th></tr></thead>
+      <thead><tr><th>代码</th><th>名称</th><th>板块</th><th>评级</th><th>量能分</th><th>J值</th><th>收盘</th><th>交易日</th><th>峰值/基准</th><th>10日均/基准</th><th>红均/绿均</th><th>Top5红柱</th><th>数据源</th><th>操作</th></tr></thead>
       <tbody>
 """
         + "\n".join(rows)
@@ -1141,10 +1251,14 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
   function update(job) {{
     const total = Number(job.total || 0);
     const scanned = Number(job.scanned || 0);
-    const percent = total > 0 ? Math.round(scanned / total * 100) : 0;
+    const percent = total > 0 ? Math.round(scanned / total * 100) : (job.status === "running" ? 8 : 0);
     progressBar.style.width = percent + "%";
-    status.textContent = job.message || "扫描中";
-    detail.textContent = `已扫描 ${{scanned}} / ${{total}}，候选 ${{job.candidates || 0}}，失败 ${{job.errors || 0}}，当前 ${{job.current || "-"}}`;
+    const stage = job.stage || "处理中";
+    const source = job.data_source ? `｜数据源：${{job.data_source}}` : "";
+    const current = job.current ? `｜当前：${{job.current}}` : "";
+    const extra = job.detail ? `｜${{job.detail}}` : "";
+    status.textContent = `${{stage}}：${{job.message || "正在处理"}}`;
+    detail.textContent = `进度 ${{scanned}} / ${{total || "-"}}｜候选 ${{job.candidates || 0}}｜失败 ${{job.errors || 0}}${{current}}${{source}}${{extra}}`;
   }}
   async function poll() {{
     if (!jobId) return;
@@ -1183,6 +1297,69 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
 }})();
 </script>
 {result_html}
+"""
+
+
+def render_ashare_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
+    params = params or {}
+    items = load_ashare_watchlist_items()
+    rows = []
+    for item in items:
+        symbol = item["symbol"]
+        name = item.get("name", "") or "-"
+        sector = item.get("sector", "") or "-"
+        group = item.get("group", "") or "观察"
+        note = item.get("note", "") or "-"
+        added_at = item.get("added_at", "") or "-"
+        chart_url = f"/cn/scanner?mode=single&symbol={quote(symbol)}&j_threshold=14"
+        rows.append(
+            "<tr>"
+            f"<td><a class=\"symbol-button\" href=\"{chart_url}\" target=\"ashare-watch-chart\">{html.escape(symbol)}</a></td>"
+            f"<td>{html.escape(name)}</td>"
+            f"<td>{html.escape(sector)}</td>"
+            f"<td>{html.escape(group)}</td>"
+            f"<td>{html.escape(note)}</td>"
+            f"<td>{html.escape(added_at)}</td>"
+            f"<td><a class=\"btn btn-secondary btn-small\" href=\"{chart_url}\" target=\"ashare-watch-chart\">看图</a> "
+            f"<a class=\"delete-link\" href=\"/cn/watchlist/delete?symbol={quote(symbol)}\" onclick=\"return confirm('确认删除 {html.escape(symbol)}？');\">删除</a></td>"
+            "</tr>"
+        )
+    table_rows = "\n".join(rows) if rows else '<tr><td colspan="7" class="empty">暂无 A 股自选。可以先添加代码，或从 A 股选股结果加入。</td></tr>'
+    default_symbol = items[0]["symbol"] if items else ""
+    default_src = f"/cn/scanner?mode=single&symbol={quote(default_symbol)}&j_threshold=14" if default_symbol else "about:blank"
+    return f"""
+<section class="page-head">
+  <div>
+    <h1>A股自选池</h1>
+    <p class="hint">A 股自选池和美股自选池分开保存。点击代码或“看图”后，右侧显示 A 股策略图表。</p>
+  </div>
+  <div class="mode-pill">A Share | Watchlist</div>
+</section>
+<form class="form" action="/cn/watchlist/add" method="get">
+  <label>股票代码<input name="symbol" value="{html.escape(field(params, "symbol", ""))}" placeholder="600487"></label>
+  <label>分组<input name="group" value="{html.escape(field(params, "group", "观察"))}" placeholder="观察 / 候选 / 持仓"></label>
+  <label class="wide">备注<input name="note" value="{html.escape(field(params, "note", ""))}" placeholder="关注原因、板块、阻力位等"></label>
+  <button type="submit">添加到自选</button>
+</form>
+<section class="status-strip">
+  <div class="stat-card"><div class="stat-label">自选数量</div><div class="stat-value">{len(items)}</div></div>
+  <div class="stat-card"><div class="stat-label">存储位置</div><div class="stat-value">data/ashare</div></div>
+  <div class="stat-card"><div class="stat-label">图表</div><div class="stat-value">A股策略</div></div>
+  <div class="stat-card"><div class="stat-label">市场</div><div class="stat-value">A股</div></div>
+</section>
+<section class="watchlist-grid">
+  <div class="watchlist-panel">
+    <div class="table-wrap watchlist-list-wrap">
+      <table class="sortable resizable-table">
+        <thead><tr><th>代码</th><th>名称</th><th>板块</th><th>分组</th><th>备注</th><th>加入日期</th><th>操作</th></tr></thead>
+        <tbody>{table_rows}</tbody>
+      </table>
+    </div>
+  </div>
+  <div class="watchlist-panel">
+    <iframe name="ashare-watch-chart" src="{html.escape(default_src)}" title="A股策略图表" style="width:100%;height:980px;border:1px solid #d6dbe3;border-radius:6px;background:#fff;"></iframe>
+  </div>
+</section>
 """
 
 
@@ -3533,17 +3710,46 @@ def execute_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
 
 def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
     try:
-        set_job(job_id, status="running", message="正在准备 A 股股票池", total=0, scanned=0, candidates=0, errors=0, current="")
+        set_job(
+            job_id,
+            status="running",
+            stage="准备股票池",
+            message="正在拉取 A 股股票池",
+            detail="优先使用东方财富总市值行情，失败后自动切换备用数据源。",
+            data_source="",
+            total=0,
+            scanned=0,
+            candidates=0,
+            errors=0,
+            current="",
+        )
         min_market_cap = number_field(params, "min_market_cap", 50.0)
         max_symbols = int(number_field(params, "max_symbols", 300))
         max_workers = max(1, min(12, int(number_field(params, "max_workers", 6))))
         j_threshold = number_field(params, "j_threshold", 14.0)
-        universe, universe_source, market_cap_filter_applied = load_ashare_universe_for_scan(min_market_cap, max_symbols)
+
+        def universe_progress(message: str) -> None:
+            set_job(job_id, stage="拉取股票池", message=message, detail=f"最低市值 {min_market_cap:g} 亿元，最多扫描 {max_symbols} 只。")
+
+        universe, universe_source, market_cap_filter_applied = load_ashare_universe_for_scan(min_market_cap, max_symbols, universe_progress)
+        filter_text = "市值过滤已生效" if market_cap_filter_applied else "当前数据源没有总市值字段，市值过滤未生效"
+        set_job(
+            job_id,
+            stage="股票池完成",
+            message=f"A 股股票池准备完成：{len(universe)} 只",
+            detail=filter_text,
+            data_source=universe_source,
+            total=len(universe),
+            scanned=0,
+            candidates=0,
+            errors=0,
+            current="",
+        )
 
         candidates: list[AShareSignalSnapshot] = []
         errors: list[tuple[str, str]] = []
         scanned = 0
-        set_job(job_id, message="正在扫描 A 股候选", total=len(universe), scanned=0, candidates=0, errors=0)
+        set_job(job_id, stage="扫描日线", message="正在扫描 A 股日线信号", total=len(universe), scanned=0, candidates=0, errors=0)
 
         def run_one(item) -> AShareSignalSnapshot:
             snapshot = latest_ashare_signal(item.symbol, j_threshold, fetch_name_value=False)
@@ -3555,7 +3761,7 @@ def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
             future_map = {executor.submit(run_one, item): item for item in universe}
             for future in as_completed(future_map):
                 item = future_map[future]
-                set_job(job_id, current=f"{item.symbol} {item.name}")
+                set_job(job_id, stage="扫描日线", message="正在扫描 A 股日线信号", current=f"{item.symbol} {item.name}")
                 try:
                     snapshot = future.result()
                     if snapshot.signal:
@@ -3571,7 +3777,10 @@ def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
         set_job(
             job_id,
             status="done",
+            stage="完成",
             message="A 股扫描完成",
+            detail=f"数据源：{universe_source}",
+            data_source=universe_source,
             current="",
             scanned=scanned,
             candidates=len(candidates),
@@ -3579,7 +3788,7 @@ def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
             result_html=result_html,
         )
     except Exception as exc:
-        set_job(job_id, status="error", message="A 股扫描失败", error=str(exc))
+        set_job(job_id, status="error", stage="失败", message="A 股扫描失败", detail="请查看错误信息；通常是外部数据源返回异常或网络超时。", error=str(exc))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3609,7 +3818,11 @@ class Handler(BaseHTTPRequestHandler):
                 elif route_path == "/scan/status":
                     self.ashare_scan_job_status(params)
                 elif route_path == "/watchlist":
-                    self.send_bytes(page_shell(render_market_placeholder("watchlist"), "watchlist", "cn"))
+                    self.send_bytes(page_shell(render_ashare_watchlist_page(params), "watchlist", "cn"))
+                elif route_path == "/watchlist/add":
+                    self.add_ashare_watchlist_item(params)
+                elif route_path == "/watchlist/delete":
+                    self.delete_ashare_watchlist_item(params)
                 elif route_path == "/backtest":
                     self.send_bytes(page_shell(render_market_placeholder("backtest"), "backtest", "cn"))
                 elif route_path == "/batch":
@@ -3664,7 +3877,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(404)
         except Exception as exc:
             active = "scanner" if route_path in ("/scanner", "/scan") or route_path.startswith("/scan/") else "watchlist" if route_path.startswith("/watchlist") else "batch" if route_path.startswith("/batch") else "home" if route_path in ("/", "") else "backtest"
-            form = render_ashare_scanner(params) if market == "cn" and active == "scanner" else render_market_placeholder(active) if market == "cn" else render_scanner_form(params) if active == "scanner" else render_watchlist_page(params) if active == "watchlist" else render_batch_form(params) if active == "batch" else render_dashboard() if active == "home" else render_backtest_form(params)
+            form = render_ashare_scanner(params) if market == "cn" and active == "scanner" else render_ashare_watchlist_page(params) if market == "cn" and active == "watchlist" else render_market_placeholder(active) if market == "cn" else render_scanner_form(params) if active == "scanner" else render_watchlist_page(params) if active == "watchlist" else render_batch_form(params) if active == "batch" else render_dashboard() if active == "home" else render_backtest_form(params)
             self.send_bytes(page_shell(form + f'<div class="error">{html.escape(str(exc))}</div>', active, market), 500)
 
     def add_watchlist_item(self, params: dict[str, list[str]]) -> None:
@@ -3726,6 +3939,24 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"status": "error", "error": "找不到 A 股扫描任务"}, status=404)
             return
         self.send_json(job)
+
+    def add_ashare_watchlist_item(self, params: dict[str, list[str]]) -> None:
+        try:
+            add_ashare_watchlist_symbol(
+                field(params, "symbol", ""),
+                field(params, "group", "观察"),
+                field(params, "note", ""),
+                field(params, "name", ""),
+                field(params, "sector", ""),
+            )
+            content = render_ashare_watchlist_page({})
+        except Exception as exc:
+            content = render_ashare_watchlist_page(params) + f'<div class="error">{html.escape(str(exc))}</div>'
+        self.send_bytes(page_shell(content, "watchlist", "cn"))
+
+    def delete_ashare_watchlist_item(self, params: dict[str, list[str]]) -> None:
+        delete_ashare_watchlist_symbol(field(params, "symbol", ""))
+        self.send_bytes(page_shell(render_ashare_watchlist_page({}), "watchlist", "cn"))
 
     def start_scan_job(self, params: dict[str, list[str]]) -> None:
         scan_end = default_scan_end_date()
