@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parent
 ASHARE_CACHE_DIR = Path(os.environ.get("MA5_DATA_DIR", ROOT / "data")).expanduser().resolve() / "ashare"
 ASHARE_SECTOR_CACHE_PATH = ASHARE_CACHE_DIR / "sector_map.json"
 ASHARE_SECTOR_CACHE_SECONDS = 7 * 24 * 60 * 60
+ASHARE_UNIVERSE_CACHE_PATH = ASHARE_CACHE_DIR / "universe_cache.json"
+ASHARE_UNIVERSE_CACHE_SECONDS = 18 * 60 * 60
 
 
 @dataclass
@@ -224,6 +226,27 @@ def fetch_ashare_bars(symbol: str, start: str | None = None, end: str | None = N
     end_ak = end_day.strftime("%Y%m%d")
 
     try:
+        import efinance as ef
+
+        df = ef.stock.get_quote_history(clean, beg=start_ak, end=end_ak, klt=101, fqt=1)
+        bars = [
+            AShareBar(
+                date=str(row_value(row, ("日期", "date"), 2)),
+                open=float(row_value(row, ("开盘", "open"), 3)),
+                high=float(row_value(row, ("最高", "high"), 5)),
+                low=float(row_value(row, ("最低", "low"), 6)),
+                close=float(row_value(row, ("收盘", "close"), 4)),
+                volume=float(row_value(row, ("成交量", "volume"), 7)),
+                amount=float(row.get("成交额", row.get("amount", 0.0))),
+            )
+            for _, row in df.iterrows()
+        ]
+        if bars:
+            return bars, "efinance"
+    except Exception:
+        pass
+
+    try:
         import akshare as ak
 
         df = ak.stock_zh_a_hist(symbol=clean, period="daily", start_date=start_ak, end_date=end_ak, adjust="qfq")
@@ -329,6 +352,77 @@ def write_json_cache(path: Path, payload: dict[str, Any]) -> None:
         pass
 
 
+def ashare_universe_cache_key(min_market_cap_100m: float, max_symbols: int) -> str:
+    return f"{float(min_market_cap_100m):.2f}:{int(max_symbols)}"
+
+
+def serialize_universe_item(item: AShareUniverseItem) -> dict[str, Any]:
+    return {
+        "symbol": item.symbol,
+        "name": item.name,
+        "sector": item.sector,
+        "market_cap_100m": item.market_cap_100m,
+        "exchange": item.exchange,
+        "turnover": item.turnover,
+    }
+
+
+def deserialize_universe_item(raw: dict[str, Any]) -> AShareUniverseItem:
+    return AShareUniverseItem(
+        symbol=str(raw.get("symbol", "")),
+        name=str(raw.get("name", "") or ""),
+        sector=str(raw.get("sector", "") or ""),
+        market_cap_100m=float(raw.get("market_cap_100m") or 0.0),
+        exchange=str(raw.get("exchange", "") or ""),
+        turnover=float(raw.get("turnover") or 0.0),
+    )
+
+
+def read_ashare_universe_cache(
+    min_market_cap_100m: float,
+    max_symbols: int,
+    progress: Callable[[str], None] | None = None,
+) -> tuple[list[AShareUniverseItem], str, bool] | None:
+    payload = read_json_cache(ASHARE_UNIVERSE_CACHE_PATH, ASHARE_UNIVERSE_CACHE_SECONDS)
+    if not payload:
+        return None
+    key = ashare_universe_cache_key(min_market_cap_100m, max_symbols)
+    entry = (payload.get("entries") or {}).get(key)
+    if not isinstance(entry, dict):
+        return None
+    raw_items = entry.get("items") or []
+    items = [deserialize_universe_item(raw) for raw in raw_items if isinstance(raw, dict)]
+    if not items:
+        return None
+    if progress:
+        progress(f"使用当天股票池缓存：{len(items)} 只")
+    return items, f"{entry.get('source', 'unknown')} cache", bool(entry.get("has_market_cap", False))
+
+
+def write_ashare_universe_cache(
+    min_market_cap_100m: float,
+    max_symbols: int,
+    items: list[AShareUniverseItem],
+    source: str,
+    has_market_cap: bool,
+) -> None:
+    payload = read_json_cache(ASHARE_UNIVERSE_CACHE_PATH, 30 * 24 * 60 * 60) or {}
+    entries = payload.get("entries")
+    if not isinstance(entries, dict):
+        entries = {}
+    key = ashare_universe_cache_key(min_market_cap_100m, max_symbols)
+    entries[key] = {
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "source": source,
+        "has_market_cap": has_market_cap,
+        "items": [serialize_universe_item(item) for item in items],
+    }
+    write_json_cache(
+        ASHARE_UNIVERSE_CACHE_PATH,
+        {"updated_at": time.strftime("%Y-%m-%d %H:%M:%S"), "entries": entries},
+    )
+
+
 def load_ashare_sector_map() -> dict[str, str]:
     cached = read_json_cache(ASHARE_SECTOR_CACHE_PATH, ASHARE_SECTOR_CACHE_SECONDS)
     if cached and isinstance(cached.get("sectors"), dict):
@@ -392,10 +486,6 @@ def fetch_eastmoney_ashare_universe(
     urls = [
         "http://82.push2.eastmoney.com/api/qt/clist/get",
         "http://33.push2.eastmoney.com/api/qt/clist/get",
-        "https://33.push2.eastmoney.com/api/qt/clist/get",
-        "https://82.push2.eastmoney.com/api/qt/clist/get",
-        "https://18.push2.eastmoney.com/api/qt/clist/get",
-        "https://push2.eastmoney.com/api/qt/clist/get",
     ]
     fields = "f12,f14,f2,f6,f20,f8"
     fs = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
@@ -408,7 +498,7 @@ def fetch_eastmoney_ashare_universe(
     last_error: Exception | None = None
     rows: list[dict[str, Any]] = []
     source_url = ""
-    for attempt in range(3):
+    for attempt in range(1):
         if attempt:
             if progress:
                 progress(f"东方财富股票池重试中，第 {attempt + 1} 次")
@@ -432,7 +522,7 @@ def fetch_eastmoney_ashare_universe(
                         "fields": fields,
                         "_": int(time.time() * 1000),
                     }
-                    response = requests.get(url, params=params, headers=headers, timeout=12)
+                    response = requests.get(url, params=params, headers=headers, timeout=2)
                     response.raise_for_status()
                     payload = response.json()
                     data = payload.get("data") or {}
@@ -488,12 +578,44 @@ def fetch_eastmoney_ashare_universe(
     return items[: max(1, int(max_symbols))], f"eastmoney.qt.clist {source_url}", True
 
 
+def fetch_efinance_ashare_universe(min_market_cap_100m: float = 50.0, max_symbols: int = 300) -> tuple[list[AShareUniverseItem], str, bool]:
+    import efinance as ef
+
+    df = ef.stock.get_realtime_quotes()
+    items: list[AShareUniverseItem] = []
+    for _, row in df.iterrows():
+        try:
+            symbol = normalize_ashare_symbol(str(row.get("股票代码", row.get("code", ""))))
+            name = str(row.get("股票名称", row.get("name", "")) or "")
+            if not name or "ST" in name.upper() or "退" in name:
+                continue
+            latest = row.get("最新价", row.get("price", ""))
+            if str(latest).strip() in ("", "-", "--", "nan", "None") or float(latest) <= 0:
+                continue
+            market_cap = float(row.get("总市值", row.get("market_cap", 0.0)) or 0.0) / 100_000_000
+            if market_cap < min_market_cap_100m:
+                continue
+            items.append(
+                AShareUniverseItem(
+                    symbol=symbol,
+                    name=name,
+                    sector="",
+                    market_cap_100m=market_cap,
+                    exchange=ashare_exchange(symbol),
+                    turnover=float(row.get("成交额", row.get("amount", 0.0)) or 0.0),
+                )
+            )
+        except Exception:
+            continue
+    items.sort(key=lambda item: item.market_cap_100m, reverse=True)
+    return items[: max(1, int(max_symbols))], "efinance.get_realtime_quotes", True
+
+
 def fetch_akshare_code_name_universe(max_symbols: int = 300) -> tuple[list[AShareUniverseItem], str, bool]:
     import akshare as ak
 
     df = ak.stock_info_a_code_name()
     items: list[AShareUniverseItem] = []
-    sector_map = load_ashare_sector_map()
     for _, row in df.iterrows():
         try:
             symbol = normalize_ashare_symbol(str(row.get("code", row.iloc[0])))
@@ -504,7 +626,7 @@ def fetch_akshare_code_name_universe(max_symbols: int = 300) -> tuple[list[AShar
                 AShareUniverseItem(
                     symbol=symbol,
                     name=name,
-                    sector=sector_map.get(symbol, ""),
+                    sector="",
                     market_cap_100m=0.0,
                     exchange=ashare_exchange(symbol),
                     turnover=0.0,
@@ -527,12 +649,33 @@ def load_ashare_universe_with_meta(
     max_symbols: int = 300,
     progress: Callable[[str], None] | None = None,
 ) -> tuple[list[AShareUniverseItem], str, bool]:
+    cached = read_ashare_universe_cache(min_market_cap_100m, max_symbols, progress)
+    if cached:
+        return cached
     try:
-        return fetch_eastmoney_ashare_universe(min_market_cap_100m, max_symbols, progress)
+        if progress:
+            progress("正在尝试 efinance 股票池")
+        result = fetch_efinance_ashare_universe(min_market_cap_100m, max_symbols)
+        write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
+        return result
+    except Exception:
+        if progress:
+            progress("efinance 股票池不可用，切换东方财富直连")
+    try:
+        result = fetch_eastmoney_ashare_universe(min_market_cap_100m, max_symbols, progress)
+        write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
+        return result
     except Exception as eastmoney_exc:
         eastmoney_error = eastmoney_exc
         if progress:
-            progress("东方财富股票池不可用，正在尝试 akshare 总市值接口")
+            progress("东方财富股票池不可用，切换代码/名称表快速兜底")
+        try:
+            result = fetch_akshare_code_name_universe(max_symbols)
+            write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
+            return result
+        except Exception:
+            if progress:
+                progress("代码/名称表兜底不可用，正在尝试 akshare 总市值接口")
     try:
         import akshare as ak
 
@@ -552,7 +695,9 @@ def load_ashare_universe_with_meta(
             if progress:
                 progress("akshare 行情接口不可用，切换代码/名称表兜底")
             try:
-                return fetch_akshare_code_name_universe(max_symbols)
+                result = fetch_akshare_code_name_universe(max_symbols)
+                write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
+                return result
             except Exception as code_name_exc:
                 raise RuntimeError(f"A 股股票池拉取失败：东方财富 {eastmoney_error}；akshare {fallback_exc}；代码表 {code_name_exc}") from code_name_exc
 
@@ -587,7 +732,9 @@ def load_ashare_universe_with_meta(
         items.sort(key=lambda item: item.market_cap_100m, reverse=True)
     else:
         items.sort(key=lambda item: item.turnover, reverse=True)
-    return items[: max(1, int(max_symbols))], source, has_market_cap
+    result = items[: max(1, int(max_symbols))], source, has_market_cap
+    write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
+    return result
 
 
 def load_ashare_universe_for_scan(
@@ -595,12 +742,33 @@ def load_ashare_universe_for_scan(
     max_symbols: int = 300,
     progress: Callable[[str], None] | None = None,
 ) -> tuple[list[AShareUniverseItem], str, bool]:
+    cached = read_ashare_universe_cache(min_market_cap_100m, max_symbols, progress)
+    if cached:
+        return cached
     try:
-        return fetch_eastmoney_ashare_universe(min_market_cap_100m, max_symbols, progress)
+        if progress:
+            progress("正在尝试 efinance 股票池")
+        result = fetch_efinance_ashare_universe(min_market_cap_100m, max_symbols)
+        write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
+        return result
+    except Exception:
+        if progress:
+            progress("efinance 股票池不可用，切换东方财富直连")
+    try:
+        result = fetch_eastmoney_ashare_universe(min_market_cap_100m, max_symbols, progress)
+        write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
+        return result
     except Exception as eastmoney_exc:
         eastmoney_error = eastmoney_exc
         if progress:
-            progress("东方财富股票池不可用，正在尝试 akshare 总市值接口")
+            progress("东方财富股票池不可用，切换代码/名称表快速兜底")
+        try:
+            result = fetch_akshare_code_name_universe(max_symbols)
+            write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
+            return result
+        except Exception:
+            if progress:
+                progress("代码/名称表兜底不可用，正在尝试 akshare 总市值接口")
     try:
         import akshare as ak
 
@@ -620,7 +788,9 @@ def load_ashare_universe_for_scan(
             if progress:
                 progress("akshare 行情接口不可用，切换代码/名称表兜底")
             try:
-                return fetch_akshare_code_name_universe(max_symbols)
+                result = fetch_akshare_code_name_universe(max_symbols)
+                write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
+                return result
             except Exception as code_name_exc:
                 raise RuntimeError(f"A 股股票池拉取失败：东方财富 {eastmoney_error}；akshare {fallback_exc}；代码表 {code_name_exc}") from code_name_exc
 
@@ -658,7 +828,9 @@ def load_ashare_universe_for_scan(
         items.sort(key=lambda item: item.market_cap_100m, reverse=True)
     else:
         items.sort(key=lambda item: item.turnover, reverse=True)
-    return items[: max(1, int(max_symbols))], source, has_market_cap
+    result = items[: max(1, int(max_symbols))], source, has_market_cap
+    write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
+    return result
 
 
 def latest_ashare_signal(symbol: str, j_threshold: float = 14.0, fetch_name_value: bool = True) -> AShareSignalSnapshot:

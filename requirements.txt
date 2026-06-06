@@ -1,2 +1,3 @@
 yfinance==1.4.0
 akshare==1.18.63
+efinance==0.5.8
