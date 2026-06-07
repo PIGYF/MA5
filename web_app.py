@@ -63,11 +63,15 @@ from ma5_config import (
 )
 from ashare_lab import (
     ASHARE_ROUTE,
+    ASHARE_BOARD_LABELS,
     AShareSignalSnapshot,
+    ashare_board_filter_label,
     ashare_chart_payload,
     fetch_ashare_profile,
+    filter_ashare_universe_by_board,
     latest_ashare_signal,
     load_ashare_universe_for_scan,
+    normalize_ashare_boards,
     scan_ashare_candidates,
 )
 from scan_next_b import SignalResult, latest_b_signal, load_symbols, unique_symbols, write_html
@@ -641,6 +645,9 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .dashboard-panel {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
 .dashboard-panel h2 {{ margin-top: 0; }}
 .quick-actions {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+.checkbox-row {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; }}
+.check-inline {{ display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 5px 9px; border: 1px solid #d6dbe3; border-radius: 6px; background: #fff; color: #131722; font-size: 13px; font-weight: 800; cursor: pointer; }}
+.check-inline input {{ width: auto; margin: 0; accent-color: #2962ff; }}
 .links {{ margin: 0 0 12px; font-size: 13px; }}
 .links a {{ color: #2962ff; text-decoration: none; margin-right: 12px; font-weight: 700; }}
 .links a:hover {{ text-decoration: underline; }}
@@ -998,14 +1005,16 @@ def render_ashare_scan_result(
 
 def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     mode = field(params, "mode", "")
-    symbol = field(params, "symbol", "600487")
+    symbol = field(params, "symbol", "")
     j_threshold = number_field(params, "j_threshold", 14.0)
     min_market_cap = number_field(params, "min_market_cap", 50.0)
     max_symbols = int(number_field(params, "max_symbols", 300))
+    selected_boards = normalize_ashare_boards(params.get("boards", []))
+    embed = field(params, "embed", "0") == "1"
     result_html = ""
     if mode == "market":
         try:
-            scan = scan_ashare_candidates(min_market_cap, max_symbols, j_threshold)
+            scan = scan_ashare_candidates(min_market_cap, max_symbols, j_threshold, boards=selected_boards)
             result_html = render_ashare_scan_result(
                 scan.candidates,
                 scan.errors,
@@ -1041,7 +1050,18 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
       <h2>{html.escape(snapshot.symbol)}{html.escape(name)} 策略验证</h2>
       <p class="hint">当前只做单票验证，用于确认 A 股策略指标和量能结构；全市场扫描会在这个模块稳定后接入。</p>
     </div>
-    <span class="score-badge {rating_cls}">{signal_text}</span>
+    <div class="quick-actions">
+      <span class="score-badge {rating_cls}">{signal_text}</span>
+      <form action="/cn/watchlist/add" method="get" style="margin:0;display:inline-flex;gap:8px;align-items:center;">
+        <input type="hidden" name="symbol" value="{html.escape(snapshot.symbol)}">
+        <input type="hidden" name="name" value="{html.escape(snapshot.name)}">
+        <input type="hidden" name="sector" value="{html.escape(sector)}">
+        <input type="hidden" name="group" value="观察">
+        <input type="hidden" name="note" value="单票验证加入">
+        <button class="btn btn-secondary btn-small" type="submit">加入自选池</button>
+      </form>
+      <a class="btn btn-secondary btn-small" href="/cn/watchlist">查看自选池</a>
+    </div>
   </div>
   <section class="status-strip">
     <div class="stat-card"><div class="stat-label">最新交易日</div><div class="stat-value">{html.escape(snapshot.latest_date)}</div></div>
@@ -1085,10 +1105,14 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     <div class="toolbar">
       <div>
         <h2>策略图表</h2>
-        <p class="hint">主图显示 K 线、知行短期趋势、知行多空线；下方显示成交量与 KDJ。</p>
+        <p class="hint">主图显示 K 线、趋势线、多空线；下方显示成交量与 KDJ。</p>
       </div>
     </div>
-    <div id="ashare-chart" style="height:780px;width:100%;"></div>
+    <div class="watchlist-chart-shell" style="height:780px;">
+      <div id="ashare-main-chart" class="watchlist-chart" style="height:560px;"></div>
+      <div id="ashare-kdj-chart" class="watchlist-chart" style="height:200px;margin-top:12px;"></div>
+      <div id="ashare-tooltip" class="chart-tooltip"></div>
+    </div>
   </section>
   <script type="application/json" id="ashare-chart-data">{json.dumps(chart_payload, ensure_ascii=False)}</script>
   <script>
@@ -1096,119 +1120,119 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     const payload = JSON.parse(document.getElementById("ashare-chart-data").textContent);
     const ohlc = payload.ohlc || [];
     const volume = payload.volume || [];
-    const traces = [
-      {{
-        type: "candlestick",
-        x: ohlc.map(row => row.x),
-        open: ohlc.map(row => row.open),
-        high: ohlc.map(row => row.high),
-        low: ohlc.map(row => row.low),
-        close: ohlc.map(row => row.close),
-        name: "K线",
-        increasing: {{ line: {{ color: "#ef4444" }}, fillcolor: "rgba(239,68,68,.28)" }},
-        decreasing: {{ line: {{ color: "#06b6d4" }}, fillcolor: "rgba(6,182,212,.28)" }},
-        xaxis: "x",
-        yaxis: "y"
-      }},
-      {{
-        type: "scatter",
-        mode: "lines",
-        x: payload.zx_short_trend.map(row => row.x),
-        y: payload.zx_short_trend.map(row => row.y),
-        name: "知行短期趋势",
-        line: {{ color: "#2563eb", width: 2 }},
-        xaxis: "x",
-        yaxis: "y"
-      }},
-      {{
-        type: "scatter",
-        mode: "lines",
-        x: payload.zx_multi_trend.map(row => row.x),
-        y: payload.zx_multi_trend.map(row => row.y),
-        name: "知行多空线",
-        line: {{ color: "#dc2626", width: 2 }},
-        xaxis: "x",
-        yaxis: "y"
-      }},
-      {{
-        type: "scatter",
-        mode: "markers+text",
-        x: payload.signals.map(row => row.x),
-        y: payload.signals.map(row => row.y),
-        text: payload.signals.map(row => row.text),
-        textposition: "bottom center",
-        marker: {{ color: "#16a34a", size: 10, symbol: "triangle-up" }},
-        name: "B信号",
-        xaxis: "x",
-        yaxis: "y"
-      }},
-      {{
-        type: "bar",
-        x: volume.map(row => row.x),
-        y: volume.map(row => row.y),
-        marker: {{ color: volume.map(row => row.color) }},
-        name: "成交量",
-        xaxis: "x2",
-        yaxis: "y2"
-      }},
-      {{
-        type: "scatter",
-        mode: "lines",
-        x: payload.k.map(row => row.x),
-        y: payload.k.map(row => row.y),
-        name: "K",
-        line: {{ color: "#2563eb", width: 1.5 }},
-        xaxis: "x3",
-        yaxis: "y3"
-      }},
-      {{
-        type: "scatter",
-        mode: "lines",
-        x: payload.d.map(row => row.x),
-        y: payload.d.map(row => row.y),
-        name: "D",
-        line: {{ color: "#f59e0b", width: 1.5 }},
-        xaxis: "x3",
-        yaxis: "y3"
-      }},
-      {{
-        type: "scatter",
-        mode: "lines",
-        x: payload.j.map(row => row.x),
-        y: payload.j.map(row => row.y),
-        name: "J",
-        line: {{ color: "#7c3aed", width: 1.8 }},
-        xaxis: "x3",
-        yaxis: "y3"
-      }}
-    ];
-    const layout = {{
-      margin: {{ l: 54, r: 24, t: 18, b: 32 }},
-      paper_bgcolor: "#fff",
-      plot_bgcolor: "#fff",
-      hovermode: "x unified",
-      dragmode: "pan",
-      showlegend: true,
-      legend: {{ orientation: "h", x: 0, y: 1.05 }},
-      font: {{ family: "Inter, Microsoft YaHei UI, PingFang SC, Arial, sans-serif", size: 12, color: "#131722" }},
-      grid: {{ rows: 3, columns: 1, pattern: "independent", roworder: "top to bottom" }},
-      xaxis: {{ rangeslider: {{ visible: false }}, showgrid: true, gridcolor: "#eef1f5" }},
-      yaxis: {{ domain: [0.42, 1], showgrid: true, gridcolor: "#eef1f5" }},
-      xaxis2: {{ matches: "x", showticklabels: false, showgrid: true, gridcolor: "#eef1f5" }},
-      yaxis2: {{ domain: [0.24, 0.38], showgrid: true, gridcolor: "#eef1f5" }},
-      xaxis3: {{ matches: "x", showgrid: true, gridcolor: "#eef1f5" }},
-      yaxis3: {{ domain: [0, 0.2], showgrid: true, gridcolor: "#eef1f5", range: [-20, 120] }},
-      shapes: [
-        {{ type: "line", xref: "paper", x0: 0, x1: 1, yref: "y3", y0: {j_threshold}, y1: {j_threshold}, line: {{ color: "#ef4444", width: 1, dash: "dot" }} }}
-      ]
+    const mainEl = document.getElementById("ashare-main-chart");
+    const kdjEl = document.getElementById("ashare-kdj-chart");
+    const tooltip = document.getElementById("ashare-tooltip");
+    const toLine = rows => (rows || []).map(row => ({{ time: row.x, value: row.y }})).filter(row => row.value !== null && row.value !== undefined);
+    const candleRows = ohlc.map(row => ({{ time: row.x, open: row.open, high: row.high, low: row.low, close: row.close }}));
+    const volumeRows = volume.map(row => ({{ time: row.x, value: row.y, color: row.color }}));
+    const rowByTime = new Map(candleRows.map((row, index) => [row.time, {{ ...row, volume: volume[index]?.y }}]));
+    const commonOptions = {{
+      layout: {{ background: {{ type: "solid", color: "#ffffff" }}, textColor: "#131722", fontFamily: "Inter, Microsoft YaHei UI, PingFang SC, Arial, sans-serif" }},
+      grid: {{ vertLines: {{ color: "#f1f3f6" }}, horzLines: {{ color: "#f1f3f6" }} }},
+      crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
+      timeScale: {{ borderColor: "#d6dbe3", rightOffset: 6, barSpacing: 8, minBarSpacing: 3 }},
+      handleScroll: {{ mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false }},
+      handleScale: {{ axisPressedMouseMove: true, mouseWheel: true, pinch: true }},
     }};
-    Plotly.newPlot("ashare-chart", traces, layout, {{ responsive: true, displaylogo: false, scrollZoom: true }});
+    const mainChart = LightweightCharts.createChart(mainEl, {{
+      ...commonOptions,
+      width: mainEl.clientWidth,
+      height: mainEl.clientHeight,
+      rightPriceScale: {{ borderColor: "#d6dbe3", scaleMargins: {{ top: 0.08, bottom: 0.28 }} }},
+    }});
+    const kdjChart = LightweightCharts.createChart(kdjEl, {{
+      ...commonOptions,
+      width: kdjEl.clientWidth,
+      height: kdjEl.clientHeight,
+      rightPriceScale: {{ borderColor: "#d6dbe3", scaleMargins: {{ top: 0.12, bottom: 0.12 }} }},
+    }});
+    const candle = mainChart.addCandlestickSeries({{
+      upColor: "#089981", downColor: "#f23645", borderUpColor: "#089981", borderDownColor: "#f23645", wickUpColor: "#089981", wickDownColor: "#f23645", priceLineVisible: false,
+    }});
+    candle.setData(candleRows);
+    const shortTrend = mainChart.addLineSeries({{ color: "#2563eb", lineWidth: 2, title: "趋势线", priceLineVisible: false }});
+    shortTrend.setData(toLine(payload.zx_short_trend));
+    const multiTrend = mainChart.addLineSeries({{ color: "#dc2626", lineWidth: 2, title: "多空线", priceLineVisible: false }});
+    multiTrend.setData(toLine(payload.zx_multi_trend));
+    const volSeries = mainChart.addHistogramSeries({{ priceScaleId: "", priceFormat: {{ type: "volume" }}, priceLineVisible: false, lastValueVisible: false }});
+    volSeries.setData(volumeRows);
+    mainChart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
+    candle.setMarkers((payload.signals || []).map(row => ({{
+      time: row.x,
+      position: "belowBar",
+      color: "#16a34a",
+      shape: "arrowUp",
+      text: row.text || "B",
+    }})));
+    const kLine = kdjChart.addLineSeries({{ color: "#2563eb", lineWidth: 1.5, title: "K", priceLineVisible: false }});
+    kLine.setData(toLine(payload.k));
+    const dLine = kdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "D", priceLineVisible: false }});
+    dLine.setData(toLine(payload.d));
+    const jLine = kdjChart.addLineSeries({{ color: "#7c3aed", lineWidth: 2, title: "J", priceLineVisible: false }});
+    jLine.setData(toLine(payload.j));
+    const threshold = kdjChart.addLineSeries({{ color: "#ef4444", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: "J阈值", priceLineVisible: false }});
+    threshold.setData(candleRows.map(row => ({{ time: row.time, value: {j_threshold} }})));
+    let syncing = false;
+    function syncRange(source, target) {{
+      source.timeScale().subscribeVisibleLogicalRangeChange(range => {{
+        if (syncing || !range) return;
+        syncing = true;
+        target.timeScale().setVisibleLogicalRange(range);
+        syncing = false;
+      }});
+    }}
+    syncRange(mainChart, kdjChart);
+    syncRange(kdjChart, mainChart);
+    function formatNum(value, digits = 2) {{
+      return value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ minimumFractionDigits: digits, maximumFractionDigits: digits }});
+    }}
+    function formatVol(value) {{
+      return value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ maximumFractionDigits: 0 }});
+    }}
+    mainChart.subscribeCrosshairMove(param => {{
+      if (!param.time || !param.point || param.point.x < 0 || param.point.y < 0 || param.point.x > mainEl.clientWidth || param.point.y > mainEl.clientHeight) {{
+        tooltip.style.display = "none";
+        return;
+      }}
+      const row = rowByTime.get(param.time);
+      if (!row) {{
+        tooltip.style.display = "none";
+        return;
+      }}
+      const up = row.close >= row.open;
+      tooltip.innerHTML = `<strong>${{row.time}}</strong><div><span class="${{up ? "up" : "down"}}">开 ${{formatNum(row.open)}} 高 ${{formatNum(row.high)}} 低 ${{formatNum(row.low)}} 收 ${{formatNum(row.close)}}</span></div><div>成交量 ${{formatVol(row.volume)}} &nbsp; 短期趋势 ${{formatNum(param.seriesData.get(shortTrend)?.value)}} &nbsp; 多空线 ${{formatNum(param.seriesData.get(multiTrend)?.value)}}</div>`;
+      tooltip.style.display = "block";
+      tooltip.style.left = Math.min(param.point.x + 16, mainEl.clientWidth - 280) + "px";
+      tooltip.style.top = Math.max(44, param.point.y - 72) + "px";
+    }});
+    new ResizeObserver(entries => {{
+      const rect = entries[0].contentRect;
+      mainChart.applyOptions({{ width: Math.floor(rect.width), height: Math.floor(rect.height) }});
+    }}).observe(mainEl);
+    new ResizeObserver(entries => {{
+      const rect = entries[0].contentRect;
+      kdjChart.applyOptions({{ width: Math.floor(rect.width), height: Math.floor(rect.height) }});
+    }}).observe(kdjEl);
+    mainChart.timeScale().fitContent();
+    kdjChart.timeScale().fitContent();
   }})();
   </script>
 </section>
 """
         except Exception as exc:
             result_html = f'<div class="error">{html.escape(str(exc))}</div>'
+
+    if embed:
+        return f"""
+<script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+{result_html or '<div class="empty">请选择一只 A 股查看策略图表。</div>'}
+"""
+
+    board_controls = "".join(
+        f'<label class="check-inline"><input type="checkbox" name="boards" value="{html.escape(board)}" {"checked" if board in selected_boards else ""}> {html.escape(label)}</label>'
+        for board, label in ASHARE_BOARD_LABELS.items()
+    )
 
     return f"""
 <section class="page-head">
@@ -1218,7 +1242,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
   </div>
   <div class="mode-pill">A Share | Scanner</div>
 </section>
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 <form class="form" action="/cn/scanner" method="get">
   <input type="hidden" name="mode" value="single">
   <label>股票代码<input name="symbol" value="{html.escape(symbol)}" placeholder="600487"></label>
@@ -1231,6 +1255,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
   <label>最多扫描<input type="number" step="1" name="max_symbols" value="{max_symbols}"></label>
   <label>并发数<input type="number" step="1" name="max_workers" value="{int(number_field(params, "max_workers", 6))}"></label>
   <label>J值阈值<input type="number" step="0.1" name="j_threshold" value="{j_threshold:g}"></label>
+  <label class="wide">板块范围<div class="checkbox-row">{board_controls}</div></label>
   <button type="submit">开始选股</button>
 </form>
 <section class="progress-box" id="ashare-scan-progress">
@@ -1311,23 +1336,22 @@ def render_ashare_watchlist_page(params: dict[str, list[str]] | None = None) -> 
         group = item.get("group", "") or "观察"
         note = item.get("note", "") or "-"
         added_at = item.get("added_at", "") or "-"
-        chart_url = f"/cn/scanner?mode=single&symbol={quote(symbol)}&j_threshold=14"
         rows.append(
             "<tr>"
-            f"<td><a class=\"symbol-button\" href=\"{chart_url}\" target=\"ashare-watch-chart\">{html.escape(symbol)}</a></td>"
+            f"<td><a class=\"symbol-button\" href=\"#\" data-ashare-symbol=\"{html.escape(symbol)}\">{html.escape(symbol)}</a></td>"
             f"<td>{html.escape(name)}</td>"
             f"<td>{html.escape(sector)}</td>"
             f"<td>{html.escape(group)}</td>"
             f"<td>{html.escape(note)}</td>"
             f"<td>{html.escape(added_at)}</td>"
-            f"<td><a class=\"btn btn-secondary btn-small\" href=\"{chart_url}\" target=\"ashare-watch-chart\">看图</a> "
+            f"<td><button class=\"btn btn-secondary btn-small\" type=\"button\" data-ashare-symbol=\"{html.escape(symbol)}\">看图</button> "
             f"<a class=\"delete-link\" href=\"/cn/watchlist/delete?symbol={quote(symbol)}\" onclick=\"return confirm('确认删除 {html.escape(symbol)}？');\">删除</a></td>"
             "</tr>"
         )
     table_rows = "\n".join(rows) if rows else '<tr><td colspan="7" class="empty">暂无 A 股自选。可以先添加代码，或从 A 股选股结果加入。</td></tr>'
     default_symbol = items[0]["symbol"] if items else ""
-    default_src = f"/cn/scanner?mode=single&symbol={quote(default_symbol)}&j_threshold=14" if default_symbol else "about:blank"
     return f"""
+<script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 <section class="page-head">
   <div>
     <h1>A股自选池</h1>
@@ -1357,9 +1381,150 @@ def render_ashare_watchlist_page(params: dict[str, list[str]] | None = None) -> 
     </div>
   </div>
   <div class="watchlist-panel">
-    <iframe name="ashare-watch-chart" src="{html.escape(default_src)}" title="A股策略图表" style="width:100%;height:980px;border:1px solid #d6dbe3;border-radius:6px;background:#fff;"></iframe>
+    <div class="toolbar">
+      <div>
+        <strong id="ashare-watch-title">{html.escape(default_symbol) if default_symbol else "选择一只 A 股"}</strong>
+        <p class="hint" id="ashare-watch-subtitle">点击左侧代码或“看图”后，在这里显示策略图表。</p>
+      </div>
+    </div>
+    <div class="watch-detail-grid">
+      <div class="watch-detail-item"><span>名称</span><strong id="ashare-detail-name">-</strong></div>
+      <div class="watch-detail-item"><span>板块</span><strong id="ashare-detail-sector">-</strong></div>
+      <div class="watch-detail-item"><span>数据源</span><strong id="ashare-detail-source">-</strong></div>
+      <div class="watch-detail-item"><span>交易日数量</span><strong id="ashare-detail-count">-</strong></div>
+    </div>
+    <div class="watchlist-chart-shell" style="height:780px;">
+      <div id="ashare-watch-main-chart" class="watchlist-chart" style="height:560px;"></div>
+      <div id="ashare-watch-kdj-chart" class="watchlist-chart" style="height:200px;margin-top:12px;"></div>
+      <div id="ashare-watch-tooltip" class="chart-tooltip"></div>
+      <div id="ashare-watch-loading" class="loading-overlay"><div class="spinner"></div><div>正在拉取 A 股日 K 数据</div></div>
+    </div>
   </div>
 </section>
+<script>
+const ashareInitialSymbol = {json.dumps(default_symbol)};
+let ashareMainChart = null;
+let ashareKdjChart = null;
+const ashareMainEl = document.getElementById("ashare-watch-main-chart");
+const ashareKdjEl = document.getElementById("ashare-watch-kdj-chart");
+const ashareTooltip = document.getElementById("ashare-watch-tooltip");
+const ashareLoading = document.getElementById("ashare-watch-loading");
+const ashareTitle = document.getElementById("ashare-watch-title");
+const ashareSubtitle = document.getElementById("ashare-watch-subtitle");
+
+function clearAshareCharts() {{
+  if (ashareMainChart) ashareMainChart.remove();
+  if (ashareKdjChart) ashareKdjChart.remove();
+  ashareMainChart = null;
+  ashareKdjChart = null;
+}}
+
+function renderAshareWatchChart(payload) {{
+  clearAshareCharts();
+  const ohlc = payload.ohlc || [];
+  const volume = payload.volume || [];
+  const toLine = rows => (rows || []).map(row => ({{ time: row.x, value: row.y }})).filter(row => row.value !== null && row.value !== undefined);
+  const candles = ohlc.map(row => ({{ time: row.x, open: row.open, high: row.high, low: row.low, close: row.close }}));
+  const volumes = volume.map(row => ({{ time: row.x, value: row.y, color: row.color }}));
+  const rowByTime = new Map(candles.map((row, index) => [row.time, {{ ...row, volume: volume[index]?.y }}]));
+  const common = {{
+    layout: {{ background: {{ type: "solid", color: "#ffffff" }}, textColor: "#131722", fontFamily: "Inter, Microsoft YaHei UI, PingFang SC, Arial, sans-serif" }},
+    grid: {{ vertLines: {{ color: "#f1f3f6" }}, horzLines: {{ color: "#f1f3f6" }} }},
+    crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
+    timeScale: {{ borderColor: "#d6dbe3", rightOffset: 6, barSpacing: 8, minBarSpacing: 3 }},
+    handleScroll: {{ mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false }},
+    handleScale: {{ axisPressedMouseMove: true, mouseWheel: true, pinch: true }},
+  }};
+  ashareMainChart = LightweightCharts.createChart(ashareMainEl, {{ ...common, width: ashareMainEl.clientWidth, height: ashareMainEl.clientHeight, rightPriceScale: {{ borderColor: "#d6dbe3", scaleMargins: {{ top: 0.08, bottom: 0.28 }} }} }});
+  ashareKdjChart = LightweightCharts.createChart(ashareKdjEl, {{ ...common, width: ashareKdjEl.clientWidth, height: ashareKdjEl.clientHeight, rightPriceScale: {{ borderColor: "#d6dbe3", scaleMargins: {{ top: 0.12, bottom: 0.12 }} }} }});
+  const candle = ashareMainChart.addCandlestickSeries({{ upColor: "#089981", downColor: "#f23645", borderUpColor: "#089981", borderDownColor: "#f23645", wickUpColor: "#089981", wickDownColor: "#f23645", priceLineVisible: false }});
+  candle.setData(candles);
+  const trend = ashareMainChart.addLineSeries({{ color: "#2563eb", lineWidth: 2, title: "趋势线", priceLineVisible: false }});
+  trend.setData(toLine(payload.zx_short_trend));
+  const multi = ashareMainChart.addLineSeries({{ color: "#dc2626", lineWidth: 2, title: "多空线", priceLineVisible: false }});
+  multi.setData(toLine(payload.zx_multi_trend));
+  const volSeries = ashareMainChart.addHistogramSeries({{ priceScaleId: "", priceFormat: {{ type: "volume" }}, priceLineVisible: false, lastValueVisible: false }});
+  volSeries.setData(volumes);
+  ashareMainChart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
+  candle.setMarkers((payload.signals || []).map(row => ({{ time: row.x, position: "belowBar", color: "#16a34a", shape: "arrowUp", text: row.text || "B" }})));
+  ashareKdjChart.addLineSeries({{ color: "#2563eb", lineWidth: 1.5, title: "K", priceLineVisible: false }}).setData(toLine(payload.k));
+  ashareKdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "D", priceLineVisible: false }}).setData(toLine(payload.d));
+  ashareKdjChart.addLineSeries({{ color: "#7c3aed", lineWidth: 2, title: "J", priceLineVisible: false }}).setData(toLine(payload.j));
+  ashareKdjChart.addLineSeries({{ color: "#ef4444", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: "J阈值", priceLineVisible: false }}).setData(candles.map(row => ({{ time: row.time, value: payload.j_threshold || 14 }})));
+  let syncing = false;
+  function sync(source, target) {{
+    source.timeScale().subscribeVisibleLogicalRangeChange(range => {{
+      if (syncing || !range) return;
+      syncing = true;
+      target.timeScale().setVisibleLogicalRange(range);
+      syncing = false;
+    }});
+  }}
+  sync(ashareMainChart, ashareKdjChart);
+  sync(ashareKdjChart, ashareMainChart);
+  const f = value => value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }});
+  const fv = value => value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ maximumFractionDigits: 0 }});
+  ashareMainChart.subscribeCrosshairMove(param => {{
+    if (!param.time || !param.point || param.point.x < 0 || param.point.y < 0 || param.point.x > ashareMainEl.clientWidth || param.point.y > ashareMainEl.clientHeight) {{
+      ashareTooltip.style.display = "none";
+      return;
+    }}
+    const row = rowByTime.get(param.time);
+    if (!row) return;
+    const up = row.close >= row.open;
+    ashareTooltip.innerHTML = `<strong>${{row.time}}</strong><div><span class="${{up ? "up" : "down"}}">开 ${{f(row.open)}} 高 ${{f(row.high)}} 低 ${{f(row.low)}} 收 ${{f(row.close)}}</span></div><div>成交量 ${{fv(row.volume)}} &nbsp; 趋势线 ${{f(param.seriesData.get(trend)?.value)}} &nbsp; 多空线 ${{f(param.seriesData.get(multi)?.value)}}</div>`;
+    ashareTooltip.style.display = "block";
+    ashareTooltip.style.left = Math.min(param.point.x + 16, ashareMainEl.clientWidth - 280) + "px";
+    ashareTooltip.style.top = Math.max(44, param.point.y - 72) + "px";
+  }});
+  new ResizeObserver(entries => {{
+    const rect = entries[0].contentRect;
+    if (ashareMainChart) ashareMainChart.applyOptions({{ width: Math.floor(rect.width), height: Math.floor(rect.height) }});
+  }}).observe(ashareMainEl);
+  new ResizeObserver(entries => {{
+    const rect = entries[0].contentRect;
+    if (ashareKdjChart) ashareKdjChart.applyOptions({{ width: Math.floor(rect.width), height: Math.floor(rect.height) }});
+  }}).observe(ashareKdjEl);
+  ashareMainChart.timeScale().fitContent();
+  ashareKdjChart.timeScale().fitContent();
+}}
+
+async function loadAshareWatchChart(symbol) {{
+  if (!symbol) return;
+  ashareTitle.textContent = symbol;
+  ashareSubtitle.textContent = "正在加载...";
+  ashareLoading?.classList.add("active");
+  try {{
+    const res = await fetch(`/cn/watchlist/chart?symbol=${{encodeURIComponent(symbol)}}&j_threshold=14`);
+    const payload = await res.json();
+    if (payload.error) {{
+      ashareSubtitle.textContent = payload.error;
+      clearAshareCharts();
+      return;
+    }}
+    ashareTitle.textContent = `${{payload.symbol}}${{payload.name ? " / " + payload.name : ""}}`;
+    ashareSubtitle.textContent = "A 股策略图表，日 K 数据";
+    document.getElementById("ashare-detail-name").textContent = payload.name || "-";
+    document.getElementById("ashare-detail-sector").textContent = payload.sector || "-";
+    document.getElementById("ashare-detail-source").textContent = payload.source || "-";
+    document.getElementById("ashare-detail-count").textContent = String((payload.ohlc || []).length);
+    renderAshareWatchChart(payload);
+  }} catch (error) {{
+    ashareSubtitle.textContent = error?.message || "图表加载失败";
+    clearAshareCharts();
+  }} finally {{
+    ashareLoading?.classList.remove("active");
+  }}
+}}
+
+document.addEventListener("click", event => {{
+  const target = event.target.closest("[data-ashare-symbol]");
+  if (!target) return;
+  event.preventDefault();
+  loadAshareWatchChart(target.getAttribute("data-ashare-symbol"));
+}});
+if (ashareInitialSymbol) loadAshareWatchChart(ashareInitialSymbol);
+</script>
 """
 
 
@@ -2643,6 +2808,27 @@ async function pollScan(jobId) {{
   }}
 }}
 
+async function restoreActiveScan() {{
+  try {{
+    const res = await fetch("/scan/active");
+    const data = await res.json();
+    if (!data.job_id) return;
+    activeScanJobId = data.job_id;
+    progressBox.style.display = "block";
+    scanResult.innerHTML = data.result_html || "";
+    if (scanResult.innerHTML) {{
+      initializeResizableTables(scanResult);
+      initializeSortableTables(scanResult);
+    }}
+    updateProgress(data);
+    if (!["done", "error", "stopped"].includes(data.status)) {{
+      pollScan(data.job_id);
+    }}
+  }} catch (error) {{
+    console.warn("restore scan failed", error);
+  }}
+}}
+
 pauseScan.addEventListener("click", async () => {{
   if (!activeScanJobId) return;
   pauseScan.hidden = true;
@@ -2761,6 +2947,7 @@ scannerForm.addEventListener("submit", async event => {{
 }});
 initializeResizableTables(document);
 initializeSortableTables(document);
+restoreActiveScan();
 </script>
 """
 
@@ -3727,12 +3914,17 @@ def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
         max_symbols = int(number_field(params, "max_symbols", 300))
         max_workers = max(1, min(12, int(number_field(params, "max_workers", 6))))
         j_threshold = number_field(params, "j_threshold", 14.0)
+        selected_boards = normalize_ashare_boards(params.get("boards", []))
+        board_label = ashare_board_filter_label(selected_boards)
 
         def universe_progress(message: str) -> None:
-            set_job(job_id, stage="拉取股票池", message=message, detail=f"最低市值 {min_market_cap:g} 亿元，最多扫描 {max_symbols} 只。")
+            set_job(job_id, stage="拉取股票池", message=message, detail=f"最低市值 {min_market_cap:g} 亿元，板块：{board_label}，最多扫描 {max_symbols} 只。")
 
-        universe, universe_source, market_cap_filter_applied = load_ashare_universe_for_scan(min_market_cap, max_symbols, universe_progress)
+        fetch_limit = max_symbols if set(selected_boards) == set(ASHARE_BOARD_LABELS) else max(1000, max_symbols * 4)
+        universe, universe_source, market_cap_filter_applied = load_ashare_universe_for_scan(min_market_cap, fetch_limit, universe_progress)
+        universe = filter_ashare_universe_by_board(universe, selected_boards)[: max(1, max_symbols)]
         filter_text = "市值过滤已生效" if market_cap_filter_applied else "当前数据源没有总市值字段，市值过滤未生效"
+        filter_text = f"{filter_text}；板块：{board_label}"
         set_job(
             job_id,
             stage="股票池完成",
@@ -3812,7 +4004,8 @@ class Handler(BaseHTTPRequestHandler):
                 if route_path in ("/", ""):
                     self.send_bytes(page_shell(render_market_placeholder("home"), "home", "cn"))
                 elif route_path == "/scanner":
-                    self.send_bytes(page_shell(render_ashare_scanner(params), "scanner", "cn"))
+                    content = render_ashare_scanner(params)
+                    self.send_bytes(content.encode("utf-8") if field(params, "embed", "0") == "1" else page_shell(content, "scanner", "cn"))
                 elif route_path == "/scan/start":
                     self.start_ashare_scan_job(params)
                 elif route_path == "/scan/status":
@@ -3823,6 +4016,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.add_ashare_watchlist_item(params)
                 elif route_path == "/watchlist/delete":
                     self.delete_ashare_watchlist_item(params)
+                elif route_path == "/watchlist/chart":
+                    self.ashare_watchlist_chart(params)
                 elif route_path == "/backtest":
                     self.send_bytes(page_shell(render_market_placeholder("backtest"), "backtest", "cn"))
                 elif route_path == "/batch":
@@ -3869,6 +4064,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.stop_scan_job(params)
             elif route_path == "/scan/status":
                 self.scan_job_status(params)
+            elif route_path == "/scan/active":
+                self.scan_job_active()
             elif route_path == "/candidate":
                 self.send_bytes(render_candidate_detail(params).encode("utf-8"))
             elif route_path.startswith("/reports/"):
@@ -3958,6 +4155,19 @@ class Handler(BaseHTTPRequestHandler):
         delete_ashare_watchlist_symbol(field(params, "symbol", ""))
         self.send_bytes(page_shell(render_ashare_watchlist_page({}), "watchlist", "cn"))
 
+    def ashare_watchlist_chart(self, params: dict[str, list[str]]) -> None:
+        symbol = field(params, "symbol", "")
+        if not symbol.strip():
+            self.send_json({"error": "缺少股票代码"}, status=400)
+            return
+        try:
+            j_threshold = number_field(params, "j_threshold", 14.0)
+            payload = ashare_chart_payload(symbol, j_threshold)
+            payload["j_threshold"] = j_threshold
+            self.send_json(payload)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, status=500)
+
     def start_scan_job(self, params: dict[str, list[str]]) -> None:
         scan_end = default_scan_end_date()
         start = field(params, "start", default_scan_start_date(scan_end).isoformat())
@@ -4036,6 +4246,27 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"status": "error", "error": "找不到扫描任务"}, status=404)
             return
         self.send_json(job)
+
+    def scan_job_active(self) -> None:
+        latest_job_id = ""
+        latest_job: dict[str, object] | None = None
+        with SCAN_JOBS_LOCK:
+            for job_id, job in SCAN_JOBS.items():
+                if str(job_id).startswith("ashare-"):
+                    continue
+                if job.get("status") in ACTIVE_SCAN_STATUSES:
+                    payload = dict(job)
+                    payload["job_id"] = job_id
+                    self.send_json(payload)
+                    return
+                if job.get("status") in ("done", "stopped", "error"):
+                    latest_job_id = job_id
+                    latest_job = dict(job)
+        if latest_job:
+            latest_job["job_id"] = latest_job_id
+            self.send_json(latest_job)
+            return
+        self.send_json({"status": "idle", "job_id": ""})
 
     def send_report(self, request_path: str) -> None:
         name = unquote(request_path.removeprefix("/reports/"))

@@ -146,7 +146,7 @@ def ashare_chart_payload(symbol: str, j_threshold: float = 14.0) -> dict[str, ob
             {
                 "x": bar.date,
                 "y": bar.volume,
-                "color": "#ef4444" if i > 0 and bar.close >= bars[i - 1].close else "#06b6d4",
+                "color": "#089981" if i > 0 and bar.close >= bars[i - 1].close else "#f23645",
             }
             for i, bar in enumerate(bars)
         ],
@@ -474,6 +474,47 @@ def ashare_exchange(symbol: str) -> str:
     if symbol.startswith(("4", "8")):
         return "BJ"
     return "-"
+
+
+ASHARE_BOARD_LABELS = {
+    "main": "沪深主板",
+    "chinext": "创业板",
+    "star": "科创板",
+    "bj": "北交所",
+}
+
+
+def ashare_board(symbol: str) -> str:
+    clean = normalize_ashare_symbol(symbol)
+    if clean.startswith(("4", "8", "9")):
+        return "bj"
+    if clean.startswith("688"):
+        return "star"
+    if clean.startswith("3"):
+        return "chinext"
+    if clean.startswith(("0", "6")):
+        return "main"
+    return "other"
+
+
+def normalize_ashare_boards(boards: list[str] | tuple[str, ...] | set[str] | None) -> list[str]:
+    valid = set(ASHARE_BOARD_LABELS)
+    selected = [str(board).strip().lower() for board in (boards or []) if str(board).strip().lower() in valid]
+    return selected or list(ASHARE_BOARD_LABELS)
+
+
+def ashare_board_filter_label(boards: list[str] | tuple[str, ...] | set[str] | None) -> str:
+    selected = normalize_ashare_boards(boards)
+    if set(selected) == set(ASHARE_BOARD_LABELS):
+        return "全部板块"
+    return "、".join(ASHARE_BOARD_LABELS[board] for board in selected)
+
+
+def filter_ashare_universe_by_board(items: list[AShareUniverseItem], boards: list[str] | tuple[str, ...] | set[str] | None) -> list[AShareUniverseItem]:
+    selected = set(normalize_ashare_boards(boards))
+    if selected == set(ASHARE_BOARD_LABELS):
+        return items
+    return [item for item in items if ashare_board(item.symbol) in selected]
 
 
 def fetch_eastmoney_ashare_universe(
@@ -962,10 +1003,14 @@ def scan_ashare_candidates(
     max_symbols: int = 300,
     j_threshold: float = 14.0,
     max_workers: int = 6,
+    boards: list[str] | None = None,
 ) -> AShareScanResult:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    universe, universe_source, market_cap_filter_applied = load_ashare_universe_for_scan(min_market_cap_100m, max_symbols)
+    selected_boards = normalize_ashare_boards(boards)
+    fetch_limit = max_symbols if set(selected_boards) == set(ASHARE_BOARD_LABELS) else max(1000, max_symbols * 4)
+    universe, universe_source, market_cap_filter_applied = load_ashare_universe_for_scan(min_market_cap_100m, fetch_limit)
+    universe = filter_ashare_universe_by_board(universe, selected_boards)[: max(1, int(max_symbols))]
     by_symbol = {item.symbol: item for item in universe}
     candidates: list[AShareSignalSnapshot] = []
     errors: list[tuple[str, str]] = []
