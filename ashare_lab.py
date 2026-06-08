@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 
 ASHARE_ROUTE = "/ashare"
@@ -218,12 +220,151 @@ def row_value(row: Any, names: tuple[str, ...], fallback_index: int) -> Any:
     return row.iloc[fallback_index]
 
 
+TDX_SERVERS = [
+    ("180.153.18.170", 7709),
+    ("119.147.212.81", 7709),
+    ("47.103.48.45", 7709),
+    ("114.80.63.12", 7709),
+    ("218.108.98.244", 7709),
+    ("14.17.75.71", 7709),
+]
+
+
+def tdx_market(symbol: str) -> int:
+    clean = normalize_ashare_symbol(symbol)
+    if clean.startswith(("6", "9", "688")):
+        return 1
+    return 0
+
+
+def fetch_tdx_ashare_bars(symbol: str, start_day: date, end_day: date) -> tuple[list[AShareBar], str]:
+    from pytdx.hq import TdxHq_API
+    from pytdx.params import TDXParams
+
+    clean = normalize_ashare_symbol(symbol)
+    market = tdx_market(clean)
+    last_error: Exception | None = None
+    # Daily bars are enough for this strategy. Count includes weekends gaps implicitly absent from returned bars.
+    count = max(300, min(800, (end_day - start_day).days + 80))
+    for host, port in TDX_SERVERS:
+        api = TdxHq_API(raise_exception=True, auto_retry=False)
+        try:
+            api.connect(host, port, time_out=2)
+            rows = api.get_security_bars(TDXParams.KLINE_TYPE_DAILY, market, clean, 0, count)
+            bars: list[AShareBar] = []
+            for row in rows or []:
+                bar_date = date(int(row["year"]), int(row["month"]), int(row["day"]))
+                if bar_date < start_day or bar_date > end_day:
+                    continue
+                bars.append(
+                    AShareBar(
+                        date=bar_date.isoformat(),
+                        open=float(row["open"]),
+                        high=float(row["high"]),
+                        low=float(row["low"]),
+                        close=float(row["close"]),
+                        volume=float(row.get("vol", 0.0) or 0.0),
+                        amount=float(row.get("amount", 0.0) or 0.0),
+                    )
+                )
+            if bars:
+                bars.sort(key=lambda bar: bar.date)
+                return bars, f"tdx {host}:{port}"
+        except Exception as exc:
+            last_error = exc
+        finally:
+            try:
+                api.disconnect()
+            except Exception:
+                pass
+    raise RuntimeError(str(last_error) if last_error else "通达信日线接口不可用")
+
+
+def tencent_symbol(symbol: str) -> str:
+    clean = normalize_ashare_symbol(symbol)
+    prefix = "sh" if clean.startswith(("6", "9", "688")) else "sz"
+    return f"{prefix}{clean}"
+
+
+def fetch_tencent_market_caps(symbols: list[str], chunk_size: int = 80) -> dict[str, tuple[str, float, float]]:
+    result: dict[str, tuple[str, float, float]] = {}
+    clean_symbols = [normalize_ashare_symbol(symbol) for symbol in symbols]
+    for start in range(0, len(clean_symbols), max(1, chunk_size)):
+        chunk = clean_symbols[start : start + max(1, chunk_size)]
+        query = ",".join(tencent_symbol(symbol) for symbol in chunk)
+        if not query:
+            continue
+        request = Request(f"https://qt.gtimg.cn/q={quote(query)}", headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urlopen(request, timeout=6) as response:
+                text = response.read().decode("gbk", errors="ignore")
+        except Exception:
+            continue
+        for line in text.splitlines():
+            if '="' not in line:
+                continue
+            try:
+                body = line.split('="', 1)[1].rsplit('"', 1)[0]
+                parts = body.split("~")
+                if len(parts) < 45:
+                    continue
+                symbol = normalize_ashare_symbol(parts[2])
+                name = parts[1].strip()
+                latest = float(parts[3] or 0.0)
+                market_cap = float(parts[44] or 0.0)
+                if latest <= 0 or market_cap <= 0:
+                    continue
+                result[symbol] = (name, market_cap, latest)
+            except Exception:
+                continue
+    return result
+
+
+def fetch_tencent_qfq_bars(symbol: str, start_day: date, end_day: date) -> tuple[list[AShareBar], str]:
+    code = tencent_symbol(symbol)
+    count = max(300, min(900, (end_day - start_day).days + 80))
+    url = f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={quote(f'{code},day,,,{count},qfq')}"
+    request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(request, timeout=4) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="ignore"))
+    stock = (payload.get("data") or {}).get(code) or {}
+    rows = stock.get("qfqday") or stock.get("day") or []
+    bars: list[AShareBar] = []
+    for row in rows:
+        try:
+            bar_date = date.fromisoformat(str(row[0])[:10])
+            if bar_date < start_day or bar_date > end_day:
+                continue
+            bars.append(
+                AShareBar(
+                    date=bar_date.isoformat(),
+                    open=float(row[1]),
+                    close=float(row[2]),
+                    high=float(row[3]),
+                    low=float(row[4]),
+                    volume=float(row[5]),
+                    amount=0.0,
+                )
+            )
+        except Exception:
+            continue
+    if not bars:
+        raise RuntimeError("腾讯前复权日线返回为空")
+    bars.sort(key=lambda bar: bar.date)
+    return bars, "tencent qfq"
+
+
 def fetch_ashare_bars(symbol: str, start: str | None = None, end: str | None = None) -> tuple[list[AShareBar], str]:
     clean = normalize_ashare_symbol(symbol)
     end_day = date.today() if end is None else date.fromisoformat(end)
     start_day = end_day - timedelta(days=520) if start is None else date.fromisoformat(start)
     start_ak = start_day.strftime("%Y%m%d")
     end_ak = end_day.strftime("%Y%m%d")
+
+    try:
+        return fetch_tencent_qfq_bars(clean, start_day, end_day)
+    except Exception:
+        pass
 
     try:
         import efinance as ef
@@ -247,6 +388,13 @@ def fetch_ashare_bars(symbol: str, start: str | None = None, end: str | None = N
         pass
 
     try:
+        return fetch_tdx_ashare_bars(clean, start_day, end_day)
+    except Exception:
+        pass
+
+    try:
+        raise RuntimeError("akshare disabled")
+        raise RuntimeError("akshare disabled")
         import akshare as ak
 
         df = ak.stock_zh_a_hist(symbol=clean, period="daily", start_date=start_ak, end_date=end_ak, adjust="qfq")
@@ -266,6 +414,8 @@ def fetch_ashare_bars(symbol: str, start: str | None = None, end: str | None = N
             return bars, "akshare"
     except Exception:
         pass
+
+    raise RuntimeError(f"{clean} 没有可用 A 股日线数据源")
 
     try:
         import yfinance as yf
@@ -303,6 +453,7 @@ def fetch_ashare_bars(symbol: str, start: str | None = None, end: str | None = N
 def fetch_ashare_name(symbol: str) -> str:
     clean = normalize_ashare_symbol(symbol)
     try:
+        raise RuntimeError("akshare disabled")
         import akshare as ak
 
         spot = ak.stock_zh_a_spot_em()
@@ -312,6 +463,7 @@ def fetch_ashare_name(symbol: str) -> str:
     except Exception:
         pass
     try:
+        raise RuntimeError("akshare disabled")
         import akshare as ak
 
         names = ak.stock_info_a_code_name()
@@ -390,6 +542,10 @@ def read_ashare_universe_cache(
     entry = (payload.get("entries") or {}).get(key)
     if not isinstance(entry, dict):
         return None
+    if "akshare" in str(entry.get("source", "")).lower():
+        return None
+    if min_market_cap_100m > 0 and not bool(entry.get("has_market_cap", False)):
+        return None
     raw_items = entry.get("items") or []
     items = [deserialize_universe_item(raw) for raw in raw_items if isinstance(raw, dict)]
     if not items:
@@ -453,6 +609,25 @@ def load_ashare_sector_map() -> dict[str, str]:
 
     write_json_cache(ASHARE_SECTOR_CACHE_PATH, {"updated_at": date.today().isoformat(), "sectors": sectors})
     return sectors
+
+
+def fetch_ashare_name(symbol: str) -> str:
+    clean = normalize_ashare_symbol(symbol)
+    cached = read_json_cache(ASHARE_UNIVERSE_CACHE_PATH, 30 * 24 * 60 * 60) or {}
+    for entry in (cached.get("entries") or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        for raw in entry.get("items") or []:
+            if isinstance(raw, dict) and normalize_ashare_symbol(str(raw.get("symbol", ""))) == clean:
+                return str(raw.get("name", "") or "")
+    return ""
+
+
+def load_ashare_sector_map() -> dict[str, str]:
+    cached = read_json_cache(ASHARE_SECTOR_CACHE_PATH, 30 * 24 * 60 * 60)
+    if cached and isinstance(cached.get("sectors"), dict):
+        return {str(k): str(v) for k, v in cached["sectors"].items()}
+    return {}
 
 
 def fetch_ashare_profile(symbol: str) -> tuple[str, str]:
@@ -652,7 +827,77 @@ def fetch_efinance_ashare_universe(min_market_cap_100m: float = 50.0, max_symbol
     return items[: max(1, int(max_symbols))], "efinance.get_realtime_quotes", True
 
 
+def fetch_tdx_ashare_universe(min_market_cap_100m: float = 50.0, max_symbols: int = 300) -> tuple[list[AShareUniverseItem], str, bool]:
+    from pytdx.hq import TdxHq_API
+    from pytdx.params import TDXParams
+
+    allowed = {
+        TDXParams.MARKET_SH: ("600", "601", "603", "605", "688"),
+        TDXParams.MARKET_SZ: ("000", "001", "002", "003", "300", "301"),
+    }
+    items_by_symbol: dict[str, AShareUniverseItem] = {}
+    last_error: Exception | None = None
+    for host, port in TDX_SERVERS:
+        api = TdxHq_API(raise_exception=False, auto_retry=False)
+        try:
+            api.connect(host, port, time_out=2)
+            for market, prefixes in allowed.items():
+                count = api.get_security_count(market) or 0
+                for start in range(0, min(count + 1000, 30000), 1000):
+                    try:
+                        rows = api.get_security_list(market, start) or []
+                    except Exception:
+                        continue
+                    for row in rows:
+                        symbol = normalize_ashare_symbol(str(row.get("code", "")))
+                        name = str(row.get("name", "") or "")
+                        if len(symbol) != 6 or not symbol.startswith(prefixes):
+                            continue
+                        if not name or "ST" in name.upper() or "退" in name or symbol in items_by_symbol:
+                            continue
+                        items_by_symbol[symbol] = AShareUniverseItem(
+                            symbol=symbol,
+                            name=name,
+                            sector="",
+                            market_cap_100m=0.0,
+                            exchange=ashare_exchange(symbol),
+                            turnover=0.0,
+                        )
+            if items_by_symbol:
+                caps = fetch_tencent_market_caps(list(items_by_symbol))
+                items: list[AShareUniverseItem] = []
+                for symbol, item in items_by_symbol.items():
+                    quote_row = caps.get(symbol)
+                    if not quote_row:
+                        continue
+                    quote_name, market_cap, _ = quote_row
+                    if market_cap < min_market_cap_100m:
+                        continue
+                    items.append(
+                        AShareUniverseItem(
+                            symbol=symbol,
+                            name=quote_name or item.name,
+                            sector="",
+                            market_cap_100m=market_cap,
+                            exchange=item.exchange,
+                            turnover=item.turnover,
+                        )
+                    )
+                items.sort(key=lambda item: item.market_cap_100m, reverse=True)
+                if items:
+                    return items[: max(1, int(max_symbols))], f"tdx security list {host}:{port} + tencent market cap", True
+        except Exception as exc:
+            last_error = exc
+        finally:
+            try:
+                api.disconnect()
+            except Exception:
+                pass
+    raise RuntimeError(str(last_error) if last_error else "通达信股票池不可用")
+
+
 def fetch_akshare_code_name_universe(max_symbols: int = 300) -> tuple[list[AShareUniverseItem], str, bool]:
+    raise RuntimeError("akshare disabled")
     import akshare as ak
 
     df = ak.stock_info_a_code_name()
@@ -709,6 +954,14 @@ def load_ashare_universe_with_meta(
     except Exception as eastmoney_exc:
         eastmoney_error = eastmoney_exc
         if progress:
+            progress("东方财富股票池不可用，切换通达信股票列表兜底")
+        try:
+            result = fetch_tdx_ashare_universe(min_market_cap_100m, max_symbols)
+            write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
+            return result
+        except Exception as tdx_exc:
+            raise RuntimeError(f"A 股股票池拉取失败：efinance、东方财富直连、通达信列表均不可用；东方财富 {eastmoney_error}；通达信 {tdx_exc}") from tdx_exc
+        if progress:
             progress("东方财富股票池不可用，切换代码/名称表快速兜底")
         try:
             result = fetch_akshare_code_name_universe(max_symbols)
@@ -718,6 +971,7 @@ def load_ashare_universe_with_meta(
             if progress:
                 progress("代码/名称表兜底不可用，正在尝试 akshare 总市值接口")
     try:
+        raise RuntimeError("akshare disabled")
         import akshare as ak
 
         df = ak.stock_zh_a_spot_em()
@@ -725,6 +979,7 @@ def load_ashare_universe_with_meta(
         has_market_cap = True
     except Exception as exc:
         try:
+            raise RuntimeError("akshare disabled")
             import akshare as ak
 
             if progress:
@@ -802,6 +1057,14 @@ def load_ashare_universe_for_scan(
     except Exception as eastmoney_exc:
         eastmoney_error = eastmoney_exc
         if progress:
+            progress("东方财富股票池不可用，切换通达信股票列表兜底")
+        try:
+            result = fetch_tdx_ashare_universe(min_market_cap_100m, max_symbols)
+            write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
+            return result
+        except Exception as tdx_exc:
+            raise RuntimeError(f"A 股股票池拉取失败：efinance、东方财富直连、通达信列表均不可用；东方财富 {eastmoney_error}；通达信 {tdx_exc}") from tdx_exc
+        if progress:
             progress("东方财富股票池不可用，切换代码/名称表快速兜底")
         try:
             result = fetch_akshare_code_name_universe(max_symbols)
@@ -811,6 +1074,7 @@ def load_ashare_universe_for_scan(
             if progress:
                 progress("代码/名称表兜底不可用，正在尝试 akshare 总市值接口")
     try:
+        raise RuntimeError("akshare disabled")
         import akshare as ak
 
         df = ak.stock_zh_a_spot_em()
@@ -818,6 +1082,7 @@ def load_ashare_universe_for_scan(
         has_market_cap = True
     except Exception as exc:
         try:
+            raise RuntimeError("akshare disabled")
             import akshare as ak
 
             if progress:

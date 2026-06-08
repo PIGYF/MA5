@@ -373,6 +373,10 @@ def ashare_watchlist_path() -> Path:
     return DATA_DIR / "ashare" / "watchlist.json"
 
 
+def ashare_latest_scan_path() -> Path:
+    return DATA_DIR / "ashare" / "latest_scan.json"
+
+
 def normalize_ashare_code_for_storage(symbol: str) -> str:
     clean = "".join(ch for ch in symbol.strip().upper() if ch.isalnum())
     if clean.startswith(("SH", "SS", "SZ", "BJ")):
@@ -441,6 +445,55 @@ def save_ashare_watchlist_items(items: list[dict[str, str]]) -> None:
             }
         )
     path.write_text(json.dumps({"items": clean_items, "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def ashare_snapshot_to_dict(row: AShareSignalSnapshot) -> dict[str, object]:
+    return dict(row.__dict__)
+
+
+def load_latest_ashare_scan() -> dict[str, object] | None:
+    path = ashare_latest_scan_path()
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        path.unlink(missing_ok=True)
+        return None
+
+
+def save_latest_ashare_scan(
+    candidates: list[AShareSignalSnapshot],
+    errors: list[tuple[str, str]],
+    scanned: int,
+    universe_source: str,
+    market_cap_filter_applied: bool,
+    params: dict[str, list[str]],
+) -> None:
+    path = ashare_latest_scan_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    signal_dates = [row.latest_date for row in candidates if row.latest_date]
+    signal_date = max(signal_dates) if signal_dates else date.today().isoformat()
+    payload = {
+        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "signal_date": signal_date,
+        "source": universe_source,
+        "market_cap_filter_applied": market_cap_filter_applied,
+        "summary": {"scanned": scanned, "candidates": len(candidates), "failed": len(errors)},
+        "params": {key: values[-1] if len(values) == 1 else values for key, values in params.items()},
+        "candidates": [ashare_snapshot_to_dict(row) for row in candidates],
+        "errors": [{"symbol": symbol, "reason": reason} for symbol, reason in errors],
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def delete_latest_ashare_scan() -> bool:
+    path = ashare_latest_scan_path()
+    if path.exists():
+        path.unlink(missing_ok=True)
+        return True
+    return False
 
 
 def add_ashare_watchlist_symbol(symbol: str, group: str = "观察", note: str = "", name: str = "", sector: str = "") -> list[dict[str, str]]:
@@ -946,9 +999,8 @@ def render_ashare_scan_result(
         cls = rating_class.get(row.candidate_rating, "score-Weak")
         rows.append(
             "<tr>"
-            f"<td>{html.escape(row.symbol)}</td>"
+            f'<td><button type="button" class="symbol-button" data-ashare-candidate-symbol="{html.escape(row.symbol)}">{html.escape(row.symbol)}</button></td>'
             f"<td>{html.escape(row.name or '-')}</td>"
-            f"<td>{html.escape(row.sector or '-')}</td>"
             f"<td><span class=\"score-badge {cls}\">{html.escape(row.candidate_rating)}</span></td>"
             f"<td>{row.volume_score:.1f}/5</td>"
             f"<td>{row.j_value:.2f}</td>"
@@ -959,14 +1011,14 @@ def render_ashare_scan_result(
             f"<td>{row.red_avg_to_green_avg:.2f}</td>"
             f"<td>{row.top5_red_count}/5</td>"
             f"<td>{html.escape(row.data_source)}</td>"
-            f'<td><a class="btn btn-secondary btn-small" href="/cn/watchlist/add?symbol={quote(row.symbol)}&name={quote(row.name or "")}&sector={quote(row.sector or "")}">加入自选</a></td>'
+            f'<td><a class="btn btn-secondary btn-small" href="/cn/watchlist/add?symbol={quote(row.symbol)}&name={quote(row.name or "")}">加入自选</a></td>'
             "</tr>"
         )
     table_html = (
         """
   <div class="table-wrap">
     <table class="sortable resizable-table">
-      <thead><tr><th>代码</th><th>名称</th><th>板块</th><th>评级</th><th>量能分</th><th>J值</th><th>收盘</th><th>交易日</th><th>峰值/基准</th><th>10日均/基准</th><th>红均/绿均</th><th>Top5红柱</th><th>数据源</th><th>操作</th></tr></thead>
+      <thead><tr><th>代码</th><th>名称</th><th>评级</th><th>量能分</th><th>J值</th><th>收盘</th><th>交易日</th><th>峰值/基准</th><th>10日均/基准</th><th>红均/绿均</th><th>Top5红柱</th><th>数据源</th><th>操作</th></tr></thead>
       <tbody>
 """
         + "\n".join(rows)
@@ -999,7 +1051,80 @@ def render_ashare_scan_result(
   </section>
   {table_html}
   {error_note}
+  <section id="ashare-candidate-detail" class="candidate-detail"></section>
 </section>
+"""
+
+
+def render_ashare_latest_banner() -> str:
+    latest = load_latest_ashare_scan()
+    if not latest:
+        return ""
+    summary = latest.get("summary", {}) if isinstance(latest.get("summary"), dict) else {}
+    signal_date = str(latest.get("signal_date", "-"))
+    saved_at = str(latest.get("saved_at", "-"))
+    candidates = int(summary.get("candidates", 0) or 0)
+    scanned = int(summary.get("scanned", 0) or 0)
+    failed = int(summary.get("failed", 0) or 0)
+    return f"""
+<section class="result">
+  <div class="toolbar">
+    <div>
+      <h2>当前信号日已有 A 股扫描结果</h2>
+      <p class="hint">信号日期：{html.escape(signal_date)}；候选：{candidates}；扫描：{scanned}；失败：{failed}；扫描时间：{html.escape(saved_at)}</p>
+    </div>
+    <div class="inline-actions links">
+      <a href="/cn/scan/latest">查看当前结果</a>
+      <form class="delete-form" action="/cn/scan/delete" method="get" onsubmit="return confirm('确认删除当前 A 股扫描结果？');">
+        <button type="submit" class="delete-link">删除结果</button>
+      </form>
+    </div>
+  </div>
+</section>
+"""
+
+
+def latest_ashare_scan_to_html() -> str:
+    latest = load_latest_ashare_scan()
+    saved_params = {
+        str(key): [str(value)]
+        for key, value in ((latest or {}).get("params", {}) or {}).items()
+        if not isinstance(value, list)
+    }
+    if latest:
+        for key, value in ((latest or {}).get("params", {}) or {}).items():
+            if isinstance(value, list):
+                saved_params[str(key)] = [str(item) for item in value]
+    saved_params["mode"] = [""]
+    saved_params["_skip_latest_banner"] = ["1"]
+    saved_params["_skip_restore_scan"] = ["1"]
+    if not latest:
+        return f"""
+{render_ashare_scanner({"_skip_latest_banner": ["1"], "_skip_restore_scan": ["1"]})}
+<section class="result"><p class="hint">当前还没有保存的 A 股扫描结果。</p></section>
+"""
+    candidates = [AShareSignalSnapshot(**row) for row in latest.get("candidates", []) if isinstance(row, dict)]
+    errors = [(str(item.get("symbol", "")), str(item.get("reason", ""))) for item in latest.get("errors", []) if isinstance(item, dict)]
+    source = str(latest.get("source", "saved"))
+    market_cap_filter_applied = bool(latest.get("market_cap_filter_applied", False))
+    scanned = int((latest.get("summary", {}) or {}).get("scanned", len(candidates)))
+    result = render_ashare_scan_result(candidates, errors, scanned, source, market_cap_filter_applied)
+    return f"""
+{render_ashare_scanner(saved_params)}
+<section class="result">
+  <div class="toolbar">
+    <div>
+      <h2>A股当前扫描结果</h2>
+      <p class="hint">信号日期：{html.escape(str(latest.get("signal_date", "-")))}；保存时间：{html.escape(str(latest.get("saved_at", "-")))}。</p>
+    </div>
+    <div class="inline-actions links">
+      <form class="delete-form" action="/cn/scan/delete" method="get" onsubmit="return confirm('确认删除当前 A 股扫描结果？');">
+        <button type="submit" class="delete-link">删除结果</button>
+      </form>
+    </div>
+  </div>
+</section>
+{result}
 """
 
 
@@ -1011,6 +1136,8 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     max_symbols = int(number_field(params, "max_symbols", 300))
     selected_boards = normalize_ashare_boards(params.get("boards", []))
     embed = field(params, "embed", "0") == "1"
+    show_latest_banner = field(params, "_skip_latest_banner", "0") != "1"
+    restore_scan = field(params, "_skip_restore_scan", "0") != "1"
     result_html = ""
     if mode == "market":
         try:
@@ -1243,13 +1370,14 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
   <div class="mode-pill">A Share | Scanner</div>
 </section>
 <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+{render_ashare_latest_banner() if show_latest_banner else ""}
 <form class="form" action="/cn/scanner" method="get">
   <input type="hidden" name="mode" value="single">
   <label>股票代码<input name="symbol" value="{html.escape(symbol)}" placeholder="600487"></label>
   <label>J值阈值<input type="number" step="0.1" name="j_threshold" value="{j_threshold:g}"></label>
   <button type="submit">单票验证</button>
 </form>
-<form class="form" id="ashare-scanner-form" action="/cn/scanner" method="get">
+<form class="form" id="ashare-scanner-form" action="/cn/scanner" method="get" data-async-submit="true">
   <input type="hidden" name="mode" value="market">
   <label>最低市值（亿元）<input type="number" step="1" name="min_market_cap" value="{min_market_cap:g}"></label>
   <label>最多扫描<input type="number" step="1" name="max_symbols" value="{max_symbols}"></label>
@@ -1262,6 +1390,9 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
   <div class="progress-meta" id="ashare-scan-status">准备开始</div>
   <div class="progress-track"><div class="progress-bar" id="ashare-scan-bar"></div></div>
   <div class="progress-meta" id="ashare-scan-detail"></div>
+  <div class="quick-actions" style="margin-top:10px;">
+    <button type="button" class="btn btn-secondary btn-small" id="ashare-scan-stop" disabled>终止选股</button>
+  </div>
 </section>
 <section id="ashare-scan-result"></section>
 <script>
@@ -1272,11 +1403,36 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
   const status = document.getElementById("ashare-scan-status");
   const detail = document.getElementById("ashare-scan-detail");
   const result = document.getElementById("ashare-scan-result");
+  const stopButton = document.getElementById("ashare-scan-stop");
   let jobId = "";
+  async function setHtmlAndRunScripts(container, html) {{
+    container.innerHTML = html;
+    const scripts = Array.from(container.querySelectorAll("script"));
+    for (const oldScript of scripts) {{
+      const src = oldScript.getAttribute("src") || "";
+      if (src.includes("lightweight-charts") && window.LightweightCharts) {{
+        oldScript.remove();
+        continue;
+      }}
+      const script = document.createElement("script");
+      for (const attr of oldScript.attributes) script.setAttribute(attr.name, attr.value);
+      if (src) {{
+        await new Promise((resolve, reject) => {{
+          script.onload = resolve;
+          script.onerror = reject;
+          oldScript.replaceWith(script);
+        }});
+      }} else {{
+        script.textContent = oldScript.textContent;
+        oldScript.replaceWith(script);
+      }}
+    }}
+  }}
   function update(job) {{
     const total = Number(job.total || 0);
     const scanned = Number(job.scanned || 0);
-    const percent = total > 0 ? Math.round(scanned / total * 100) : (job.status === "running" ? 8 : 0);
+    const finished = ["done", "stopped"].includes(job.status);
+    const percent = finished ? 100 : total > 0 ? Math.round(scanned / total * 100) : (["queued", "running", "stopping"].includes(job.status) ? 8 : 0);
     progressBar.style.width = percent + "%";
     const stage = job.stage || "处理中";
     const source = job.data_source ? `｜数据源：${{job.data_source}}` : "";
@@ -1284,6 +1440,13 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     const extra = job.detail ? `｜${{job.detail}}` : "";
     status.textContent = `${{stage}}：${{job.message || "正在处理"}}`;
     detail.textContent = `进度 ${{scanned}} / ${{total || "-"}}｜候选 ${{job.candidates || 0}}｜失败 ${{job.errors || 0}}${{current}}${{source}}${{extra}}`;
+    stopButton.disabled = !jobId || ["done", "error", "stopped"].includes(job.status);
+    const submitButton = form.querySelector("button[type='submit']");
+    if (submitButton && ["done", "error", "stopped"].includes(job.status)) {{
+      submitButton.disabled = false;
+      submitButton.classList.remove("btn-loading");
+      submitButton.textContent = "开始选股";
+    }}
   }}
   async function poll() {{
     if (!jobId) return;
@@ -1298,10 +1461,34 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     if (["done", "error", "stopped"].includes(job.status)) {{
       if (job.status === "error") result.innerHTML = `<div class="error">${{job.error || "扫描失败"}}</div>`;
       jobId = "";
+      stopButton.disabled = true;
       return;
     }}
     setTimeout(poll, 800);
   }}
+  async function restoreActiveScan() {{
+    try {{
+      const res = await fetch("/cn/scan/active");
+      const job = await res.json();
+      if (!job.job_id || job.status === "idle") return;
+      jobId = job.job_id;
+      progressBox.classList.add("active");
+      update(job);
+      if (job.result_html) {{
+        result.innerHTML = job.result_html;
+        if (window.initializeResizableTables) initializeResizableTables(result);
+        if (window.initializeSortableTables) initializeSortableTables(result);
+      }}
+      if (!["done", "error", "stopped"].includes(job.status)) poll();
+    }} catch (error) {{}}
+  }}
+  stopButton.addEventListener("click", async () => {{
+    if (!jobId) return;
+    stopButton.disabled = true;
+    status.textContent = "正在终止 A 股扫描";
+    await fetch(`/cn/scan/stop?job_id=${{encodeURIComponent(jobId)}}`);
+    poll();
+  }});
   form.addEventListener("submit", async event => {{
     event.preventDefault();
     result.innerHTML = "";
@@ -1309,16 +1496,41 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     progressBar.style.width = "0%";
     status.textContent = "正在启动 A 股扫描";
     detail.textContent = "";
+    const submitButton = form.querySelector("button[type='submit']");
+    if (submitButton) {{
+      submitButton.disabled = true;
+      submitButton.classList.add("btn-loading");
+      submitButton.textContent = "选股中";
+    }}
     const params = new URLSearchParams(new FormData(form));
     const res = await fetch(`/cn/scan/start?${{params.toString()}}`);
     const data = await res.json();
     if (data.status === "error") {{
       result.innerHTML = `<div class="error">${{data.error || "无法启动扫描"}}</div>`;
+      stopButton.disabled = true;
+      if (submitButton) {{
+        submitButton.disabled = false;
+        submitButton.classList.remove("btn-loading");
+        submitButton.textContent = "开始选股";
+      }}
       return;
     }}
     jobId = data.job_id;
+    stopButton.disabled = false;
     poll();
   }});
+  document.addEventListener("click", async event => {{
+    const button = event.target.closest("[data-ashare-candidate-symbol]");
+    if (!button) return;
+    const symbol = button.dataset.ashareCandidateSymbol;
+    const host = document.getElementById("ashare-candidate-detail");
+    if (!symbol || !host) return;
+    host.innerHTML = `<section class="result"><div class="loading-overlay active" style="position:relative; min-height:120px;"><div class="spinner"></div><div>正在加载 ${{symbol}} 策略图表</div></div></section>`;
+    const res = await fetch(`/cn/scanner?mode=single&symbol=${{encodeURIComponent(symbol)}}&j_threshold=14&embed=1`);
+    await setHtmlAndRunScripts(host, await res.text());
+    host.scrollIntoView({{ behavior: "smooth", block: "start" }});
+  }});
+  {"restoreActiveScan();" if restore_scan else ""}
 }})();
 </script>
 {result_html}
@@ -3949,22 +4161,86 @@ def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
             snapshot.sector = item.sector
             return snapshot
 
+        stopped = False
         with ThreadPoolExecutor(max_workers=min(max_workers, max(1, len(universe)))) as executor:
-            future_map = {executor.submit(run_one, item): item for item in universe}
-            for future in as_completed(future_map):
-                item = future_map[future]
-                set_job(job_id, stage="扫描日线", message="正在扫描 A 股日线信号", current=f"{item.symbol} {item.name}")
+            universe_iter = iter(universe)
+            future_map = {}
+            worker_limit = min(max_workers, max(1, len(universe)))
+
+            def submit_next() -> bool:
+                if job_stop_requested(job_id):
+                    return False
                 try:
-                    snapshot = future.result()
-                    if snapshot.signal:
-                        candidates.append(snapshot)
-                except Exception as exc:
-                    errors.append((f"{item.symbol} {item.name}", str(exc)))
-                scanned += 1
+                    item = next(universe_iter)
+                except StopIteration:
+                    return False
+                future_map[executor.submit(run_one, item)] = item
+                return True
+
+            for _ in range(worker_limit):
+                submit_next()
+
+            while future_map:
+                if job_stop_requested(job_id):
+                    stopped = True
+                    for future in future_map:
+                        future.cancel()
+                    set_job(job_id, stage="正在终止", message="正在终止，等待当前批次结束", current="")
+                    break
+                done, _ = wait(future_map, timeout=0.5, return_when=FIRST_COMPLETED)
+                if not done:
+                    continue
+                for future in done:
+                    item = future_map.pop(future)
+                    set_job(job_id, stage="扫描日线", message="正在扫描 A 股日线信号", current=f"{item.symbol} {item.name}")
+                    try:
+                        snapshot = future.result()
+                        if snapshot.signal:
+                            candidates.append(snapshot)
+                    except Exception as exc:
+                        errors.append((f"{item.symbol} {item.name}", str(exc)))
+                    scanned += 1
+                    set_job(job_id, scanned=scanned, candidates=len(candidates), errors=len(errors))
+                    submit_next()
+
+            if stopped:
+                for future in list(future_map):
+                    if future.cancelled():
+                        future_map.pop(future, None)
+                for future, item in list(future_map.items()):
+                    if not future.cancelled():
+                        try:
+                            snapshot = future.result(timeout=0)
+                            if snapshot.signal:
+                                candidates.append(snapshot)
+                            scanned += 1
+                        except Exception:
+                            pass
                 set_job(job_id, scanned=scanned, candidates=len(candidates), errors=len(errors))
+
+        if stopped:
+            rating_order = {"Strong": 0, "Medium": 1, "Watch": 2, "None": 3}
+            candidates.sort(key=lambda row: (rating_order.get(row.candidate_rating, 9), -row.volume_score, row.j_value))
+            save_latest_ashare_scan(candidates, errors, scanned, universe_source, market_cap_filter_applied, params)
+            result_html = render_ashare_scan_result(candidates, errors, scanned, universe_source, market_cap_filter_applied)
+            set_job(
+                job_id,
+                status="stopped",
+                stage="已终止",
+                message="A 股扫描已终止，当前结果已保留",
+                detail=f"数据源：{universe_source}",
+                data_source=universe_source,
+                current="",
+                scanned=scanned,
+                candidates=len(candidates),
+                errors=len(errors),
+                result_html=result_html,
+            )
+            return
 
         rating_order = {"Strong": 0, "Medium": 1, "Watch": 2, "None": 3}
         candidates.sort(key=lambda row: (rating_order.get(row.candidate_rating, 9), -row.volume_score, row.j_value))
+        save_latest_ashare_scan(candidates, errors, scanned, universe_source, market_cap_filter_applied, params)
         result_html = render_ashare_scan_result(candidates, errors, scanned, universe_source, market_cap_filter_applied)
         set_job(
             job_id,
@@ -3980,6 +4256,9 @@ def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
             result_html=result_html,
         )
     except Exception as exc:
+        if job_stop_requested(job_id):
+            set_job(job_id, status="stopped", stage="已终止", message="A 股扫描已终止", detail="已按用户请求终止。", current="")
+            return
         set_job(job_id, status="error", stage="失败", message="A 股扫描失败", detail="请查看错误信息；通常是外部数据源返回异常或网络超时。", error=str(exc))
 
 
@@ -4010,6 +4289,14 @@ class Handler(BaseHTTPRequestHandler):
                     self.start_ashare_scan_job(params)
                 elif route_path == "/scan/status":
                     self.ashare_scan_job_status(params)
+                elif route_path == "/scan/active":
+                    self.ashare_scan_job_active()
+                elif route_path == "/scan/stop":
+                    self.stop_ashare_scan_job(params)
+                elif route_path == "/scan/latest":
+                    self.send_bytes(page_shell(latest_ashare_scan_to_html(), "scanner", "cn"))
+                elif route_path == "/scan/delete":
+                    self.delete_ashare_scan_result()
                 elif route_path == "/watchlist":
                     self.send_bytes(page_shell(render_ashare_watchlist_page(params), "watchlist", "cn"))
                 elif route_path == "/watchlist/add":
@@ -4124,7 +4411,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         job_id = f"ashare-{uuid.uuid4().hex[:10]}"
-        set_job(job_id, status="queued", message="排队中", total=0, scanned=0, candidates=0, errors=0, current="")
+        set_job(job_id, status="queued", message="排队中", total=0, scanned=0, candidates=0, errors=0, current="", pause_requested=False, stop_requested=False)
         worker = threading.Thread(target=execute_ashare_scan_job, args=(job_id, params), daemon=True)
         worker.start()
         self.send_json({"status": "queued", "job_id": job_id})
@@ -4136,6 +4423,39 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"status": "error", "error": "找不到 A 股扫描任务"}, status=404)
             return
         self.send_json(job)
+
+    def ashare_scan_job_active(self) -> None:
+        with SCAN_JOBS_LOCK:
+            for job_id, job in SCAN_JOBS.items():
+                if not str(job_id).startswith("ashare-"):
+                    continue
+                if job.get("status") in ACTIVE_SCAN_STATUSES:
+                    payload = dict(job)
+                    payload["job_id"] = job_id
+                    self.send_json(payload)
+                    return
+        self.send_json({"status": "idle", "job_id": ""})
+
+    def stop_ashare_scan_job(self, params: dict[str, list[str]]) -> None:
+        job_id = field(params, "job_id", field(params, "id", ""))
+        job = get_job(job_id)
+        if not job:
+            self.send_json({"status": "error", "error": "找不到 A 股扫描任务"}, status=404)
+            return
+        if not str(job_id).startswith("ashare-"):
+            self.send_json({"status": "error", "error": "不是 A 股扫描任务"}, status=400)
+            return
+        if job.get("status") in ("done", "error", "stopped"):
+            self.send_json(job)
+            return
+        set_job(job_id, stop_requested=True, pause_requested=False, status="stopping", stage="正在终止", message="正在终止，当前批次完成后保留结果")
+        self.send_json(get_job(job_id) or {"status": "stopping"})
+
+    def delete_ashare_scan_result(self) -> None:
+        deleted = delete_latest_ashare_scan()
+        message = "已删除当前 A 股扫描结果。" if deleted else "当前没有可删除的 A 股扫描结果。"
+        content = render_ashare_scanner({}) + f'<section class="result"><p class="hint">{html.escape(message)}</p></section>'
+        self.send_bytes(page_shell(content, "scanner", "cn"))
 
     def add_ashare_watchlist_item(self, params: dict[str, list[str]]) -> None:
         try:
