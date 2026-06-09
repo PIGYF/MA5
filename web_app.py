@@ -814,7 +814,7 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
   <label>均量周期<input name="vol_length" id="vol_length" value="{value("vol_length", "20")}"></label>
   <label>巨量倍数<input name="vol_multiplier" value="{value("vol_multiplier", "1.45")}"></label>
   <label>跌破均线止损 %<input name="stop_5ma_pct" value="{value("stop_5ma_pct", "7.5")}"></label>
-  <label>B点追踪止损 %<input name="hard_stop_pct" value="{value("hard_stop_pct", "20")}"></label>
+  <label>成本强制止损 %<input name="hard_stop_pct" value="{value("hard_stop_pct", "20")}"></label>
   <label>反抽距离 %<input name="reentry_pct" value="{value("reentry_pct", "4.5")}"></label>
   <button type="submit">运行回测</button>
 </form>
@@ -1824,6 +1824,8 @@ def render_backtest_signal_table(bars, trades, equity_curve) -> str:
             f"<td>{html.escape(str(row['signal_type']))}</td>"
             f"<td>{html.escape(str(row['status']))}</td>"
             f"<td>{'是' if int(row['executed']) else '否'}</td>"
+            f"<td>{html.escape(str(row.get('action', '-')))}</td>"
+            f"<td>{html.escape(str(row.get('action_reason', '-')))}</td>"
             f"<td>{score_badge(row)}</td>"
             f"<td>{rating_badge(row)}</td>"
             f"<td>{fmt_num(row['volume_score'])}</td>"
@@ -1853,7 +1855,7 @@ def render_backtest_signal_table(bars, trades, equity_curve) -> str:
   <h2>信号明细</h2>
   <div class="table-wrap">
     <table class="resizable-table">
-      <thead><tr><th>#</th><th>信号日</th><th>类型</th><th>状态</th><th>是否交易</th><th>技术分</th><th>评级</th><th>量能</th><th>趋势</th><th>K线</th><th>空间</th><th>风险</th><th>说明</th><th>收盘</th><th>MA</th><th>距MA</th><th>量比</th><th>持仓中</th><th>后1日</th><th>后3日</th><th>后5日</th><th>后10日</th><th>后20日</th><th>20日最大涨幅</th><th>20日最大回撤</th><th>20日内S点</th></tr></thead>
+    <thead><tr><th>#</th><th>信号日</th><th>类型</th><th>状态</th><th>是否交易</th><th>执行动作</th><th>执行/跳过原因</th><th>技术分</th><th>评级</th><th>量能</th><th>趋势</th><th>K线</th><th>空间</th><th>风险</th><th>说明</th><th>收盘</th><th>MA</th><th>距MA</th><th>量比</th><th>持仓中</th><th>后1日</th><th>后3日</th><th>后5日</th><th>后10日</th><th>后20日</th><th>20日最大涨幅</th><th>20日最大回撤</th><th>20日内S点</th></tr></thead>
       <tbody>{"".join(rows)}</tbody>
     </table>
   </div>
@@ -1863,7 +1865,7 @@ def render_backtest_signal_table(bars, trades, equity_curve) -> str:
 def render_signal_rating_summary(bars, trades, equity_curve) -> str:
     signal_rows = [
         row for row in build_signal_detail_rows(bars, trades, equity_curve)
-        if row.get("signal_type") == "B"
+        if str(row.get("signal_type", "")).startswith("B")
     ]
     groups: dict[str, list[dict[str, float | int | str]]] = {"Strong": [], "Medium": [], "Weak": []}
     for row in signal_rows:
@@ -2045,7 +2047,7 @@ def render_batch_form(params: dict[str, list[str]] | None = None) -> str:
   <label>均量周期<input name="vol_length" value="{value("vol_length", "20")}"></label>
   <label>巨量倍数<input name="vol_multiplier" value="{value("vol_multiplier", "1.45")}"></label>
   <label>跌破均线止损 %<input name="stop_5ma_pct" value="{value("stop_5ma_pct", "7.5")}"></label>
-  <label>B点追踪止损 %<input name="hard_stop_pct" value="{value("hard_stop_pct", "20")}"></label>
+  <label>成本强制止损 %<input name="hard_stop_pct" value="{value("hard_stop_pct", "20")}"></label>
   <label>反抽距离 %<input name="reentry_pct" value="{value("reentry_pct", "4.5")}"></label>
   <button type="submit">运行批量回测</button>
 </form>
@@ -2675,7 +2677,8 @@ def scan_symbol_candidate(
     metadata: dict[str, object] | None,
 ) -> tuple[str, SignalResult | None, str | None]:
     try:
-        bars = fetch_bars("yfinance", symbol, start, end, "qfq", None)
+        signal_start = min(start, (date.fromisoformat(end) - timedelta(days=420)).isoformat())
+        bars = fetch_bars("yfinance", symbol, signal_start, end, "qfq", None)
         result = latest_b_signal(
             symbol,
             bars,
@@ -2797,7 +2800,7 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
     scan_end = default_scan_end_date()
     latest_scan = load_latest_scan()
     latest_html = ""
-    if latest_scan:
+    if latest_scan and field(params, "_skip_latest_banner", "0") != "1":
         summary = latest_scan.get("summary", {})
         latest_html = f"""
 <section class="result latest-scan-card">
@@ -2840,12 +2843,21 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
 <section class="page-head">
   <div>
     <h1>下一交易日 B 点选股器</h1>
-    <p class="hint">扫描最后一根已完成日 K 是否出现 B 信号。符合条件的股票按策略在下一交易日开盘执行；不使用盘后或夜盘价格。</p>
+    <p class="hint">扫描最后一根已完成日 K 是否出现 B1/B2 信号。符合条件的股票按策略在下一交易日开盘执行；不使用盘后或夜盘价格。</p>
   </div>
   <div class="mode-pill">盘后复盘 | Daily Close</div>
 </section>
 {latest_html}
 {render_market_environment_bar()}
+<section class="result">
+  <strong>当前美股选股策略</strong>
+  <div class="scan-facts">
+    <span class="scan-fact"><span>B1 起爆</span>站上5MA + 连续3日放量 + 7日内1-2次巨量 + 5MA向上</span>
+    <span class="scan-fact"><span>B2 回踩</span>已有B1趋势后，巨量阳线回踩5MA 4.5%内</span>
+    <span class="scan-fact"><span>执行</span>B1到50%，B2到100%，下一交易日开盘</span>
+    <span class="scan-fact"><span>卖出</span>5MA下7.5% / 连续2日跌破20MA / 跌破成本20%</span>
+  </div>
+</section>
 <section class="status-strip">
   <div class="stat-card"><div class="stat-label">模式</div><div class="stat-value">盘后复盘</div></div>
   <div class="stat-card"><div class="stat-label">信号日期</div><div class="stat-value">{scan_end.isoformat()}</div></div>
@@ -3278,6 +3290,7 @@ def latest_scan_to_html() -> str:
         str(key): [str(value)]
         for key, value in (latest.get("params", {}) or {}).items()
     }
+    saved_params["_skip_latest_banner"] = ["1"]
     return f"""
 {render_scanner_form(saved_params)}
 <section class="result">
@@ -3343,7 +3356,8 @@ def run_scanner(params: dict[str, list[str]]) -> str:
     errors: list[tuple[str, str]] = []
     for symbol in symbols:
         try:
-            bars = fetch_bars("yfinance", symbol, start, end, "qfq", None)
+            signal_start = min(start, (date.fromisoformat(end) - timedelta(days=420)).isoformat())
+            bars = fetch_bars("yfinance", symbol, signal_start, end, "qfq", None)
             result = latest_b_signal(symbol, bars, ma_length, vol_length, vol_multiplier, reentry_pct, min_price, min_avg_dollar_volume)
             if result:
                 result = enrich_signal_result(result, metadata_by_symbol.get(symbol))
@@ -3408,7 +3422,8 @@ def render_candidate_detail(params: dict[str, list[str]]) -> str:
     scan_end = default_scan_end_date()
     start = field(params, "start", default_scan_start_date(scan_end).isoformat())
     end = field(params, "end", scan_end.isoformat())
-    bars = fetch_bars("yfinance", symbol, start, end, "qfq", None)
+    signal_start = min(start, (date.fromisoformat(end) - timedelta(days=420)).isoformat())
+    bars = fetch_bars("yfinance", symbol, signal_start, end, "qfq", None)
     signal_result = latest_b_signal(
         symbol,
         bars,
@@ -3536,7 +3551,7 @@ def watchlist_row(item: dict[str, str], metadata: dict[str, object] | None) -> s
                 vol_ratio = f"{bars[-1].volume / vol_ma[-1]:.2f}x"
             result = latest_b_signal(symbol, bars, 5, 20, 1.45, 4.5, 0, 0)
             b_status = "B点" if result else "-"
-            buy_signal, _, _, _ = build_ratchet_inputs(bars, 5, 20, 1.45, 4.5 / 100)
+            buy_signal, _, _, _, _, _ = build_ratchet_inputs(bars, 5, 20, 1.45, 4.5 / 100)
             recent_b = next((bars[idx].date for idx in range(len(buy_signal) - 1, -1, -1) if buy_signal[idx]), "")
             if recent_b and not result:
                 b_status = f"最近B {recent_b}"
@@ -3740,8 +3755,8 @@ function makeWatchChart(payload) {{
   candle.priceScale().applyOptions({{ scaleMargins: {{ top: 0.08, bottom: 0.28 }} }});
   const ma = watchChart.addLineSeries({{ color: "#f5a623", lineWidth: 2, title: "5MA", priceLineVisible: false }});
   ma.setData(payload.ma);
-  const stop = watchChart.addLineSeries({{ color: "#f97316", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: "动态止损", priceLineVisible: false }});
-  stop.setData(payload.dynamicStop);
+  const ma20 = watchChart.addLineSeries({{ color: "#94a3b8", lineWidth: 1, title: "20MA", priceLineVisible: false, lastValueVisible: false }});
+  ma20.setData(payload.ma20 || []);
   const volume = watchChart.addHistogramSeries({{ priceScaleId: "", priceFormat: {{ type: "volume" }}, priceLineVisible: false, lastValueVisible: false }});
   volume.setData(payload.volume);
   watchChart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
@@ -3756,7 +3771,7 @@ function makeWatchChart(payload) {{
     const up = row.close >= row.open;
     const f = value => value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }});
     const fv = value => value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ maximumFractionDigits: 0 }});
-    watchTooltip.innerHTML = `<strong>${{row.time}}</strong><div><span class="${{up ? "up" : "down"}}">开 ${{f(row.open)}} 高 ${{f(row.high)}} 低 ${{f(row.low)}} 收 ${{f(row.close)}}</span></div><div>成交量 ${{fv(row.volume)}} &nbsp; 5MA ${{f(row.ma)}} &nbsp; 动态止损 ${{f(row.dynamicStop)}}</div>`;
+    watchTooltip.innerHTML = `<strong>${{row.time}}</strong><div><span class="${{up ? "up" : "down"}}">开 ${{f(row.open)}} 高 ${{f(row.high)}} 低 ${{f(row.low)}} 收 ${{f(row.close)}}</span></div><div>成交量 ${{fv(row.volume)}} &nbsp; 5MA ${{f(row.ma)}} &nbsp; 20MA ${{f(row.ma20)}}</div>`;
     watchTooltip.style.display = "block";
     watchTooltip.style.left = Math.min(param.point.x + 16, watchChartEl.clientWidth - 250) + "px";
     watchTooltip.style.top = Math.max(44, param.point.y - 72) + "px";
@@ -3850,24 +3865,34 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
     except Exception as exc:
         return {"error": str(exc)}
     markers = [
-        {"time": trade.entry_date, "position": "belowBar", "color": "#089981", "shape": "arrowUp", "text": "买入"}
-        for trade in trades
+        {
+            "time": str(row.get("date", "")),
+            "position": "belowBar",
+            "color": "#089981",
+            "shape": "arrowUp",
+            "text": "买",
+        }
+        for row in equity_curve
+        if str(row.get("buy_action", ""))
     ] + [
-        {"time": trade.exit_date, "position": "aboveBar", "color": "#f23645", "shape": "arrowDown", "text": "卖出"}
+        {"time": trade.exit_date, "position": "aboveBar", "color": "#f23645", "shape": "arrowDown", "text": "卖"}
         for trade in trades
     ]
-    trade_entry_dates = {trade.entry_date for trade in trades}
     trade_exit_dates = {trade.exit_date for trade in trades}
     rows = []
     ma_points = []
+    ma20_points = []
     vol_ma_points = []
     dynamic_points = []
+    trend_stop_points = []
     volume_points = []
     for i, bar in enumerate(bars):
         row = equity_curve[i]
         ma = None if row["ma"] == "" else float(row["ma"])
+        ma20 = None if row.get("ma20", "") in ("", None) else float(row["ma20"])
         vol_ma = None if row["vol_ma"] == "" else float(row["vol_ma"])
         dynamic_stop = None if row.get("dynamic_stop", "") in ("", None) else float(row["dynamic_stop"])
+        trend_stop = None if row.get("trend_stop", "") in ("", None) else float(row["trend_stop"])
         rows.append(
             {
                 "time": bar.date,
@@ -3877,20 +3902,27 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
                 "close": bar.close,
                 "volume": bar.volume,
                 "ma": ma,
+                "ma20": ma20,
                 "volMa": vol_ma,
                 "dynamicStop": dynamic_stop,
+                "trendStop": trend_stop,
             }
         )
         if ma is not None:
             ma_points.append({"time": bar.date, "value": ma})
+        if ma20 is not None:
+            ma20_points.append({"time": bar.date, "value": ma20})
         if vol_ma is not None:
             vol_ma_points.append({"time": bar.date, "value": vol_ma})
         if dynamic_stop is not None:
             dynamic_points.append({"time": bar.date, "value": dynamic_stop})
+        if trend_stop is not None:
+            trend_stop_points.append({"time": bar.date, "value": trend_stop})
         volume_points.append({"time": bar.date, "value": bar.volume, "color": "rgba(8,153,129,0.42)" if bar.close >= bar.open else "rgba(242,54,69,0.42)"})
         position = float(row.get("position_shares", 0) or 0)
-        if position > 0 and int(row.get("buy_signal", 0)) and bar.date not in trade_entry_dates:
-            markers.append({"time": bar.date, "position": "belowBar", "color": "#84cc16", "shape": "circle", "text": "B"})
+        if int(row.get("buy_signal", 0)):
+            stage = str(row.get("buy_stage", "B") or "B")
+            markers.append({"time": bar.date, "position": "belowBar", "color": "#2563eb" if stage == "B2" else "#84cc16", "shape": "circle", "text": stage})
         if position > 0 and int(row.get("sell_signal", 0)) and bar.date not in trade_exit_dates:
             markers.append({"time": bar.date, "position": "aboveBar", "color": "#f97316", "shape": "circle", "text": "S"})
     return {
@@ -3901,8 +3933,10 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
         "ohlc": [{"time": bar.date, "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close} for bar in bars],
         "volume": volume_points,
         "ma": ma_points,
+        "ma20": ma20_points,
         "volMa": vol_ma_points,
         "dynamicStop": dynamic_points,
+        "trendStop": trend_stop_points,
         "markers": sorted(markers, key=lambda item: str(item["time"])),
         "rows": rows,
     }

@@ -153,6 +153,7 @@ def latest_b_signal_with_reason(
     closes = [bar.close for bar in bars]
     volumes = [bar.volume for bar in bars]
     ma = rolling_sma(closes, ma_length)
+    ma50 = rolling_sma(closes, 50)
     vol_ma = rolling_sma(volumes, vol_length)
     is_vol_high = [
         vol_ma[i] is not None and bars[i].volume > vol_ma[i] for i in range(len(bars))
@@ -178,17 +179,45 @@ def latest_b_signal_with_reason(
     vol_3_days_high = i >= 2 and is_vol_high[i] and is_vol_high[i - 1] and is_vol_high[i - 2]
     has_massive_vol = 1 <= massive_counts[i] <= 2
     price_above_ma = bar.close > ma[i]
-    initial_buy = price_above_ma and vol_3_days_high and has_massive_vol and ma_is_rising
+
+    def bull_quality_ok_at(index: int) -> bool:
+        recent_high = max(closes[max(0, index - 59) : index + 1])
+        ma50_rising = ma50[index] is not None and index >= 5 and ma50[index - 5] is not None and ma50[index] > ma50[index - 5]
+        above_ma50 = ma50[index] is not None and bars[index].close > ma50[index]
+        near_stage_high = recent_high > 0 and bars[index].close >= recent_high * 0.80
+        return bool(above_ma50 and ma50_rising and near_stage_high)
+
+    bull_quality_ok = bull_quality_ok_at(i)
+    trend_confirmed = False
+    for j in range(i):
+        if ma[j] is None or massive_counts[j] is None:
+            continue
+        j_ma_rising = j > 0 and ma[j - 1] is not None and ma[j] > ma[j - 1]
+        j_vol_3_days_high = j >= 2 and is_vol_high[j] and is_vol_high[j - 1] and is_vol_high[j - 2]
+        j_has_massive_vol = 1 <= massive_counts[j] <= 2
+        j_price_above_ma = bars[j].close > ma[j]
+        if j_price_above_ma and j_vol_3_days_high and j_has_massive_vol and j_ma_rising:
+            trend_confirmed = True
+        if bars[j].close < ma[j] * 0.925:
+            trend_confirmed = False
 
     dist_to_ma = abs(bar.close - ma[i]) / ma[i]
+    initial_buy = price_above_ma and vol_3_days_high and has_massive_vol and ma_is_rising
+    full_range = bar.high - bar.low
+    body = abs(bar.close - bar.open)
+    upper_shadow = bar.high - max(bar.open, bar.close)
+    close_position = (bar.close - bar.low) / full_range if full_range > 0 else 0.5
+    upper_shadow_ok = upper_shadow <= max(body * 0.75, full_range * 0.20)
     reentry_buy = (
-        is_massive_vol[i]
+        trend_confirmed
+        and is_massive_vol[i]
         and price_above_ma
         and dist_to_ma <= reentry_pct / 100
         and bar.close > bar.open
         and ma_is_rising
+        and bull_quality_ok
+        and upper_shadow_ok
     )
-
     if not (initial_buy or reentry_buy):
         failed = []
         if not price_above_ma:
@@ -207,12 +236,12 @@ def latest_b_signal_with_reason(
             failed.append("当日不是阳线")
         return None, "未出现B点：" + "；".join(failed)
 
-    if initial_buy and reentry_buy:
-        signal_type = "initial+reentry"
+    if reentry_buy:
+        signal_type = "B2_reentry"
     elif initial_buy:
-        signal_type = "initial"
+        signal_type = "B1_trend_confirm"
     else:
-        signal_type = "reentry"
+        signal_type = "B"
     strength = technical_strength_for_latest_signal(bars, ma, vol_ma, "B")
 
     return SignalResult(

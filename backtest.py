@@ -343,11 +343,12 @@ def build_ratchet_inputs(
     vol_length: int,
     vol_multiplier: float,
     reentry_pct: float,
-) -> tuple[list[bool], list[bool], list[float | None], list[float | None]]:
+) -> tuple[list[bool], list[bool], list[float | None], list[float | None], list[float], list[str]]:
     closes = [bar.close for bar in bars]
     volumes = [bar.volume for bar in bars]
     ma = rolling_sma(closes, ma_length)
     vol_ma = rolling_sma(volumes, vol_length)
+    ma50 = rolling_sma(closes, 50)
 
     is_vol_high = [
         vol_ma[i] is not None and bars[i].volume > vol_ma[i] for i in range(len(bars))
@@ -359,24 +360,60 @@ def build_ratchet_inputs(
     massive_counts = rolling_sum([1 if x else 0 for x in is_massive_vol], 7)
 
     buy_signal = []
+    buy_target_pct = []
+    buy_stage = []
+    trend_confirmed = False
     for i, bar in enumerate(bars):
+        was_trend_confirmed = trend_confirmed
         ma5_is_rising = i > 0 and ma[i] is not None and ma[i - 1] is not None and ma[i] > ma[i - 1]
         vol_3_days_high = i >= 2 and is_vol_high[i] and is_vol_high[i - 1] and is_vol_high[i - 2]
         has_massive_vol = massive_counts[i] is not None and 1 <= massive_counts[i] <= 2
         price_above_ma = ma[i] is not None and bar.close > ma[i]
-        initial_buy = price_above_ma and vol_3_days_high and has_massive_vol and ma5_is_rising
-
         dist_to_ma = abs(bar.close - ma[i]) / ma[i] if ma[i] else 0.0
+
+        recent_high_60 = max(closes[max(0, i - 59) : i + 1])
+        ma50_rising = ma50[i] is not None and i >= 5 and ma50[i - 5] is not None and ma50[i] > ma50[i - 5]
+        above_ma50 = ma50[i] is not None and bar.close > ma50[i]
+        near_stage_high = recent_high_60 > 0 and bar.close >= recent_high_60 * 0.80
+        bull_quality_ok = above_ma50 and ma50_rising and near_stage_high
+
+        trend_confirm = price_above_ma and vol_3_days_high and has_massive_vol and ma5_is_rising
+        if trend_confirm:
+            trend_confirmed = True
+
+        full_range = bar.high - bar.low
+        body = abs(bar.close - bar.open)
+        upper_shadow = bar.high - max(bar.open, bar.close)
+        close_position = (bar.close - bar.low) / full_range if full_range > 0 else 0.5
+        upper_shadow_ok = upper_shadow <= max(body * 0.75, full_range * 0.20)
         reentry_buy = (
-            is_massive_vol[i]
+            was_trend_confirmed
+            and is_massive_vol[i]
             and price_above_ma
             and dist_to_ma <= reentry_pct
             and bar.close > bar.open
             and ma5_is_rising
+            and bull_quality_ok
+            and upper_shadow_ok
         )
-        buy_signal.append(initial_buy or reentry_buy)
+        failed_trend = ma[i] is not None and bar.close < ma[i] * 0.925
+        if failed_trend:
+            trend_confirmed = False
 
-    return buy_signal, is_massive_vol, ma, vol_ma
+        target = 0.0
+        stage = ""
+        if trend_confirm:
+            target = 50.0
+            stage = "B1"
+        if reentry_buy:
+            target = max(target, 100.0)
+            stage = "B2" if target == 100.0 else stage
+
+        buy_signal.append(target > 0)
+        buy_target_pct.append(target)
+        buy_stage.append(stage)
+
+    return buy_signal, is_massive_vol, ma, vol_ma, buy_target_pct, buy_stage
 
 
 def backtest(
@@ -393,14 +430,19 @@ def backtest(
     reentry_pct: float = 4.5,
 ) -> tuple[list[Trade], list[dict[str, float | str]]]:
     if strategy_name == "ratchet":
-        buy_signal, _, ma, vol_ma = build_ratchet_inputs(
+        buy_signal, _, ma, vol_ma, buy_target_pct, buy_stage = build_ratchet_inputs(
             bars, ma_length, vol_length, vol_multiplier, reentry_pct / 100
         )
         sell_signal = [False] * len(bars)
+        closes = [bar.close for bar in bars]
+        ma20 = rolling_sma(closes, 20)
     else:
         buy_signal, sell_signal, ma, vol_ma = build_signals(
             bars, ma_length, vol_length, vol_multiplier
         )
+        ma20 = [None] * len(bars)
+        buy_target_pct = [100.0 if signal else 0.0 for signal in buy_signal]
+        buy_stage = ["B" if signal else "" for signal in buy_signal]
 
     cash = initial_cash
     shares = 0
@@ -413,29 +455,52 @@ def backtest(
     pending_signal_date = ""
     pending_signal_close = 0.0
     pending_exit_reason = ""
-    highest_b_price = None
+    pending_target_pct = 0.0
+    pending_stage = ""
     max_high_since_entry = 0.0
     min_low_since_entry = 0.0
+    highest_close_since_entry = 0.0
+    below_20ma_days = 0
     trades = []
     equity_curve = []
 
     for i, bar in enumerate(bars):
-        if pending_action == "buy" and shares == 0:
+        buy_action = ""
+        buy_action_signal_date = ""
+        buy_action_target_pct = 0.0
+        buy_action_stage = ""
+        sell_action = ""
+        if pending_action == "buy":
             fill_price = apply_buy_price(bar.open, slippage_pct)
             cost_per_share = fill_price * (1 + commission_pct / 100)
-            shares_to_buy = math.floor(cash / cost_per_share)
+            old_shares = shares
+            current_equity_at_fill = cash + shares * fill_price
+            target_value = current_equity_at_fill * max(0.0, min(100.0, pending_target_pct)) / 100
+            current_position_value = shares * fill_price
+            shares_to_buy = math.floor(max(0.0, target_value - current_position_value) / cost_per_share)
             if shares_to_buy > 0:
-                shares = shares_to_buy
-                cash -= shares * cost_per_share
-                entry_price = fill_price
-                entry_date = bar.date
-                entry_signal_date = pending_signal_date
-                entry_signal_close = pending_signal_close
-                entry_index = i
-                max_high_since_entry = bar.high
-                min_low_since_entry = bar.low
-                if strategy_name == "ratchet" and highest_b_price is None:
-                    highest_b_price = entry_price
+                buy_action = f"买到{pending_target_pct:.0f}%" if old_shares == 0 else f"加到{pending_target_pct:.0f}%"
+                buy_action_signal_date = pending_signal_date
+                buy_action_target_pct = pending_target_pct
+                buy_action_stage = pending_stage
+                old_position_cost = entry_price * old_shares
+                shares = old_shares + shares_to_buy
+                cash -= shares_to_buy * cost_per_share
+                if old_shares > 0:
+                    entry_price = (old_position_cost + fill_price * shares_to_buy) / shares
+                    max_high_since_entry = max(max_high_since_entry, bar.high)
+                    min_low_since_entry = min(min_low_since_entry, bar.low)
+                    highest_close_since_entry = max(highest_close_since_entry, bar.close)
+                else:
+                    entry_price = fill_price
+                    entry_date = bar.date
+                    entry_signal_date = pending_signal_date
+                    entry_signal_close = pending_signal_close
+                    entry_index = i
+                    max_high_since_entry = bar.high
+                    min_low_since_entry = bar.low
+                    highest_close_since_entry = bar.close
+                    below_20ma_days = 0
 
         elif pending_action == "sell" and shares > 0:
             fill_price = apply_sell_price(bar.open, slippage_pct)
@@ -467,45 +532,57 @@ def backtest(
                     exit_reason=pending_exit_reason or "Signal exit",
                 )
             )
+            sell_action = "卖出"
             shares = 0
             entry_price = 0.0
             entry_date = ""
             entry_signal_date = ""
             entry_signal_close = 0.0
-            highest_b_price = None
             max_high_since_entry = 0.0
             min_low_since_entry = 0.0
+            highest_close_since_entry = 0.0
+            below_20ma_days = 0
 
         pending_action = None
         pending_signal_date = ""
         pending_signal_close = 0.0
         pending_exit_reason = ""
+        pending_target_pct = 0.0
+        pending_stage = ""
 
         dynamic_stop = ""
+        trend_stop_line = ""
+        defense_warning = False
         ratchet_sell_today = False
         exit_reason_today = ""
         if strategy_name == "ratchet" and shares > 0:
             max_high_since_entry = max(max_high_since_entry, bar.high)
             min_low_since_entry = min(min_low_since_entry, bar.low)
-            if buy_signal[i] and (highest_b_price is None or bar.close > highest_b_price):
-                highest_b_price = bar.close
-            dynamic_stop = "" if highest_b_price is None else highest_b_price * (1 - hard_stop_pct / 100)
-            stop_condition_1 = ma[i] is not None and bar.close < ma[i] * (1 - stop_5ma_pct / 100)
-            stop_condition_2 = (
-                highest_b_price is not None
-                and bar.close < highest_b_price * (1 - hard_stop_pct / 100)
-            )
-            ratchet_sell_today = stop_condition_1 or stop_condition_2
-            if stop_condition_1 and stop_condition_2:
-                exit_reason_today = "MA defense + ratchet stop"
-            elif stop_condition_1:
-                exit_reason_today = "MA defense"
-            elif stop_condition_2:
-                exit_reason_today = "Ratchet stop"
+            highest_close_since_entry = max(highest_close_since_entry, bar.close)
+            dynamic_stop = entry_price * (1 - hard_stop_pct / 100) if entry_price else ""
+            trend_stop_line = "" if ma20[i] is None else ma20[i]
+            defense_warning = ma[i] is not None and bar.close < ma[i] * (1 - stop_5ma_pct / 100)
+            if ma20[i] is not None and bar.close < ma20[i]:
+                below_20ma_days += 1
+            else:
+                below_20ma_days = 0
+            trend_stop = below_20ma_days >= 2
+            cost_stop = entry_price > 0 and bar.close < entry_price * (1 - hard_stop_pct / 100)
+
+            stop_reasons = []
+            if defense_warning:
+                stop_reasons.append("5MA 7.5% stop")
+            if trend_stop:
+                stop_reasons.append("2-day 20MA break")
+            if cost_stop:
+                stop_reasons.append("Cost 20% forced stop")
+            ratchet_sell_today = bool(stop_reasons)
+            exit_reason_today = " + ".join(stop_reasons)
             sell_signal[i] = ratchet_sell_today
         elif shares > 0:
             max_high_since_entry = max(max_high_since_entry, bar.high)
             min_low_since_entry = min(min_low_since_entry, bar.low)
+            highest_close_since_entry = max(highest_close_since_entry, bar.close)
 
         market_value = shares * bar.close
         equity = cash + market_value
@@ -514,9 +591,19 @@ def backtest(
                 "date": bar.date,
                 "close": bar.close,
                 "ma": "" if ma[i] is None else ma[i],
+                "ma20": "" if ma20[i] is None else ma20[i],
                 "vol_ma": "" if vol_ma[i] is None else vol_ma[i],
                 "buy_signal": int(buy_signal[i]),
+                "buy_target_pct": buy_target_pct[i],
+                "buy_stage": buy_stage[i],
+                "buy_action": buy_action,
+                "buy_action_signal_date": buy_action_signal_date,
+                "buy_action_target_pct": buy_action_target_pct,
+                "buy_action_stage": buy_action_stage,
+                "sell_action": sell_action,
                 "sell_signal": int(sell_signal[i]),
+                "defense_warning": int(defense_warning),
+                "below_20ma_days": below_20ma_days if shares > 0 else "",
                 "position_shares": shares,
                 "entry_date": entry_date,
                 "entry_price": entry_price,
@@ -525,19 +612,25 @@ def backtest(
                 "entry_index": entry_index if shares > 0 else "",
                 "max_high_since_entry": max_high_since_entry if shares > 0 else "",
                 "min_low_since_entry": min_low_since_entry if shares > 0 else "",
+                "highest_close_since_entry": highest_close_since_entry if shares > 0 else "",
                 "cash": cash,
                 "equity": equity,
                 "dynamic_stop": dynamic_stop,
+                "trend_stop": trend_stop_line,
             }
         )
 
         if i < len(bars) - 1:
-            if shares == 0 and buy_signal[i]:
-                if strategy_name == "ratchet":
-                    highest_b_price = bar.close
+            current_position_pct = (shares * bar.close / equity * 100) if equity else 0.0
+            target_pct_today = buy_target_pct[i]
+            if strategy_name == "ratchet" and shares == 0 and buy_stage[i] == "B2":
+                target_pct_today = min(target_pct_today, 50.0)
+            if buy_signal[i] and target_pct_today > current_position_pct + 1:
                 pending_action = "buy"
                 pending_signal_date = bar.date
                 pending_signal_close = bar.close
+                pending_target_pct = target_pct_today
+                pending_stage = buy_stage[i]
             elif shares > 0:
                 if strategy_name == "ratchet":
                     if ratchet_sell_today:
@@ -726,7 +819,7 @@ def score_signal_strength(
     dynamic_stop = 0.0 if dynamic_stop_raw in ("", None) else float(dynamic_stop_raw)
     notes: list[str] = []
 
-    if signal_type == "B":
+    if str(signal_type).startswith("B"):
         if volume_ratio >= 1.45:
             volume_score = 18 + min(7, (volume_ratio - 1.45) * 6)
         elif volume_ratio >= 1:
@@ -911,6 +1004,104 @@ def build_signal_detail_rows(
 
 
 
+def build_signal_detail_rows(
+    bars: list[Bar],
+    trades: list[Trade],
+    equity_curve: list[dict[str, float | str]],
+) -> list[dict[str, float | int | str]]:
+    exit_signal_dates = {trade.exit_signal_date for trade in trades}
+    rows: list[dict[str, float | int | str]] = []
+
+    for i, row in enumerate(equity_curve):
+        bar = bars[i]
+        signals: list[tuple[str, bool]] = []
+        if int(row.get("buy_signal", 0)):
+            next_row = equity_curve[i + 1] if i + 1 < len(equity_curve) else {}
+            executed_buy = str(next_row.get("buy_action_signal_date", "")) == bar.date
+            signals.append((str(row.get("buy_stage", "B") or "B"), executed_buy))
+        if int(row.get("sell_signal", 0)):
+            signals.append(("S", bar.date in exit_signal_dates))
+        if not signals:
+            continue
+
+        ma = row.get("ma", "")
+        vol_ma = row.get("vol_ma", "")
+        ma_value = 0.0 if ma in ("", None) else float(ma)
+        vol_ma_value = 0.0 if vol_ma in ("", None) else float(vol_ma)
+        future = bars[i + 1 : min(len(bars), i + 21)]
+
+        def future_return(days: int) -> float | str:
+            target = i + days
+            if target >= len(bars) or not bar.close:
+                return ""
+            return (bars[target].close / bar.close - 1) * 100
+
+        max_up: float | str = ""
+        max_down: float | str = ""
+        if future and bar.close:
+            max_up = (max(item.high for item in future) / bar.close - 1) * 100
+            max_down = (min(item.low for item in future) / bar.close - 1) * 100
+
+        next_sell = ""
+        for j in range(i + 1, min(len(equity_curve), i + 21)):
+            if int(equity_curve[j].get("sell_signal", 0)):
+                next_sell = str(equity_curve[j].get("date", ""))
+                break
+
+        position = float(row.get("position_shares", 0) or 0)
+        for signal_type, executed in signals:
+            status = "交易信号" if executed else "持仓中信号" if position > 0 else "观察信号"
+            action = ""
+            action_reason = ""
+            if str(signal_type).startswith("B"):
+                next_row = equity_curve[i + 1] if i + 1 < len(equity_curve) else {}
+                if executed:
+                    action = str(next_row.get("buy_action", "买入"))
+                    action_reason = "信号后下一交易日开盘执行"
+                else:
+                    target = float(row.get("buy_target_pct", 0) or 0)
+                    equity = float(row.get("equity", 0) or 0)
+                    position_pct = (position * bar.close / equity * 100) if equity else 0.0
+                    action = "未执行"
+                    if i + 1 >= len(equity_curve):
+                        action_reason = "区间最后一日，缺少下一交易日开盘价"
+                    elif position_pct + 1 >= target:
+                        action_reason = f"当前仓位约{position_pct:.0f}%，已达到{signal_type}目标仓位{target:.0f}%"
+                    else:
+                        action_reason = "信号存在，但未生成有效买入数量"
+            else:
+                action = "卖出" if executed else "未执行"
+                action_reason = "信号后下一交易日开盘执行" if executed else "区间结束或无持仓"
+
+            strength = score_signal_strength(bars, equity_curve, i, signal_type)
+            rows.append(
+                {
+                    "date": bar.date,
+                    "signal_type": signal_type,
+                    "status": status,
+                    "executed": int(executed),
+                    "action": action,
+                    "action_reason": action_reason,
+                    **strength,
+                    "close": bar.close,
+                    "ma": ma_value if ma_value else "",
+                    "dist_ma_pct": (bar.close / ma_value - 1) * 100 if ma_value else "",
+                    "volume_ratio": bar.volume / vol_ma_value if vol_ma_value else "",
+                    "in_position": int(position > 0),
+                    "ret_1d": future_return(1),
+                    "ret_3d": future_return(3),
+                    "ret_5d": future_return(5),
+                    "ret_10d": future_return(10),
+                    "ret_20d": future_return(20),
+                    "max_up_20d": max_up,
+                    "max_down_20d": max_down,
+                    "next_sell_signal": next_sell,
+                }
+            )
+    return rows
+
+
+
 
 def make_report(
     path: Path,
@@ -948,7 +1139,6 @@ def make_report(
         "strategy_return": "\u7b56\u7565\u533a\u95f4\u6536\u76ca",
         "benchmark_return": "\u533a\u95f4\u6536\u76ca",
         "main_chart": "K\u7ebf\u3001\u5747\u7ebf\u3001\u6210\u4ea4\u91cf\u4e0e\u4ea4\u6613\u70b9",
-        "pnl_chart": "\u5355\u7b14\u4ea4\u6613\u6536\u76ca",
         "trade_detail": "\u4ea4\u6613\u660e\u7ec6",
         "buy_signal_date": "\u4e70\u5165\u4fe1\u53f7\u65e5",
         "buy_action_date": "\u4e70\u5165\u64cd\u4f5c\u65e5",
@@ -975,7 +1165,7 @@ def make_report(
         "close": "\u6536",
         "volume": "\u6210\u4ea4\u91cf",
         "volume_ma": "\u6210\u4ea4\u91cf\u5747\u7ebf",
-        "dynamic_stop": "\u52a8\u6001\u6b62\u635f",
+        "dynamic_stop": "\u6210\u672c20%\u6b62\u635f",
         "buy": "\u4e70\u5165",
         "sell": "\u5356\u51fa",
         "hold_buy": "\u6301\u4ed3B\u70b9",
@@ -988,8 +1178,10 @@ def make_report(
 
     dates = [bar.date for bar in bars]
     ma_values = [None if row["ma"] == "" else float(row["ma"]) for row in equity_curve]
+    ma20_values = [None if row.get("ma20", "") in ("", None) else float(row["ma20"]) for row in equity_curve]
     vol_ma_values = [None if row["vol_ma"] == "" else float(row["vol_ma"]) for row in equity_curve]
     dynamic_stop_values = [None if row.get("dynamic_stop", "") in ("", None) else float(row["dynamic_stop"]) for row in equity_curve]
+    trend_stop_values = [None if row.get("trend_stop", "") in ("", None) else float(row["trend_stop"]) for row in equity_curve]
     volume_colors = ["rgba(8,153,129,0.42)" if bar.close >= bar.open else "rgba(242,54,69,0.42)" for bar in bars]
 
     trade_by_entry = {trade.entry_date: trade for trade in trades}
@@ -1023,14 +1215,39 @@ def make_report(
             hold_sell_y.append(bar.high)
             hold_sell_text.append(f"{labels['hold_sell']}<br>{labels['date']}: {bar.date}<br>{labels['close']}: {bar.close:.2f}")
 
+    buy_signal_markers = [
+        {
+            "time": bars[i].date,
+            "position": "belowBar",
+            "color": "#2563eb" if str(row.get("buy_stage", "")) == "B2" else "#84cc16",
+            "shape": "circle",
+            "text": str(row.get("buy_stage", "B") or "B"),
+        }
+        for i, row in enumerate(equity_curve)
+        if int(row.get("buy_signal", 0))
+    ]
+    buy_action_markers = [
+        {
+            "time": str(row.get("date", "")),
+            "position": "belowBar",
+            "color": "#089981",
+            "shape": "arrowUp",
+            "text": "买",
+        }
+        for row in equity_curve
+        if str(row.get("buy_action", ""))
+    ]
+
     chart_payload = {
         "labels": labels,
         "dates": dates,
         "ohlc": [{"time": bar.date, "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close} for bar in bars],
         "volume": [{"time": bar.date, "value": bar.volume, "color": volume_colors[i]} for i, bar in enumerate(bars)],
         "ma": [{"time": dates[i], "value": value} for i, value in enumerate(ma_values) if value is not None],
+        "ma20": [{"time": dates[i], "value": value} for i, value in enumerate(ma20_values) if value is not None],
         "volMa": [{"time": dates[i], "value": value} for i, value in enumerate(vol_ma_values) if value is not None],
         "dynamicStop": [{"time": dates[i], "value": value} for i, value in enumerate(dynamic_stop_values) if value is not None],
+        "trendStop": [{"time": dates[i], "value": value} for i, value in enumerate(trend_stop_values) if value is not None],
         "rows": [
             {
                 "time": bar.date,
@@ -1040,23 +1257,19 @@ def make_report(
                 "close": bar.close,
                 "volume": bar.volume,
                 "ma": ma_values[i],
+                "ma20": ma20_values[i],
                 "volMa": vol_ma_values[i],
                 "dynamicStop": dynamic_stop_values[i],
+                "trendStop": trend_stop_values[i],
             }
             for i, bar in enumerate(bars)
         ],
-        "entryMarkers": [
-            {"time": trade.entry_date, "position": "belowBar", "color": "#089981", "shape": "arrowUp", "text": labels["buy"]}
-            for trade in trades
-        ],
+        "entryMarkers": buy_action_markers,
         "exitMarkers": [
-            {"time": trade.exit_date, "position": "aboveBar", "color": "#f23645", "shape": "arrowDown", "text": labels["sell"]}
+            {"time": trade.exit_date, "position": "aboveBar", "color": "#f23645", "shape": "arrowDown", "text": "卖"}
             for trade in trades
         ],
-        "holdBuyMarkers": [
-            {"time": day, "position": "belowBar", "color": "#84cc16", "shape": "circle", "text": "B"}
-            for day in hold_buy_x
-        ],
+        "holdBuyMarkers": buy_signal_markers,
         "holdSellMarkers": [
             {"time": day, "position": "aboveBar", "color": "#f97316", "shape": "circle", "text": "S"}
             for day in hold_sell_x
@@ -1238,15 +1451,6 @@ def make_report(
     if not signal_rows:
         signal_rows = '<tr><td colspan="26" class="empty">这个区间没有信号。</td></tr>'
 
-    pnl_payload = {
-        "labels": [str(i) for i in range(1, len(trades) + 1)],
-        "pnl": [trade.pnl for trade in trades],
-        "text": [
-            f"#{i}<br>{trade.entry_date} -> {trade.exit_date}<br>{labels['pnl_amount']}: {trade.pnl:.2f}<br>{labels['return_pct']}: {trade.pnl_pct:.2f}%"
-            for i, trade in enumerate(trades, 1)
-        ],
-    }
-
     report = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1279,8 +1483,9 @@ h2 {{ margin: 24px 0 10px; font-size: 17px; }}
 .chart-tooltip .down {{ color: #f23645; }}
 .chart {{ width: 100%; min-height: 360px; }}
 .compare-chart {{ min-height: 360px; }}
-.pnl-chart {{ min-height: 320px; }}
 .compare-note {{ font-size: 13px; color: #475569; margin: 0 0 8px; }}
+.rule-strip {{ display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }}
+.rule-pill {{ display: inline-flex; align-items: center; min-height: 28px; border: 1px solid #d6dbe3; background: #f8fafc; color: #334155; border-radius: 4px; padding: 0 9px; font-size: 12px; font-weight: 700; }}
 .table-wrap {{ width: 100%; overflow: auto; border: 1px solid #d6dbe3; border-radius: 6px; background: #fff; }}
 table {{ width: 100%; border-collapse: separate; border-spacing: 0; background: #fff; }}
 th, td {{ padding: 8px 10px; border-bottom: 1px solid #eef1f5; text-align: right; font-size: 12px; white-space: nowrap; }}
@@ -1308,6 +1513,12 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
 </section>
 {benchmark_html}
 <h2>{labels['main_chart']}</h2>
+<div class="rule-strip">
+  <span class="rule-pill">B1：站上5MA + 连续3日放量 + 7日内1-2次巨量 + 5MA向上</span>
+  <span class="rule-pill">B2：已有B1趋势后，巨量阳线回踩5MA {html.escape(str('4.5%'))} 内</span>
+  <span class="rule-pill">买入：B1 到 50%；B2 到 100%；信号后下一交易日开盘执行</span>
+  <span class="rule-pill">卖出：5MA 下 7.5% / 连续 2 日跌破 20MA / 跌破成本 20%</span>
+</div>
 <section class="panel">
   <div class="chart-shell">
     <div class="chart-toolbar"><button id="fit-chart">{labels['reset_view']}</button><span>{labels['chart_hint']}</span></div>
@@ -1315,11 +1526,8 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
     <div id="price-tooltip" class="chart-tooltip"></div>
   </div>
 </section>
-<h2>{labels['pnl_chart']}</h2>
-<section class="panel"><div id="pnl-chart" class="chart pnl-chart"></div></section>
 </main>
 <script type="application/json" id="chart-data">{json.dumps(chart_payload, ensure_ascii=False)}</script>
-<script type="application/json" id="pnl-data">{json.dumps(pnl_payload, ensure_ascii=False)}</script>
 <script>
 const chartData = JSON.parse(document.getElementById('chart-data').textContent);
 const chartLabels = chartData.labels;
@@ -1343,8 +1551,8 @@ candleSeries.setData(chartData.ohlc);
 candleSeries.priceScale().applyOptions({{ scaleMargins: {{ top: 0.08, bottom: 0.28 }} }});
 const maSeries = priceChart.addLineSeries({{ color: '#f5a623', lineWidth: 2, title: '5MA', priceLineVisible: false }});
 maSeries.setData(chartData.ma);
-const stopSeries = priceChart.addLineSeries({{ color: '#f97316', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: chartLabels.dynamic_stop, priceLineVisible: false }});
-stopSeries.setData(chartData.dynamicStop);
+const ma20Series = priceChart.addLineSeries({{ color: '#94a3b8', lineWidth: 1, title: '20MA', priceLineVisible: false, lastValueVisible: false }});
+ma20Series.setData(chartData.ma20 || []);
 const volumeSeries = priceChart.addHistogramSeries({{ color: 'rgba(41,98,255,0.25)', priceFormat: {{ type: 'volume' }}, priceScaleId: '', priceLineVisible: false, lastValueVisible: false }});
 volumeSeries.setData(chartData.volume);
 priceChart.priceScale('').applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
@@ -1362,7 +1570,7 @@ priceChart.subscribeCrosshairMove(param => {{
   const up = row.close >= row.open;
   tooltip.innerHTML = `<strong>${{row.time}}</strong>` +
     `<div><span class="${{up ? 'up' : 'down'}}">${{chartLabels.open}} ${{formatNumber(row.open)}} &nbsp; ${{chartLabels.high}} ${{formatNumber(row.high)}} &nbsp; ${{chartLabels.low}} ${{formatNumber(row.low)}} &nbsp; ${{chartLabels.close}} ${{formatNumber(row.close)}}</span></div>` +
-    `<div>${{chartLabels.volume}} ${{formatVolume(row.volume)}} &nbsp; 5MA ${{formatNumber(row.ma)}} &nbsp; ${{chartLabels.dynamic_stop}} ${{formatNumber(row.dynamicStop)}}</div>`;
+    `<div>${{chartLabels.volume}} ${{formatVolume(row.volume)}} &nbsp; 5MA ${{formatNumber(row.ma)}} &nbsp; 20MA ${{formatNumber(row.ma20)}}</div>`;
   tooltip.style.display = 'block';
   const left = Math.min(param.point.x + 16, chartElement.clientWidth - 250);
   const top = Math.max(44, param.point.y - 72);
@@ -1377,8 +1585,6 @@ document.getElementById('fit-chart').addEventListener('click', () => priceChart.
 priceChart.timeScale().fitContent();
 
 const chartConfig = {{ responsive: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d', 'select2d'] }};
-const pnlData = JSON.parse(document.getElementById('pnl-data').textContent);
-Plotly.newPlot('pnl-chart', [{{ type: 'bar', x: pnlData.labels, y: pnlData.pnl, text: pnlData.text, marker: {{ color: pnlData.pnl.map(v => v >= 0 ? '#089981' : '#f23645') }}, hovertemplate: '%{{text}}<extra></extra>' }}], {{ margin: {{ l: 64, r: 28, t: 20, b: 48 }}, paper_bgcolor: '#fff', plot_bgcolor: '#fff', xaxis: {{ title: chartLabels.trade_no }}, yaxis: {{ title: chartLabels.pnl_amount, zeroline: true, zerolinecolor: '#9ca3af', gridcolor: '#eef1f5' }}, font: {{ family: 'Inter, Microsoft YaHei UI, PingFang SC, Arial, sans-serif', size: 12, color: '#131722' }} }}, chartConfig);
 
 const benchmarkEl = document.getElementById('benchmark-data');
 if (benchmarkEl) {{
