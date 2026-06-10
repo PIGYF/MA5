@@ -343,21 +343,28 @@ def build_ratchet_inputs(
     vol_length: int,
     vol_multiplier: float,
     reentry_pct: float,
+    vol_high_days: int = 3,
+    vol_high_multiplier: float = 1.0,
+    massive_window: int = 7,
+    massive_min_count: int = 1,
+    massive_max_count: int = 2,
+    b1_require_20ma_gt_50ma: bool = False,
 ) -> tuple[list[bool], list[bool], list[float | None], list[float | None], list[float], list[str]]:
     closes = [bar.close for bar in bars]
     volumes = [bar.volume for bar in bars]
     ma = rolling_sma(closes, ma_length)
+    ma20 = rolling_sma(closes, 20)
     vol_ma = rolling_sma(volumes, vol_length)
     ma50 = rolling_sma(closes, 50)
 
     is_vol_high = [
-        vol_ma[i] is not None and bars[i].volume > vol_ma[i] for i in range(len(bars))
+        vol_ma[i] is not None and bars[i].volume > vol_ma[i] * vol_high_multiplier for i in range(len(bars))
     ]
     is_massive_vol = [
         vol_ma[i] is not None and bars[i].volume >= vol_ma[i] * vol_multiplier
         for i in range(len(bars))
     ]
-    massive_counts = rolling_sum([1 if x else 0 for x in is_massive_vol], 7)
+    massive_counts = rolling_sum([1 if x else 0 for x in is_massive_vol], massive_window)
 
     buy_signal = []
     buy_target_pct = []
@@ -366,9 +373,10 @@ def build_ratchet_inputs(
     for i, bar in enumerate(bars):
         was_trend_confirmed = trend_confirmed
         ma5_is_rising = i > 0 and ma[i] is not None and ma[i - 1] is not None and ma[i] > ma[i - 1]
-        vol_3_days_high = i >= 2 and is_vol_high[i] and is_vol_high[i - 1] and is_vol_high[i - 2]
-        has_massive_vol = massive_counts[i] is not None and 1 <= massive_counts[i] <= 2
+        vol_days_high = i >= vol_high_days - 1 and all(is_vol_high[j] for j in range(i - vol_high_days + 1, i + 1))
+        has_massive_vol = massive_counts[i] is not None and massive_min_count <= massive_counts[i] <= massive_max_count
         price_above_ma = ma[i] is not None and bar.close > ma[i]
+        ma20_gt_50 = ma20[i] is not None and ma50[i] is not None and ma20[i] > ma50[i]
         dist_to_ma = abs(bar.close - ma[i]) / ma[i] if ma[i] else 0.0
 
         recent_high_60 = max(closes[max(0, i - 59) : i + 1])
@@ -377,7 +385,9 @@ def build_ratchet_inputs(
         near_stage_high = recent_high_60 > 0 and bar.close >= recent_high_60 * 0.80
         bull_quality_ok = above_ma50 and ma50_rising and near_stage_high
 
-        trend_confirm = price_above_ma and vol_3_days_high and has_massive_vol and ma5_is_rising
+        trend_confirm = price_above_ma and vol_days_high and has_massive_vol and ma5_is_rising
+        if b1_require_20ma_gt_50ma:
+            trend_confirm = trend_confirm and ma20_gt_50
         if trend_confirm:
             trend_confirmed = True
 
@@ -428,10 +438,27 @@ def backtest(
     stop_5ma_pct: float = 7.5,
     hard_stop_pct: float = 20.0,
     reentry_pct: float = 4.5,
+    vol_high_days: int = 3,
+    vol_high_multiplier: float = 1.0,
+    massive_window: int = 7,
+    massive_min_count: int = 1,
+    massive_max_count: int = 2,
+    b1_require_20ma_gt_50ma: bool = False,
+    below_20ma_stop_days: int = 2,
 ) -> tuple[list[Trade], list[dict[str, float | str]]]:
     if strategy_name == "ratchet":
         buy_signal, _, ma, vol_ma, buy_target_pct, buy_stage = build_ratchet_inputs(
-            bars, ma_length, vol_length, vol_multiplier, reentry_pct / 100
+            bars,
+            ma_length,
+            vol_length,
+            vol_multiplier,
+            reentry_pct / 100,
+            vol_high_days,
+            vol_high_multiplier,
+            massive_window,
+            massive_min_count,
+            massive_max_count,
+            b1_require_20ma_gt_50ma,
         )
         sell_signal = [False] * len(bars)
         closes = [bar.close for bar in bars]
@@ -566,7 +593,7 @@ def backtest(
                 below_20ma_days += 1
             else:
                 below_20ma_days = 0
-            trend_stop = below_20ma_days >= 2
+            trend_stop = below_20ma_stop_days > 0 and below_20ma_days >= below_20ma_stop_days
             cost_stop = entry_price > 0 and bar.close < entry_price * (1 - hard_stop_pct / 100)
 
             stop_reasons = []
@@ -1111,6 +1138,7 @@ def make_report(
     equity_curve: list[dict[str, float | str]],
     summary: dict[str, float | int],
     benchmark: dict[str, object] | None = None,
+    strategy_settings: dict[str, object] | None = None,
 ) -> None:
     labels = {
         "net_profit": "\u51c0\u5229\u6da6",
@@ -1339,6 +1367,17 @@ def make_report(
     ]
     stat_tables = "".join(f"<tr><td>{html.escape(label)}</td><td>{value}</td></tr>" for label, value in overview_rows)
     analysis_tables = "".join(f"<tr><td>{html.escape(label)}</td><td>{value}</td></tr>" for label, value in analysis_rows)
+    settings = strategy_settings or {}
+    vol_high_days_label = int(settings.get("vol_high_days", 3))
+    vol_high_multiplier_label = float(settings.get("vol_high_multiplier", 1.0))
+    massive_window_label = int(settings.get("massive_window", 7))
+    massive_min_label = int(settings.get("massive_min_count", 1))
+    massive_max_label = int(settings.get("massive_max_count", 2))
+    b1_trend_label = " + 20MA>50MA" if settings.get("b1_require_20ma_gt_50ma") else ""
+    reentry_label = float(settings.get("reentry_pct", 4.5))
+    stop_5ma_label = float(settings.get("stop_5ma_pct", 7.5))
+    hard_stop_label = float(settings.get("hard_stop_pct", 20))
+    below20_label = int(settings.get("below_20ma_stop_days", 2))
 
     trade_rows = "\n".join(
         "<tr>"
@@ -1514,10 +1553,10 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
 {benchmark_html}
 <h2>{labels['main_chart']}</h2>
 <div class="rule-strip">
-  <span class="rule-pill">B1：站上5MA + 连续3日放量 + 7日内1-2次巨量 + 5MA向上</span>
-  <span class="rule-pill">B2：已有B1趋势后，巨量阳线回踩5MA {html.escape(str('4.5%'))} 内</span>
+  <span class="rule-pill">B1：站上5MA + 连续{vol_high_days_label}日成交量 &gt; 均量×{vol_high_multiplier_label:g} + {massive_window_label}日内{massive_min_label}-{massive_max_label}次巨量 + 5MA向上{b1_trend_label}</span>
+  <span class="rule-pill">B2：已有B1趋势后，巨量阳线回踩5MA {reentry_label:g}% 内</span>
   <span class="rule-pill">买入：B1 到 50%；B2 到 100%；信号后下一交易日开盘执行</span>
-  <span class="rule-pill">卖出：5MA 下 7.5% / 连续 2 日跌破 20MA / 跌破成本 20%</span>
+  <span class="rule-pill">卖出：5MA 下 {stop_5ma_label:g}% / 连续 {below20_label} 日跌破 20MA / 跌破成本 {hard_stop_label:g}%</span>
 </div>
 <section class="panel">
   <div class="chart-shell">

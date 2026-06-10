@@ -61,6 +61,7 @@ from ma5_config import (
     validate_backtest_range,
     validate_scan_range,
 )
+from macro_calendar import macro_risk_state
 from ashare_lab import (
     ASHARE_ROUTE,
     ASHARE_BOARD_LABELS,
@@ -136,6 +137,11 @@ def job_stop_requested(job_id: str) -> bool:
     return bool(job and job.get("stop_requested"))
 
 
+def checkbox_field(params: dict[str, list[str]], name: str, default: bool = False) -> bool:
+    raw = field(params, name, "1" if default else "0")
+    return str(raw).lower() in {"1", "true", "on", "yes"}
+
+
 def build_benchmark(symbol: str, start: str, end: str, initial_cash: float) -> dict[str, object]:
     bars = fetch_bars("yfinance", symbol, start, end, "qfq", None)
     first_close = bars[0].close
@@ -149,6 +155,7 @@ def build_benchmark(symbol: str, start: str, end: str, initial_cash: float) -> d
 def market_environment(symbol: str = "QQQ") -> dict[str, object]:
     end = default_scan_end_date()
     start = end - timedelta(days=120)
+    macro = macro_risk_state(date.today())
     try:
         bars = fetch_bars("yfinance", symbol, start.isoformat(), end.isoformat(), "qfq", None)
         vix_value = 0.0
@@ -204,6 +211,7 @@ def market_environment(symbol: str = "QQQ") -> dict[str, object]:
             "vix": vix_value,
             "vix_label": vix_label,
             "message": message,
+            "macro": macro,
         }
     except Exception as exc:
         return {
@@ -217,19 +225,68 @@ def market_environment(symbol: str = "QQQ") -> dict[str, object]:
             "vix": 0.0,
             "vix_label": "Unavailable",
             "message": f"大盘环境暂不可用：{exc}",
+            "macro": macro,
         }
+
+
+def macro_day_label(event_date: date, today: date) -> str:
+    delta = (event_date - today).days
+    if delta == 0:
+        return "今天"
+    if delta == 1:
+        return "明天"
+    if delta == -1:
+        return "昨天"
+    if delta > 1:
+        return f"{delta}天后"
+    return f"{abs(delta)}天前"
 
 
 def render_market_environment_bar(env: dict[str, object] | None = None) -> str:
     env = env or market_environment()
     tone = html.escape(str(env.get("tone", "neutral")))
+    macro = env.get("macro") if isinstance(env.get("macro"), dict) else {}
+    macro_tone = html.escape(str(macro.get("tone", "neutral")))
+    macro_events = macro.get("events", [])
+    today = date.today()
+    event_chips = []
+    if isinstance(macro_events, list):
+        for event in macro_events[:5]:
+            event_date = getattr(event, "date", None)
+            title = getattr(event, "title", "")
+            time_et = getattr(event, "time_et", "")
+            impact = getattr(event, "impact", "medium")
+            if not isinstance(event_date, date):
+                continue
+            event_chips.append(
+                f"""<span class="macro-event macro-{html.escape(str(impact))}">
+                  <b>{html.escape(macro_day_label(event_date, today))}</b>
+                  {html.escape(event_date.isoformat())} {html.escape(str(time_et))} ET · {html.escape(str(title))}
+                </span>"""
+            )
+    if not event_chips:
+        event_chips.append('<span class="macro-event macro-medium">未来21天暂无已录入大事</span>')
     return f"""
 <section class="market-bar market-{tone}">
-  <div>
-    <strong>{html.escape(str(env.get("state", "Unavailable")))}</strong>
-    <span>{html.escape(str(env.get("symbol", "QQQ")))} {html.escape(str(env.get("date", "-")))}</span>
+  <div class="market-main">
+    <div>
+      <strong>{html.escape(str(env.get("state", "Unavailable")))}</strong>
+      <span>{html.escape(str(env.get("symbol", "QQQ")))} {html.escape(str(env.get("date", "-")))}</span>
+    </div>
+    <p>{html.escape(str(env.get("symbol", "QQQ")))} 距20MA {float(env.get("dist20", 0.0)):.2f}% / 距50MA {float(env.get("dist50", 0.0)):.2f}% / 20MA {html.escape(str(env.get("ma20_direction", "-")))} / VIX {float(env.get("vix", 0.0)):.1f} {html.escape(str(env.get("vix_label", "")))}。{html.escape(str(env.get("message", "")))}</p>
   </div>
-  <p>{html.escape(str(env.get("symbol", "QQQ")))} 距20MA {float(env.get("dist20", 0.0)):.2f}% / 距50MA {float(env.get("dist50", 0.0)):.2f}% / 20MA {html.escape(str(env.get("ma20_direction", "-")))} / VIX {float(env.get("vix", 0.0)):.1f} {html.escape(str(env.get("vix_label", "")))}。{html.escape(str(env.get("message", "")))}</p>
+  <div class="macro-box macro-tone-{macro_tone}">
+    <div>
+      <strong>{html.escape(str(macro.get("label", "宏观日历")))}</strong>
+      <span>{html.escape(str(macro.get("message", "")))}</span>
+    </div>
+    <div class="macro-events">{"".join(event_chips)}</div>
+    <p class="macro-links">来源：
+      <a href="https://www.bls.gov/schedule/2026/home.htm" target="_blank">BLS</a>
+      <a href="https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" target="_blank">Fed</a>
+      <a href="https://www.bea.gov/news/schedule/full" target="_blank">BEA</a>
+    </p>
+  </div>
 </section>
 """
 
@@ -612,14 +669,25 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .stat-card {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 10px 12px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
 .stat-label {{ color: #6b7280; font-size: 11px; font-weight: 800; text-transform: uppercase; margin-bottom: 6px; }}
 .stat-value {{ color: #131722; font-size: 18px; font-weight: 800; }}
-.market-bar {{ display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid #d6dbe3; border-left-width: 4px; border-radius: 6px; background: #fff; padding: 10px 12px; margin: 0 0 14px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
-.market-bar div {{ display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }}
+.market-bar {{ display: grid; grid-template-columns: minmax(280px, .9fr) minmax(360px, 1.3fr); align-items: start; gap: 14px; border: 1px solid #d6dbe3; border-left-width: 4px; border-radius: 6px; background: #fff; padding: 10px 12px; margin: 0 0 14px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
+.market-bar .market-main > div, .macro-box > div:first-child {{ display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }}
 .market-bar strong {{ font-size: 15px; }}
 .market-bar span, .market-bar p {{ color: #5d6675; font-size: 13px; margin: 0; line-height: 1.45; }}
 .market-good {{ border-left-color: #089981; }}
 .market-warn {{ border-left-color: #f59e0b; }}
 .market-bad {{ border-left-color: #f23645; }}
 .market-neutral {{ border-left-color: #94a3b8; }}
+.macro-box {{ border-left: 1px solid #e3e7ee; padding-left: 14px; }}
+.macro-box strong {{ color: #131722; }}
+.macro-events {{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }}
+.macro-event {{ display: inline-flex; align-items: center; gap: 5px; border: 1px solid #e3e7ee; border-radius: 999px; padding: 4px 8px; background: #f8fafc; color: #334155; font-size: 12px; white-space: nowrap; }}
+.macro-event b {{ color: #131722; }}
+.macro-high {{ border-color: #ffc9cf; background: #fff5f6; color: #b42332; }}
+.macro-medium {{ border-color: #fed7aa; background: #fff7ed; color: #9a4f00; }}
+.macro-tone-bad strong {{ color: #d12030; }}
+.macro-tone-warn strong {{ color: #b26b00; }}
+.macro-links {{ margin-top: 6px !important; font-size: 12px !important; }}
+.macro-links a {{ margin-left: 6px; font-weight: 800; }}
 .toolbar {{ display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }}
 .toolbar .links {{ margin: 0; }}
 .latest-scan-card {{ margin: 0 0 20px; }}
@@ -781,6 +849,9 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
     def value(name: str, default: str) -> str:
         return html.escape(field(params, name, default))
 
+    b1_trend_checked = " checked" if checkbox_field(params, "b1_require_20ma_gt_50ma", False) else ""
+    b1_trend_text = " + 20MA>50MA" if checkbox_field(params, "b1_require_20ma_gt_50ma", False) else ""
+
     def selected(current: str, expected: str) -> str:
         return " selected" if current == expected else ""
 
@@ -812,8 +883,15 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
   <label>滑点 %<input name="slippage_pct" value="{value("slippage_pct", "0")}"></label>
   <label>均线周期<input name="ma_length" value="{value("ma_length", "5")}"></label>
   <label>均量周期<input name="vol_length" id="vol_length" value="{value("vol_length", "20")}"></label>
+  <label>连续放量天数<input name="vol_high_days" value="{value("vol_high_days", "3")}"></label>
+  <label>连续放量倍数<input name="vol_high_multiplier" value="{value("vol_high_multiplier", "1.0")}"></label>
   <label>巨量倍数<input name="vol_multiplier" value="{value("vol_multiplier", "1.45")}"></label>
+  <label>巨量观察窗口<input name="massive_window" value="{value("massive_window", "7")}"></label>
+  <label>巨量最少次数<input name="massive_min_count" value="{value("massive_min_count", "1")}"></label>
+  <label>巨量最多次数<input name="massive_max_count" value="{value("massive_max_count", "2")}"></label>
+  <label class="checkbox-label"><input type="checkbox" name="b1_require_20ma_gt_50ma" value="1"{b1_trend_checked}> B1要求20MA&gt;50MA</label>
   <label>跌破均线止损 %<input name="stop_5ma_pct" value="{value("stop_5ma_pct", "7.5")}"></label>
+  <label>连续跌破20MA天数<input name="below_20ma_stop_days" value="{value("below_20ma_stop_days", "2")}"></label>
   <label>成本强制止损 %<input name="hard_stop_pct" value="{value("hard_stop_pct", "20")}"></label>
   <label>反抽距离 %<input name="reentry_pct" value="{value("reentry_pct", "4.5")}"></label>
   <button type="submit">运行回测</button>
@@ -1982,6 +2060,13 @@ def run_strategy(params: dict[str, list[str]]) -> str:
         stop_5ma_pct=number_field(params, "stop_5ma_pct", 7.5),
         hard_stop_pct=number_field(params, "hard_stop_pct", 20),
         reentry_pct=number_field(params, "reentry_pct", 4.5),
+        vol_high_days=int(number_field(params, "vol_high_days", 3)),
+        vol_high_multiplier=number_field(params, "vol_high_multiplier", 1.0),
+        massive_window=int(number_field(params, "massive_window", 7)),
+        massive_min_count=int(number_field(params, "massive_min_count", 1)),
+        massive_max_count=int(number_field(params, "massive_max_count", 2)),
+        b1_require_20ma_gt_50ma=checkbox_field(params, "b1_require_20ma_gt_50ma", False),
+        below_20ma_stop_days=int(number_field(params, "below_20ma_stop_days", 2)),
     )
     summary = summarize(trades, equity_curve, initial_cash)
     benchmark = build_benchmark(benchmark_symbol, start, end, initial_cash)
@@ -1994,7 +2079,19 @@ def run_strategy(params: dict[str, list[str]]) -> str:
     report_path = REPORT_DIR / f"{stem}_report.html"
     trades_path = REPORT_DIR / f"{stem}_trades.csv"
     equity_path = REPORT_DIR / f"{stem}_equity.csv"
-    make_report(report_path, f"{symbol} {strategy_name} backtest {start} to {end}", bars, trades, equity_curve, summary, benchmark=benchmark)
+    strategy_settings = {
+        "vol_high_days": int(number_field(params, "vol_high_days", 3)),
+        "vol_high_multiplier": number_field(params, "vol_high_multiplier", 1.0),
+        "massive_window": int(number_field(params, "massive_window", 7)),
+        "massive_min_count": int(number_field(params, "massive_min_count", 1)),
+        "massive_max_count": int(number_field(params, "massive_max_count", 2)),
+        "b1_require_20ma_gt_50ma": checkbox_field(params, "b1_require_20ma_gt_50ma", False),
+        "reentry_pct": number_field(params, "reentry_pct", 4.5),
+        "stop_5ma_pct": number_field(params, "stop_5ma_pct", 7.5),
+        "hard_stop_pct": number_field(params, "hard_stop_pct", 20),
+        "below_20ma_stop_days": int(number_field(params, "below_20ma_stop_days", 2)),
+    }
+    make_report(report_path, f"{symbol} {strategy_name} backtest {start} to {end}", bars, trades, equity_curve, summary, benchmark=benchmark, strategy_settings=strategy_settings)
     write_trades(trades_path, trades)
     write_equity(equity_path, equity_curve)
 
@@ -2026,6 +2123,8 @@ def render_batch_form(params: dict[str, list[str]] | None = None) -> str:
     def value(name: str, default: str) -> str:
         return html.escape(field(params, name, default))
 
+    b1_trend_checked = " checked" if checkbox_field(params, "b1_require_20ma_gt_50ma", False) else ""
+
     return f"""
 <section class="page-head">
   <div>
@@ -2045,8 +2144,15 @@ def render_batch_form(params: dict[str, list[str]] | None = None) -> str:
   <label>滑点 %<input name="slippage_pct" value="{value("slippage_pct", "0")}"></label>
   <label>均线周期<input name="ma_length" value="{value("ma_length", "5")}"></label>
   <label>均量周期<input name="vol_length" value="{value("vol_length", "20")}"></label>
+  <label>连续放量天数<input name="vol_high_days" value="{value("vol_high_days", "3")}"></label>
+  <label>连续放量倍数<input name="vol_high_multiplier" value="{value("vol_high_multiplier", "1.0")}"></label>
   <label>巨量倍数<input name="vol_multiplier" value="{value("vol_multiplier", "1.45")}"></label>
+  <label>巨量观察窗口<input name="massive_window" value="{value("massive_window", "7")}"></label>
+  <label>巨量最少次数<input name="massive_min_count" value="{value("massive_min_count", "1")}"></label>
+  <label>巨量最多次数<input name="massive_max_count" value="{value("massive_max_count", "2")}"></label>
+  <label class="checkbox-label"><input type="checkbox" name="b1_require_20ma_gt_50ma" value="1"{b1_trend_checked}> B1要求20MA&gt;50MA</label>
   <label>跌破均线止损 %<input name="stop_5ma_pct" value="{value("stop_5ma_pct", "7.5")}"></label>
+  <label>连续跌破20MA天数<input name="below_20ma_stop_days" value="{value("below_20ma_stop_days", "2")}"></label>
   <label>成本强制止损 %<input name="hard_stop_pct" value="{value("hard_stop_pct", "20")}"></label>
   <label>反抽距离 %<input name="reentry_pct" value="{value("reentry_pct", "4.5")}"></label>
   <button type="submit">运行批量回测</button>
@@ -2080,6 +2186,13 @@ def run_batch_backtest(params: dict[str, list[str]]) -> str:
                 stop_5ma_pct=number_field(params, "stop_5ma_pct", 7.5),
                 hard_stop_pct=number_field(params, "hard_stop_pct", 20),
                 reentry_pct=number_field(params, "reentry_pct", 4.5),
+                vol_high_days=int(number_field(params, "vol_high_days", 3)),
+                vol_high_multiplier=number_field(params, "vol_high_multiplier", 1.0),
+                massive_window=int(number_field(params, "massive_window", 7)),
+                massive_min_count=int(number_field(params, "massive_min_count", 1)),
+                massive_max_count=int(number_field(params, "massive_max_count", 2)),
+                b1_require_20ma_gt_50ma=checkbox_field(params, "b1_require_20ma_gt_50ma", False),
+                below_20ma_stop_days=int(number_field(params, "below_20ma_stop_days", 2)),
             )
             rows.append((symbol, summarize(trades, equity_curve, initial_cash)))
         except Exception as exc:
@@ -2675,6 +2788,12 @@ def scan_symbol_candidate(
     min_price: float,
     min_avg_dollar_volume: float,
     metadata: dict[str, object] | None,
+    vol_high_days: int = 3,
+    vol_high_multiplier: float = 1.0,
+    massive_window: int = 7,
+    massive_min_count: int = 1,
+    massive_max_count: int = 2,
+    b1_require_20ma_gt_50ma: bool = False,
 ) -> tuple[str, SignalResult | None, str | None]:
     try:
         signal_start = min(start, (date.fromisoformat(end) - timedelta(days=420)).isoformat())
@@ -2688,6 +2807,12 @@ def scan_symbol_candidate(
             reentry_pct,
             min_price,
             min_avg_dollar_volume,
+            vol_high_days,
+            vol_high_multiplier,
+            massive_window,
+            massive_min_count,
+            massive_max_count,
+            b1_require_20ma_gt_50ma,
         )
         if not result:
             return symbol, None, None
@@ -2837,6 +2962,8 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
 
     asset_type = field(params, "asset_type", "stocks")
     hide_weak_checked = " checked" if field(params, "hide_weak", "1" if DEFAULT_HIDE_WEAK_CANDIDATES else "0") == "1" else ""
+    b1_trend_checked = " checked" if checkbox_field(params, "b1_require_20ma_gt_50ma", False) else ""
+    b1_trend_text = " + 20MA>50MA" if checkbox_field(params, "b1_require_20ma_gt_50ma", False) else ""
     earnings_filter = field(params, "earnings_filter", "show")
     default_symbols = "ASTS,NVDA,TSLA,AAPL,MSFT,QQQ"
     return f"""
@@ -2852,8 +2979,8 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
 <section class="result">
   <strong>当前美股选股策略</strong>
   <div class="scan-facts">
-    <span class="scan-fact"><span>B1 起爆</span>站上5MA + 连续3日放量 + 7日内1-2次巨量 + 5MA向上</span>
-    <span class="scan-fact"><span>B2 回踩</span>已有B1趋势后，巨量阳线回踩5MA 4.5%内</span>
+    <span class="scan-fact"><span>B1 起爆</span>站上5MA + 连续{value("vol_high_days", "3")}日成交量&gt;均量×{value("vol_high_multiplier", "1.0")} + {value("massive_window", "7")}日内{value("massive_min_count", "1")}-{value("massive_max_count", "2")}次巨量 + 5MA向上{b1_trend_text}</span>
+    <span class="scan-fact"><span>B2 回踩</span>已有B1趋势后，巨量阳线回踩5MA {value("reentry_pct", "4.5")}%内</span>
     <span class="scan-fact"><span>执行</span>B1到50%，B2到100%，下一交易日开盘</span>
     <span class="scan-fact"><span>卖出</span>5MA下7.5% / 连续2日跌破20MA / 跌破成本20%</span>
   </div>
@@ -2901,7 +3028,13 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
   </label>
   <label>均线周期<input name="ma_length" value="{value("ma_length", "5")}"></label>
   <label>均量周期<input name="vol_length" value="{value("vol_length", "20")}"></label>
+  <label>连续放量天数<input name="vol_high_days" value="{value("vol_high_days", "3")}"></label>
+  <label>连续放量倍数<input name="vol_high_multiplier" value="{value("vol_high_multiplier", "1.0")}"></label>
   <label>巨量倍数<input name="vol_multiplier" value="{value("vol_multiplier", "1.45")}"></label>
+  <label>巨量观察窗口<input name="massive_window" value="{value("massive_window", "7")}"></label>
+  <label>巨量最少次数<input name="massive_min_count" value="{value("massive_min_count", "1")}"></label>
+  <label>巨量最多次数<input name="massive_max_count" value="{value("massive_max_count", "2")}"></label>
+  <label class="checkbox-label"><input type="checkbox" name="b1_require_20ma_gt_50ma" value="1"{b1_trend_checked}> B1要求20MA&gt;50MA</label>
   <label>反抽距离 %<input name="reentry_pct" value="{value("reentry_pct", "4.5")}"></label>
   <button type="submit">开始选股</button>
 </form>
@@ -3326,6 +3459,12 @@ def run_scanner(params: dict[str, list[str]]) -> str:
     vol_length = int(number_field(params, "vol_length", 20))
     vol_multiplier = number_field(params, "vol_multiplier", 1.45)
     reentry_pct = number_field(params, "reentry_pct", 4.5)
+    vol_high_days = int(number_field(params, "vol_high_days", 3))
+    vol_high_multiplier = number_field(params, "vol_high_multiplier", 1.0)
+    massive_window = int(number_field(params, "massive_window", 7))
+    massive_min_count = int(number_field(params, "massive_min_count", 1))
+    massive_max_count = int(number_field(params, "massive_max_count", 2))
+    b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", False)
     min_price = number_field(params, "min_price", 5)
     min_avg_dollar_volume = number_field(params, "min_avg_dollar_volume", 20_000_000)
     if source == "auto":
@@ -3358,7 +3497,22 @@ def run_scanner(params: dict[str, list[str]]) -> str:
         try:
             signal_start = min(start, (date.fromisoformat(end) - timedelta(days=420)).isoformat())
             bars = fetch_bars("yfinance", symbol, signal_start, end, "qfq", None)
-            result = latest_b_signal(symbol, bars, ma_length, vol_length, vol_multiplier, reentry_pct, min_price, min_avg_dollar_volume)
+            result = latest_b_signal(
+                symbol,
+                bars,
+                ma_length,
+                vol_length,
+                vol_multiplier,
+                reentry_pct,
+                min_price,
+                min_avg_dollar_volume,
+                vol_high_days,
+                vol_high_multiplier,
+                massive_window,
+                massive_min_count,
+                massive_max_count,
+                b1_require_20ma_gt_50ma,
+            )
             if result:
                 result = enrich_signal_result(result, metadata_by_symbol.get(symbol))
                 try:
@@ -3433,6 +3587,12 @@ def render_candidate_detail(params: dict[str, list[str]]) -> str:
         number_field(params, "reentry_pct", 4.5),
         number_field(params, "min_price", 5),
         number_field(params, "min_avg_dollar_volume", 20_000_000),
+        int(number_field(params, "vol_high_days", 3)),
+        number_field(params, "vol_high_multiplier", 1.0),
+        int(number_field(params, "massive_window", 7)),
+        int(number_field(params, "massive_min_count", 1)),
+        int(number_field(params, "massive_max_count", 2)),
+        checkbox_field(params, "b1_require_20ma_gt_50ma", False),
     )
     detail_panel = ""
     if signal_result:
@@ -4033,6 +4193,12 @@ def execute_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
         vol_length = int(number_field(params, "vol_length", 20))
         vol_multiplier = number_field(params, "vol_multiplier", 1.45)
         reentry_pct = number_field(params, "reentry_pct", 4.5)
+        vol_high_days = int(number_field(params, "vol_high_days", 3))
+        vol_high_multiplier = number_field(params, "vol_high_multiplier", 1.0)
+        massive_window = int(number_field(params, "massive_window", 7))
+        massive_min_count = int(number_field(params, "massive_min_count", 1))
+        massive_max_count = int(number_field(params, "massive_max_count", 2))
+        b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", False)
         min_price = number_field(params, "min_price", 5)
         min_avg_dollar_volume = number_field(params, "min_avg_dollar_volume", 20_000_000)
 
@@ -4098,6 +4264,12 @@ def execute_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
                         min_price,
                         min_avg_dollar_volume,
                         metadata_by_symbol.get(symbol),
+                        vol_high_days,
+                        vol_high_multiplier,
+                        massive_window,
+                        massive_min_count,
+                        massive_max_count,
+                        b1_require_20ma_gt_50ma,
                     )
                     pending[future] = symbol
                     next_index += 1
