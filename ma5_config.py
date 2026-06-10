@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import math
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -31,7 +32,10 @@ def field(params: dict[str, list[str]], name: str, default: str) -> str:
 
 
 def number_field(params: dict[str, list[str]], name: str, default: float) -> float:
-    return float(field(params, name, str(default)))
+    value = float(field(params, name, str(default)))
+    if not math.isfinite(value):
+        raise ValueError(f"{name} 必须是有效数字")
+    return value
 
 
 def min_backtest_days(vol_length: int) -> int:

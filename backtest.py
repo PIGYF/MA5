@@ -73,6 +73,30 @@ def parse_float(value: str) -> float:
     return float(clean)
 
 
+def is_valid_number(value: float) -> bool:
+    return isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def is_valid_bar(bar: Bar) -> bool:
+    prices = (bar.open, bar.high, bar.low, bar.close)
+    if not all(is_valid_number(value) and value > 0 for value in prices):
+        return False
+    if not is_valid_number(bar.volume) or bar.volume < 0:
+        return False
+    if bar.high < max(bar.open, bar.close, bar.low):
+        return False
+    if bar.low > min(bar.open, bar.close, bar.high):
+        return False
+    return True
+
+
+def clean_bars(bars: list[Bar]) -> list[Bar]:
+    cleaned = [bar for bar in bars if bar.date and is_valid_bar(bar)]
+    if len(cleaned) < 2:
+        raise ValueError("行情数据有效行不足，可能包含空值或 NaN。请换一个区间或刷新数据。")
+    return cleaned
+
+
 def read_bars(csv_path: Path) -> list[Bar]:
     with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
@@ -99,6 +123,7 @@ def read_bars(csv_path: Path) -> list[Bar]:
                 )
             )
 
+    bars = clean_bars(bars)
     if len(bars) < 2:
         raise ValueError("CSV 至少需要两行行情数据")
     return bars
@@ -124,7 +149,7 @@ def read_price_cache(symbol: str) -> list[Bar]:
 
 def write_price_cache(symbol: str, bars: list[Bar]) -> None:
     PRICE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    merged = {bar.date: bar for bar in bars}
+    merged = {bar.date: bar for bar in bars if is_valid_bar(bar)}
     ordered = [merged[key] for key in sorted(merged)]
     if len(ordered) > PRICE_CACHE_MAX_BARS:
         ordered = ordered[-PRICE_CACHE_MAX_BARS:]
@@ -675,7 +700,11 @@ def backtest(
 
 
 def summarize(trades: list[Trade], equity_curve: list[dict[str, float | str]], initial_cash: float) -> dict[str, float | int]:
+    if initial_cash <= 0 or not math.isfinite(initial_cash):
+        raise ValueError("初始资金必须大于 0")
     final_equity = float(equity_curve[-1]["equity"])
+    if not math.isfinite(final_equity):
+        raise ValueError("权益曲线包含 NaN，可能是行情数据异常。请刷新数据后重试。")
     net_profit = final_equity - initial_cash
     returns_pct = net_profit / initial_cash * 100
 
@@ -1330,7 +1359,7 @@ def make_report(
   <div class="compare-note">{labels['strategy_return']} {summary['return_pct']:.2f}% / {buy_hold_symbol} 买入持有 {buy_hold_return:.2f}% / {benchmark_symbol} {labels['benchmark_return']} {benchmark_return:.2f}%</div>
   <div id="compare-chart" class="chart compare-chart"></div>
 </section>
-<script type="application/json" id="benchmark-data">{json.dumps(benchmark_payload, ensure_ascii=False)}</script>
+<script type="application/json" id="benchmark-data">{json.dumps(benchmark_payload, ensure_ascii=False, allow_nan=False)}</script>
 """
 
     cards = [
@@ -1566,7 +1595,7 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
   </div>
 </section>
 </main>
-<script type="application/json" id="chart-data">{json.dumps(chart_payload, ensure_ascii=False)}</script>
+<script type="application/json" id="chart-data">{json.dumps(chart_payload, ensure_ascii=False, allow_nan=False)}</script>
 <script>
 const chartData = JSON.parse(document.getElementById('chart-data').textContent);
 const chartLabels = chartData.labels;
