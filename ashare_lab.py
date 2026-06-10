@@ -58,6 +58,14 @@ class AShareSignalSnapshot:
     red_avg_to_green_avg: float
     top5_red_count: int
     bars_count: int
+    signal_type: str = ""
+    ma5: float = 0.0
+    ma20: float = 0.0
+    volume_ratio: float = 0.0
+    avg_amount_20d: float = 0.0
+    amount_ok: bool = False
+    limit_state: str = ""
+    execution_note: str = ""
 
 
 @dataclass
@@ -1139,47 +1147,65 @@ def load_ashare_universe_for_scan(
     return result
 
 
+def ashare_limit_pct(symbol: str) -> float:
+    clean = normalize_ashare_symbol(symbol)
+    if clean.startswith(("4", "8", "9")):
+        return 30.0
+    if clean.startswith(("3", "688")):
+        return 20.0
+    return 10.0
+
+
+def ashare_to_backtest_bars(bars: list[AShareBar]):
+    from backtest import Bar
+
+    return [Bar(date=bar.date, open=bar.open, high=bar.high, low=bar.low, close=bar.close, volume=bar.volume) for bar in bars]
+
+
 def latest_ashare_signal(symbol: str, j_threshold: float = 14.0, fetch_name_value: bool = True) -> AShareSignalSnapshot:
     clean = normalize_ashare_symbol(symbol)
     bars, source = fetch_ashare_bars(clean)
     if len(bars) < 130:
         raise ValueError(f"数据不足：至少需要 130 根日 K，当前 {len(bars)} 根。")
 
-    closes = [bar.close for bar in bars]
-    highs = [bar.high for bar in bars]
-    lows = [bar.low for bar in bars]
-    volumes = [bar.volume for bar in bars]
+    from backtest import build_ratchet_inputs, rolling_sma
 
-    ma14 = sma(closes, 14)
-    ma28 = sma(closes, 28)
-    ma57 = sma(closes, 57)
-    ma114 = sma(closes, 114)
-    ema1 = ema(closes, 10)
-    zx_short = ema(ema1, 10)
-    zx_multi: list[float | None] = [
-        None if any(value is None for value in group) else sum(value for value in group if value is not None) / 4
-        for group in zip(ma14, ma28, ma57, ma114)
-    ]
-
-    rsv: list[float] = []
-    for i, close in enumerate(closes):
-        if i < 8:
-            rsv.append(50.0)
-            continue
-        high = max(highs[i - 8 : i + 1])
-        low = min(lows[i - 8 : i + 1])
-        rsv.append(50.0 if high == low else 100 * (close - low) / (high - low))
-    k = sma(rsv, 3)
-    k_clean = [50.0 if value is None else value for value in k]
-    d = sma(k_clean, 3)
-    j = [None if k[i] is None or d[i] is None else 3 * k[i] - 2 * d[i] for i in range(len(closes))]
+    bt_bars = ashare_to_backtest_bars(bars)
+    closes = [bar.close for bar in bt_bars]
+    volumes = [bar.volume for bar in bt_bars]
+    amounts = [bar.amount if bar.amount > 0 else bar.close * bar.volume for bar in bars]
+    ma5_series = rolling_sma(closes, 5)
+    ma20_series = rolling_sma(closes, 20)
+    vol_ma20 = rolling_sma(volumes, 20)
+    avg_amount20_series = rolling_sma(amounts, 20)
+    buy_signal, _, ma, vol_ma, buy_target_pct, buy_stage = build_ratchet_inputs(
+        bt_bars,
+        ma_length=5,
+        vol_length=20,
+        vol_multiplier=1.8,
+        reentry_pct=0.045,
+        vol_high_days=2,
+        vol_high_multiplier=1.0,
+        massive_window=7,
+        massive_min_count=1,
+        massive_max_count=2,
+        b1_require_20ma_gt_50ma=False,
+    )
 
     i = len(bars) - 1
-    if zx_multi[i] is None or zx_multi[i - 1] is None or j[i] is None:
-        raise ValueError("指标数据不足。")
-
-    trend_ok = zx_short[i] > zx_multi[i] and zx_multi[i] > zx_multi[i - 1]
-    j_oversold = j[i] < j_threshold
+    latest = bt_bars[i]
+    previous_close = bt_bars[i - 1].close if i > 0 else 0.0
+    limit_pct = ashare_limit_pct(clean)
+    limit_up = previous_close > 0 and latest.close >= previous_close * (1 + (limit_pct - 0.35) / 100)
+    limit_down = previous_close > 0 and latest.close <= previous_close * (1 - (limit_pct - 0.35) / 100)
+    avg_amount_20d = float(avg_amount20_series[i] or 0.0)
+    amount_ok = avg_amount_20d >= 100_000_000
+    ma5 = float(ma5_series[i] or 0.0)
+    ma20 = float(ma20_series[i] or 0.0)
+    volume_ratio = latest.volume / float(vol_ma20[i] or 0.0) if vol_ma20[i] else 0.0
+    trend_ok = bool(ma5 and ma20 and latest.close > ma5 and ma5 > ma20 and i > 0 and ma5_series[i - 1] and ma5 > float(ma5_series[i - 1]))
+    signal_type = str(buy_stage[i] or "")
+    hard_candidate = bool(buy_signal[i] and amount_ok)
 
     base_start = max(0, i - 80)
     base_end = max(0, i - 20)
@@ -1218,10 +1244,10 @@ def latest_ashare_signal(symbol: str, j_threshold: float = 14.0, fetch_name_valu
     volume_score += min(1.0, avg10_to_base / 1.5) if base_volume else 0.0
     volume_score += min(1.0, red_to_green / 1.3) if green_avg else 0.0
     volume_score += min(1.0, top5_red_count / 3) if top5 else 0.0
-    volume_score += 0.5 if red_volumes and len(red_volumes) > len(green_volumes) else 0.0
+    volume_score += min(0.5, volume_ratio / 2) if volume_ratio else 0.0
     volume_score = round(min(5.0, volume_score), 2)
-    hard_candidate = bool(trend_ok and j_oversold)
-    if hard_candidate and volume_score >= 4.0:
+
+    if hard_candidate and volume_score >= 4.0 and not limit_up:
         candidate_rating = "Strong"
     elif hard_candidate and volume_score >= 2.5:
         candidate_rating = "Medium"
@@ -1229,6 +1255,14 @@ def latest_ashare_signal(symbol: str, j_threshold: float = 14.0, fetch_name_valu
         candidate_rating = "Watch"
     else:
         candidate_rating = "None"
+
+    execution_note = ""
+    if limit_up:
+        execution_note = "信号日接近涨停，次日若一字板或高开过大应跳过"
+    elif avg_amount_20d < 200_000_000:
+        execution_note = "成交额达标但不高，实盘需控制仓位"
+    else:
+        execution_note = "按 A 股执行规则：次日非涨停且高开不超过 6% 才买入"
 
     name = ""
     sector = ""
@@ -1241,12 +1275,12 @@ def latest_ashare_signal(symbol: str, j_threshold: float = 14.0, fetch_name_valu
         data_source=source,
         latest_date=bars[i].date,
         close=bars[i].close,
-        zx_short_trend=zx_short[i],
-        zx_multi_trend=zx_multi[i] or 0.0,
-        zx_multi_slope=(zx_multi[i] or 0.0) - (zx_multi[i - 1] or 0.0),
-        j_value=j[i] or 0.0,
+        zx_short_trend=ma5,
+        zx_multi_trend=ma20,
+        zx_multi_slope=(ma5 - float(ma5_series[i - 1] or ma5)) if i > 0 else 0.0,
+        j_value=volume_ratio,
         trend_ok=bool(trend_ok),
-        j_oversold=bool(j_oversold),
+        j_oversold=bool(amount_ok),
         volume_structure_ok=bool(volume_structure_ok),
         signal=hard_candidate,
         volume_score=volume_score,
@@ -1260,8 +1294,15 @@ def latest_ashare_signal(symbol: str, j_threshold: float = 14.0, fetch_name_valu
         red_avg_to_green_avg=red_to_green,
         top5_red_count=top5_red_count,
         bars_count=len(bars),
+        signal_type=signal_type,
+        ma5=ma5,
+        ma20=ma20,
+        volume_ratio=volume_ratio,
+        avg_amount_20d=avg_amount_20d,
+        amount_ok=amount_ok,
+        limit_state="涨停" if limit_up else "跌停" if limit_down else "正常",
+        execution_note=execution_note,
     )
-
 
 def scan_ashare_candidates(
     min_market_cap_100m: float = 50.0,

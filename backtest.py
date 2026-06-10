@@ -301,6 +301,46 @@ def rolling_sma(values: list[float], length: int) -> list[float | None]:
     return result
 
 
+def rolling_optional_sma(values: list[float | None], length: int) -> list[float | None]:
+    result: list[float | None] = []
+    for index in range(len(values)):
+        if index + 1 < length:
+            result.append(None)
+            continue
+        window = values[index + 1 - length : index + 1]
+        if any(value is None for value in window):
+            result.append(None)
+        else:
+            result.append(sum(float(value) for value in window) / length)
+    return result
+
+
+def calculate_kdj(
+    bars: list[Bar],
+    length: int = 9,
+    signal: int = 3,
+) -> tuple[list[float | None], list[float | None], list[float | None]]:
+    rsv_values: list[float | None] = []
+    for index, bar in enumerate(bars):
+        if index + 1 < length:
+            rsv_values.append(None)
+            continue
+        window = bars[index + 1 - length : index + 1]
+        highest_high = max(item.high for item in window)
+        lowest_low = min(item.low for item in window)
+        if highest_high == lowest_low:
+            rsv_values.append(50.0)
+        else:
+            rsv_values.append((bar.close - lowest_low) / (highest_high - lowest_low) * 100)
+    k_values = rolling_optional_sma(rsv_values, signal)
+    d_values = rolling_optional_sma(k_values, signal)
+    j_values = [
+        None if k is None or d is None else 3 * k - 2 * d
+        for k, d in zip(k_values, d_values)
+    ]
+    return k_values, d_values, j_values
+
+
 def rolling_sum(values: list[int], length: int) -> list[int | None]:
     result = []
     window = deque()
@@ -320,6 +360,24 @@ def apply_buy_price(open_price: float, slippage_pct: float) -> float:
 
 def apply_sell_price(open_price: float, slippage_pct: float) -> float:
     return open_price * (1 - slippage_pct / 100)
+
+
+def price_change_pct(value: float, previous_close: float) -> float:
+    return (value / previous_close - 1) * 100 if previous_close > 0 else 0.0
+
+
+def is_limit_up(bar: Bar, previous_close: float, limit_pct: float, tolerance_pct: float = 0.35) -> bool:
+    if previous_close <= 0 or limit_pct <= 0:
+        return False
+    threshold = previous_close * (1 + (limit_pct - tolerance_pct) / 100)
+    return bar.open >= threshold and bar.high >= threshold and bar.close >= threshold
+
+
+def is_limit_down(bar: Bar, previous_close: float, limit_pct: float, tolerance_pct: float = 0.35) -> bool:
+    if previous_close <= 0 or limit_pct <= 0:
+        return False
+    threshold = previous_close * (1 - (limit_pct - tolerance_pct) / 100)
+    return bar.open <= threshold and bar.low <= threshold and bar.close <= threshold
 
 
 def build_signals(
@@ -374,6 +432,7 @@ def build_ratchet_inputs(
     massive_min_count: int = 1,
     massive_max_count: int = 2,
     b1_require_20ma_gt_50ma: bool = False,
+    require_5ma_gt_20ma: bool = True,
 ) -> tuple[list[bool], list[bool], list[float | None], list[float | None], list[float], list[str]]:
     closes = [bar.close for bar in bars]
     volumes = [bar.volume for bar in bars]
@@ -399,8 +458,9 @@ def build_ratchet_inputs(
         was_trend_confirmed = trend_confirmed
         ma5_is_rising = i > 0 and ma[i] is not None and ma[i - 1] is not None and ma[i] > ma[i - 1]
         vol_days_high = i >= vol_high_days - 1 and all(is_vol_high[j] for j in range(i - vol_high_days + 1, i + 1))
-        has_massive_vol = massive_counts[i] is not None and massive_min_count <= massive_counts[i] <= massive_max_count
+        has_massive_vol = massive_counts[i] is not None and massive_counts[i] >= massive_min_count
         price_above_ma = ma[i] is not None and bar.close > ma[i]
+        ma5_gt_20 = ma[i] is not None and ma20[i] is not None and ma[i] > ma20[i]
         ma20_gt_50 = ma20[i] is not None and ma50[i] is not None and ma20[i] > ma50[i]
         dist_to_ma = abs(bar.close - ma[i]) / ma[i] if ma[i] else 0.0
 
@@ -410,9 +470,14 @@ def build_ratchet_inputs(
         near_stage_high = recent_high_60 > 0 and bar.close >= recent_high_60 * 0.80
         bull_quality_ok = above_ma50 and ma50_rising and near_stage_high
 
-        trend_confirm = price_above_ma and vol_days_high and has_massive_vol and ma5_is_rising
-        if b1_require_20ma_gt_50ma:
-            trend_confirm = trend_confirm and ma20_gt_50
+        trend_confirm = (
+            price_above_ma
+            and vol_days_high
+            and has_massive_vol
+            and ma5_is_rising
+            and ma20_gt_50
+            and (ma5_gt_20 or not require_5ma_gt_20ma)
+        )
         if trend_confirm:
             trend_confirmed = True
 
@@ -428,6 +493,7 @@ def build_ratchet_inputs(
             and dist_to_ma <= reentry_pct
             and bar.close > bar.open
             and ma5_is_rising
+            and (ma5_gt_20 or not require_5ma_gt_20ma)
             and bull_quality_ok
             and upper_shadow_ok
         )
@@ -469,7 +535,15 @@ def backtest(
     massive_min_count: int = 1,
     massive_max_count: int = 2,
     b1_require_20ma_gt_50ma: bool = False,
+    require_5ma_gt_20ma: bool = True,
     below_20ma_stop_days: int = 2,
+    market: str = "us",
+    limit_pct: float = 0.0,
+    buy_limit_tolerance_pct: float = 0.35,
+    sell_limit_tolerance_pct: float = 0.35,
+    max_buy_gap_pct: float = 0.0,
+    stamp_duty_pct: float = 0.0,
+    time_stop_days: int = 0,
 ) -> tuple[list[Trade], list[dict[str, float | str]]]:
     if strategy_name == "ratchet":
         buy_signal, _, ma, vol_ma, buy_target_pct, buy_stage = build_ratchet_inputs(
@@ -484,6 +558,7 @@ def backtest(
             massive_min_count,
             massive_max_count,
             b1_require_20ma_gt_50ma,
+            require_5ma_gt_20ma,
         )
         sell_signal = [False] * len(bars)
         closes = [bar.close for bar in bars]
@@ -522,78 +597,102 @@ def backtest(
         buy_action_target_pct = 0.0
         buy_action_stage = ""
         sell_action = ""
+        previous_close = bars[i - 1].close if i > 0 else 0.0
+        carry_pending_action = None
+        carry_pending_signal_date = ""
+        carry_pending_signal_close = 0.0
+        carry_pending_exit_reason = ""
         if pending_action == "buy":
-            fill_price = apply_buy_price(bar.open, slippage_pct)
-            cost_per_share = fill_price * (1 + commission_pct / 100)
-            old_shares = shares
-            current_equity_at_fill = cash + shares * fill_price
-            target_value = current_equity_at_fill * max(0.0, min(100.0, pending_target_pct)) / 100
-            current_position_value = shares * fill_price
-            shares_to_buy = math.floor(max(0.0, target_value - current_position_value) / cost_per_share)
-            if shares_to_buy > 0:
-                buy_action = f"买到{pending_target_pct:.0f}%" if old_shares == 0 else f"加到{pending_target_pct:.0f}%"
+            gap_pct = price_change_pct(bar.open, previous_close)
+            blocked_reason = ""
+            if market == "cn" and is_limit_up(bar, previous_close, limit_pct, buy_limit_tolerance_pct):
+                blocked_reason = "涨停未成交"
+            elif market == "cn" and max_buy_gap_pct > 0 and gap_pct > max_buy_gap_pct:
+                blocked_reason = f"高开{gap_pct:.1f}%跳过"
+            if blocked_reason:
+                buy_action = blocked_reason
                 buy_action_signal_date = pending_signal_date
                 buy_action_target_pct = pending_target_pct
                 buy_action_stage = pending_stage
-                old_position_cost = entry_price * old_shares
-                shares = old_shares + shares_to_buy
-                cash -= shares_to_buy * cost_per_share
-                if old_shares > 0:
-                    entry_price = (old_position_cost + fill_price * shares_to_buy) / shares
-                    max_high_since_entry = max(max_high_since_entry, bar.high)
-                    min_low_since_entry = min(min_low_since_entry, bar.low)
-                    highest_close_since_entry = max(highest_close_since_entry, bar.close)
-                else:
-                    entry_price = fill_price
-                    entry_date = bar.date
-                    entry_signal_date = pending_signal_date
-                    entry_signal_close = pending_signal_close
-                    entry_index = i
-                    max_high_since_entry = bar.high
-                    min_low_since_entry = bar.low
-                    highest_close_since_entry = bar.close
-                    below_20ma_days = 0
+            else:
+                fill_price = apply_buy_price(bar.open, slippage_pct)
+                cost_per_share = fill_price * (1 + commission_pct / 100)
+                old_shares = shares
+                current_equity_at_fill = cash + shares * fill_price
+                target_value = current_equity_at_fill * max(0.0, min(100.0, pending_target_pct)) / 100
+                current_position_value = shares * fill_price
+                shares_to_buy = math.floor(max(0.0, target_value - current_position_value) / cost_per_share)
+                if shares_to_buy > 0:
+                    buy_action = f"买到{pending_target_pct:.0f}%" if old_shares == 0 else f"加到{pending_target_pct:.0f}%"
+                    buy_action_signal_date = pending_signal_date
+                    buy_action_target_pct = pending_target_pct
+                    buy_action_stage = pending_stage
+                    old_position_cost = entry_price * old_shares
+                    shares = old_shares + shares_to_buy
+                    cash -= shares_to_buy * cost_per_share
+                    if old_shares > 0:
+                        entry_price = (old_position_cost + fill_price * shares_to_buy) / shares
+                        max_high_since_entry = max(max_high_since_entry, bar.high)
+                        min_low_since_entry = min(min_low_since_entry, bar.low)
+                        highest_close_since_entry = max(highest_close_since_entry, bar.close)
+                    else:
+                        entry_price = fill_price
+                        entry_date = bar.date
+                        entry_signal_date = pending_signal_date
+                        entry_signal_close = pending_signal_close
+                        entry_index = i
+                        max_high_since_entry = bar.high
+                        min_low_since_entry = bar.low
+                        highest_close_since_entry = bar.close
+                        below_20ma_days = 0
 
         elif pending_action == "sell" and shares > 0:
-            fill_price = apply_sell_price(bar.open, slippage_pct)
-            gross = shares * fill_price
-            fee = gross * commission_pct / 100
-            cash += gross - fee
-            pnl = (fill_price - entry_price) * shares - fee - (entry_price * shares * commission_pct / 100)
-            pnl_pct = (fill_price / entry_price - 1) * 100 if entry_price else 0.0
-            max_favorable_pct = (max_high_since_entry / entry_price - 1) * 100 if entry_price else 0.0
-            max_drawdown_pct = (1 - min_low_since_entry / entry_price) * 100 if entry_price else 0.0
-            trades.append(
-                Trade(
-                    entry_signal_date=entry_signal_date,
-                    entry_date=entry_date,
-                    entry_signal_close=entry_signal_close,
-                    entry_price=entry_price,
-                    entry_gap_pct=(entry_price / entry_signal_close - 1) * 100 if entry_signal_close else 0.0,
-                    shares=shares,
-                    exit_signal_date=pending_signal_date,
-                    exit_date=bar.date,
-                    exit_signal_close=pending_signal_close,
-                    exit_price=fill_price,
-                    exit_gap_pct=(fill_price / pending_signal_close - 1) * 100 if pending_signal_close else 0.0,
-                    pnl=pnl,
-                    pnl_pct=pnl_pct,
-                    bars_held=i - entry_index,
-                    max_favorable_pct=max_favorable_pct,
-                    max_drawdown_pct=max_drawdown_pct,
-                    exit_reason=pending_exit_reason or "Signal exit",
+            if market == "cn" and is_limit_down(bar, previous_close, limit_pct, sell_limit_tolerance_pct):
+                sell_action = "跌停未成交"
+                carry_pending_action = "sell"
+                carry_pending_signal_date = pending_signal_date
+                carry_pending_signal_close = pending_signal_close
+                carry_pending_exit_reason = (pending_exit_reason or "Signal exit") + " / 跌停顺延"
+            else:
+                fill_price = apply_sell_price(bar.open, slippage_pct)
+                gross = shares * fill_price
+                fee = gross * (commission_pct + stamp_duty_pct) / 100
+                cash += gross - fee
+                pnl = (fill_price - entry_price) * shares - fee - (entry_price * shares * commission_pct / 100)
+                pnl_pct = (fill_price / entry_price - 1) * 100 if entry_price else 0.0
+                max_favorable_pct = (max_high_since_entry / entry_price - 1) * 100 if entry_price else 0.0
+                max_drawdown_pct = (1 - min_low_since_entry / entry_price) * 100 if entry_price else 0.0
+                trades.append(
+                    Trade(
+                        entry_signal_date=entry_signal_date,
+                        entry_date=entry_date,
+                        entry_signal_close=entry_signal_close,
+                        entry_price=entry_price,
+                        entry_gap_pct=(entry_price / entry_signal_close - 1) * 100 if entry_signal_close else 0.0,
+                        shares=shares,
+                        exit_signal_date=pending_signal_date,
+                        exit_date=bar.date,
+                        exit_signal_close=pending_signal_close,
+                        exit_price=fill_price,
+                        exit_gap_pct=(fill_price / pending_signal_close - 1) * 100 if pending_signal_close else 0.0,
+                        pnl=pnl,
+                        pnl_pct=pnl_pct,
+                        bars_held=i - entry_index,
+                        max_favorable_pct=max_favorable_pct,
+                        max_drawdown_pct=max_drawdown_pct,
+                        exit_reason=pending_exit_reason or "Signal exit",
+                    )
                 )
-            )
-            sell_action = "卖出"
-            shares = 0
-            entry_price = 0.0
-            entry_date = ""
-            entry_signal_date = ""
-            entry_signal_close = 0.0
-            max_high_since_entry = 0.0
-            min_low_since_entry = 0.0
-            highest_close_since_entry = 0.0
-            below_20ma_days = 0
+                sell_action = "卖出"
+                shares = 0
+                entry_price = 0.0
+                entry_date = ""
+                entry_signal_date = ""
+                entry_signal_close = 0.0
+                max_high_since_entry = 0.0
+                min_low_since_entry = 0.0
+                highest_close_since_entry = 0.0
+                below_20ma_days = 0
 
         pending_action = None
         pending_signal_date = ""
@@ -601,6 +700,12 @@ def backtest(
         pending_exit_reason = ""
         pending_target_pct = 0.0
         pending_stage = ""
+        if carry_pending_action:
+            pending_action = carry_pending_action
+            pending_signal_date = carry_pending_signal_date
+            pending_signal_close = carry_pending_signal_close
+            pending_exit_reason = carry_pending_exit_reason
+
 
         dynamic_stop = ""
         trend_stop_line = ""
@@ -628,6 +733,8 @@ def backtest(
                 stop_reasons.append("2-day 20MA break")
             if cost_stop:
                 stop_reasons.append("Cost 20% forced stop")
+            if time_stop_days > 0 and i - entry_index >= time_stop_days and highest_close_since_entry <= entry_signal_close:
+                stop_reasons.append(f"{time_stop_days}-day no new high")
             ratchet_sell_today = bool(stop_reasons)
             exit_reason_today = " + ".join(stop_reasons)
             sell_signal[i] = ratchet_sell_today
@@ -1239,6 +1346,7 @@ def make_report(
     vol_ma_values = [None if row["vol_ma"] == "" else float(row["vol_ma"]) for row in equity_curve]
     dynamic_stop_values = [None if row.get("dynamic_stop", "") in ("", None) else float(row["dynamic_stop"]) for row in equity_curve]
     trend_stop_values = [None if row.get("trend_stop", "") in ("", None) else float(row["trend_stop"]) for row in equity_curve]
+    k_values, d_values, j_values = calculate_kdj(bars)
     volume_colors = ["rgba(8,153,129,0.42)" if bar.close >= bar.open else "rgba(242,54,69,0.42)" for bar in bars]
 
     trade_by_entry = {trade.entry_date: trade for trade in trades}
@@ -1303,6 +1411,11 @@ def make_report(
         "ma": [{"time": dates[i], "value": value} for i, value in enumerate(ma_values) if value is not None],
         "ma20": [{"time": dates[i], "value": value} for i, value in enumerate(ma20_values) if value is not None],
         "volMa": [{"time": dates[i], "value": value} for i, value in enumerate(vol_ma_values) if value is not None],
+        "kdjK": [{"time": dates[i], "value": value} for i, value in enumerate(k_values) if value is not None],
+        "kdjD": [{"time": dates[i], "value": value} for i, value in enumerate(d_values) if value is not None],
+        "kdjJ": [{"time": dates[i], "value": value} for i, value in enumerate(j_values) if value is not None],
+        "kdjUpper": [{"time": day, "value": 80} for day in dates],
+        "kdjLower": [{"time": day, "value": 20} for day in dates],
         "dynamicStop": [{"time": dates[i], "value": value} for i, value in enumerate(dynamic_stop_values) if value is not None],
         "trendStop": [{"time": dates[i], "value": value} for i, value in enumerate(trend_stop_values) if value is not None],
         "rows": [
@@ -1316,6 +1429,9 @@ def make_report(
                 "ma": ma_values[i],
                 "ma20": ma20_values[i],
                 "volMa": vol_ma_values[i],
+                "kdjK": k_values[i],
+                "kdjD": d_values[i],
+                "kdjJ": j_values[i],
                 "dynamicStop": dynamic_stop_values[i],
                 "trendStop": trend_stop_values[i],
             }
@@ -1401,8 +1517,9 @@ def make_report(
     vol_high_multiplier_label = float(settings.get("vol_high_multiplier", 1.0))
     massive_window_label = int(settings.get("massive_window", 7))
     massive_min_label = int(settings.get("massive_min_count", 1))
-    massive_max_label = int(settings.get("massive_max_count", 2))
-    b1_trend_label = " + 20MA>50MA" if settings.get("b1_require_20ma_gt_50ma") else ""
+    require_5ma_gt_20ma_label = bool(settings.get("require_5ma_gt_20ma", True))
+    ma5_gt_20_b1_label = " + 5MA&gt;20MA" if require_5ma_gt_20ma_label else ""
+    ma5_gt_20_b2_label = "5MA&gt;20MA + " if require_5ma_gt_20ma_label else ""
     reentry_label = float(settings.get("reentry_pct", 4.5))
     stop_5ma_label = float(settings.get("stop_5ma_pct", 7.5))
     hard_stop_label = float(settings.get("hard_stop_pct", 20))
@@ -1540,11 +1657,13 @@ h2 {{ margin: 24px 0 10px; font-size: 17px; }}
 .tester table {{ margin: 0; }}
 .tester caption {{ text-align: left; padding: 10px 12px; font-weight: 800; background: #f5f7fa; border-bottom: 1px solid #eef1f5; }}
 .panel {{ position: relative; background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 10px; margin-bottom: 14px; overflow: hidden; }}
-.chart-shell {{ position: relative; height: 660px; min-width: 760px; }}
+.chart-shell {{ position: relative; height: 860px; min-width: 760px; }}
 .chart-toolbar {{ position: absolute; top: 12px; left: 12px; z-index: 5; display: flex; gap: 8px; align-items: center; }}
 .chart-toolbar button {{ border: 1px solid #d6dbe3; background: rgba(255,255,255,0.92); color: #131722; border-radius: 4px; height: 28px; padding: 0 10px; font-weight: 700; cursor: pointer; }}
 .chart-toolbar span {{ color: #64748b; font-size: 12px; background: rgba(255,255,255,0.86); padding: 5px 8px; border-radius: 4px; }}
 .tv-chart {{ width: 100%; height: 100%; }}
+.price-chart-main {{ height: 640px; }}
+.kdj-chart {{ height: 180px; margin-top: 12px; border-top: 1px solid #eef1f5; }}
 .chart-tooltip {{ position: absolute; z-index: 6; display: none; min-width: 220px; pointer-events: none; border: 1px solid #d6dbe3; background: rgba(255,255,255,0.96); border-radius: 6px; box-shadow: 0 8px 22px rgba(15,23,42,0.12); padding: 8px 10px; font-size: 12px; line-height: 1.6; }}
 .chart-tooltip strong {{ display: block; margin-bottom: 4px; font-size: 13px; }}
 .chart-tooltip .up {{ color: #089981; }}
@@ -1568,7 +1687,7 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
 .pos {{ color: #089981; }}
 .neg {{ color: #f23645; }}
 .empty {{ text-align: center; color: #607080; }}
-@media (max-width: 900px) {{ main {{ padding: 12px; }} .metrics {{ grid-template-columns: repeat(2, 1fr); }} .tester {{ grid-template-columns: 1fr; }} .chart-shell {{ min-width: 0; height: 560px; }} .chart-toolbar span {{ display: none; }} }}
+@media (max-width: 900px) {{ main {{ padding: 12px; }} .metrics {{ grid-template-columns: repeat(2, 1fr); }} .tester {{ grid-template-columns: 1fr; }} .chart-shell {{ min-width: 0; height: 740px; }} .price-chart-main {{ height: 520px; }} .kdj-chart {{ height: 180px; }} .chart-toolbar span {{ display: none; }} }}
 </style>
 </head>
 <body>
@@ -1582,15 +1701,16 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
 {benchmark_html}
 <h2>{labels['main_chart']}</h2>
 <div class="rule-strip">
-  <span class="rule-pill">B1：站上5MA + 连续{vol_high_days_label}日成交量 &gt; 均量×{vol_high_multiplier_label:g} + {massive_window_label}日内{massive_min_label}-{massive_max_label}次巨量 + 5MA向上{b1_trend_label}</span>
-  <span class="rule-pill">B2：已有B1趋势后，巨量阳线回踩5MA {reentry_label:g}% 内</span>
+  <span class="rule-pill">B1：站上5MA{ma5_gt_20_b1_label} + 20MA&gt;50MA + 连续{vol_high_days_label}日成交量 &gt; 均量×{vol_high_multiplier_label:g} + {massive_window_label}日内至少{massive_min_label}次巨量 + 5MA向上</span>
+  <span class="rule-pill">B2：已有B1趋势后，{ma5_gt_20_b2_label}巨量阳线回踩5MA {reentry_label:g}% 内</span>
   <span class="rule-pill">买入：B1 到 50%；B2 到 100%；信号后下一交易日开盘执行</span>
   <span class="rule-pill">卖出：5MA 下 {stop_5ma_label:g}% / 连续 {below20_label} 日跌破 20MA / 跌破成本 {hard_stop_label:g}%</span>
 </div>
 <section class="panel">
   <div class="chart-shell">
     <div class="chart-toolbar"><button id="fit-chart">{labels['reset_view']}</button><span>{labels['chart_hint']}</span></div>
-    <div id="price-chart" class="tv-chart"></div>
+    <div id="price-chart" class="tv-chart price-chart-main"></div>
+    <div id="kdj-chart" class="tv-chart kdj-chart"></div>
     <div id="price-tooltip" class="chart-tooltip"></div>
   </div>
 </section>
@@ -1600,6 +1720,7 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
 const chartData = JSON.parse(document.getElementById('chart-data').textContent);
 const chartLabels = chartData.labels;
 const chartElement = document.getElementById('price-chart');
+const kdjElement = document.getElementById('kdj-chart');
 const tooltip = document.getElementById('price-tooltip');
 const priceChart = LightweightCharts.createChart(chartElement, {{
   layout: {{ background: {{ type: 'solid', color: '#ffffff' }}, textColor: '#131722', fontFamily: 'Inter, Microsoft YaHei UI, PingFang SC, Arial, sans-serif' }},
@@ -1626,6 +1747,33 @@ volumeSeries.setData(chartData.volume);
 priceChart.priceScale('').applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
 const volMaSeries = priceChart.addLineSeries({{ color: '#2962ff', lineWidth: 1, priceScaleId: '', title: chartLabels.volume_ma, priceLineVisible: false, lastValueVisible: false }});
 volMaSeries.setData(chartData.volMa);
+const kdjChart = LightweightCharts.createChart(kdjElement, {{
+  layout: {{ background: {{ type: 'solid', color: '#ffffff' }}, textColor: '#131722', fontFamily: 'Inter, Microsoft YaHei UI, PingFang SC, Arial, sans-serif' }},
+  width: kdjElement.clientWidth,
+  height: kdjElement.clientHeight,
+  rightPriceScale: {{ borderColor: '#d6dbe3', scaleMargins: {{ top: 0.14, bottom: 0.14 }} }},
+  timeScale: {{ borderColor: '#d6dbe3', timeVisible: false, secondsVisible: false, rightOffset: 6, barSpacing: 8, minBarSpacing: 3 }},
+  grid: {{ vertLines: {{ color: '#f1f3f6' }}, horzLines: {{ color: '#f1f3f6' }} }},
+  crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
+  handleScroll: {{ mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false }},
+  handleScale: {{ axisPressedMouseMove: true, mouseWheel: true, pinch: true }},
+}});
+kdjChart.addLineSeries({{ color: '#2563eb', lineWidth: 1.5, title: 'K', priceLineVisible: false }}).setData(chartData.kdjK || []);
+kdjChart.addLineSeries({{ color: '#f59e0b', lineWidth: 1.5, title: 'D', priceLineVisible: false }}).setData(chartData.kdjD || []);
+kdjChart.addLineSeries({{ color: '#7c3aed', lineWidth: 2, title: 'J', priceLineVisible: false }}).setData(chartData.kdjJ || []);
+kdjChart.addLineSeries({{ color: '#94a3b8', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: '80', priceLineVisible: false, lastValueVisible: false }}).setData(chartData.kdjUpper || []);
+kdjChart.addLineSeries({{ color: '#94a3b8', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: '20', priceLineVisible: false, lastValueVisible: false }}).setData(chartData.kdjLower || []);
+let syncingMainRange = false;
+function syncVisibleRange(source, target) {{
+  source.timeScale().subscribeVisibleLogicalRangeChange(range => {{
+    if (!range || syncingMainRange) return;
+    syncingMainRange = true;
+    target.timeScale().setVisibleLogicalRange(range);
+    syncingMainRange = false;
+  }});
+}}
+syncVisibleRange(priceChart, kdjChart);
+syncVisibleRange(kdjChart, priceChart);
 const markerData = [...chartData.entryMarkers, ...chartData.exitMarkers, ...chartData.holdBuyMarkers, ...chartData.holdSellMarkers].sort((a, b) => a.time.localeCompare(b.time));
 candleSeries.setMarkers(markerData);
 const rowByTime = new Map(chartData.rows.map(row => [row.time, row]));
@@ -1638,7 +1786,8 @@ priceChart.subscribeCrosshairMove(param => {{
   const up = row.close >= row.open;
   tooltip.innerHTML = `<strong>${{row.time}}</strong>` +
     `<div><span class="${{up ? 'up' : 'down'}}">${{chartLabels.open}} ${{formatNumber(row.open)}} &nbsp; ${{chartLabels.high}} ${{formatNumber(row.high)}} &nbsp; ${{chartLabels.low}} ${{formatNumber(row.low)}} &nbsp; ${{chartLabels.close}} ${{formatNumber(row.close)}}</span></div>` +
-    `<div>${{chartLabels.volume}} ${{formatVolume(row.volume)}} &nbsp; 5MA ${{formatNumber(row.ma)}} &nbsp; 20MA ${{formatNumber(row.ma20)}}</div>`;
+    `<div>${{chartLabels.volume}} ${{formatVolume(row.volume)}} &nbsp; 5MA ${{formatNumber(row.ma)}} &nbsp; 20MA ${{formatNumber(row.ma20)}}</div>` +
+    `<div>KDJ K ${{formatNumber(row.kdjK)}} &nbsp; D ${{formatNumber(row.kdjD)}} &nbsp; J ${{formatNumber(row.kdjJ)}}</div>`;
   tooltip.style.display = 'block';
   const left = Math.min(param.point.x + 16, chartElement.clientWidth - 250);
   const top = Math.max(44, param.point.y - 72);
@@ -1649,8 +1798,13 @@ new ResizeObserver(entries => {{
   const rect = entries[0].contentRect;
   priceChart.applyOptions({{ width: Math.floor(rect.width), height: Math.floor(rect.height) }});
 }}).observe(chartElement);
-document.getElementById('fit-chart').addEventListener('click', () => priceChart.timeScale().fitContent());
+new ResizeObserver(entries => {{
+  const rect = entries[0].contentRect;
+  kdjChart.applyOptions({{ width: Math.floor(rect.width), height: Math.floor(rect.height) }});
+}}).observe(kdjElement);
+document.getElementById('fit-chart').addEventListener('click', () => {{ priceChart.timeScale().fitContent(); kdjChart.timeScale().fitContent(); }});
 priceChart.timeScale().fitContent();
+kdjChart.timeScale().fitContent();
 
 const chartConfig = {{ responsive: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d', 'select2d'] }};
 

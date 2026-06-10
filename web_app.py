@@ -21,6 +21,7 @@ from backtest import (
     PRICE_CACHE_MAX_BARS,
     backtest,
     build_signal_detail_rows,
+    calculate_kdj,
     fetch_bars,
     make_report,
     open_position_snapshot,
@@ -68,7 +69,10 @@ from ashare_lab import (
     AShareSignalSnapshot,
     ashare_board_filter_label,
     ashare_chart_payload,
+    ashare_limit_pct,
+    ashare_to_backtest_bars,
     fetch_ashare_profile,
+    fetch_ashare_bars,
     filter_ashare_universe_by_board,
     latest_ashare_signal,
     load_ashare_universe_for_scan,
@@ -138,8 +142,10 @@ def job_stop_requested(job_id: str) -> bool:
 
 
 def checkbox_field(params: dict[str, list[str]], name: str, default: bool = False) -> bool:
-    raw = field(params, name, "1" if default else "0")
-    return str(raw).lower() in {"1", "true", "on", "yes"}
+    values = params.get(name)
+    if not values:
+        return default
+    return any(str(value).strip().lower() in {"1", "true", "on", "yes"} for value in values)
 
 
 def build_benchmark(symbol: str, start: str, end: str, initial_cash: float) -> dict[str, object]:
@@ -720,8 +726,10 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .candidate-detail iframe {{ height: 980px; }}
 .watchlist-grid {{ display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 14px; align-items: start; }}
 .watchlist-panel {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
-.watchlist-chart-shell {{ position: relative; height: 680px; min-width: 520px; }}
+.watchlist-chart-shell {{ position: relative; height: 880px; min-width: 520px; }}
 .watchlist-chart {{ width: 100%; height: 100%; }}
+.watchlist-price-chart {{ height: 640px; }}
+.watchlist-kdj-chart {{ height: 200px; margin-top: 12px; border-top: 1px solid #eef1f5; }}
 .watchlist-list-wrap {{ max-height: 760px; overflow: auto; }}
 .watch-row-button {{ width: 100%; justify-content: flex-start; border: 0; background: transparent; color: #131722; padding: 0; min-height: 0; text-align: left; }}
 .watch-row-button:hover {{ background: transparent; color: #2962ff; }}
@@ -849,8 +857,7 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
     def value(name: str, default: str) -> str:
         return html.escape(field(params, name, default))
 
-    b1_trend_checked = " checked" if checkbox_field(params, "b1_require_20ma_gt_50ma", False) else ""
-    b1_trend_text = " + 20MA>50MA" if checkbox_field(params, "b1_require_20ma_gt_50ma", False) else ""
+    require_5ma_gt_20ma_checked = " checked" if checkbox_field(params, "require_5ma_gt_20ma", True) else ""
 
     def selected(current: str, expected: str) -> str:
         return " selected" if current == expected else ""
@@ -888,8 +895,8 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
   <label>巨量倍数<input name="vol_multiplier" value="{value("vol_multiplier", "1.45")}"></label>
   <label>巨量观察窗口<input name="massive_window" value="{value("massive_window", "7")}"></label>
   <label>巨量最少次数<input name="massive_min_count" value="{value("massive_min_count", "1")}"></label>
-  <label>巨量最多次数<input name="massive_max_count" value="{value("massive_max_count", "2")}"></label>
-  <label class="checkbox-label"><input type="checkbox" name="b1_require_20ma_gt_50ma" value="1"{b1_trend_checked}> B1要求20MA&gt;50MA</label>
+  <input type="hidden" name="require_5ma_gt_20ma" value="0">
+  <label class="checkbox-label"><input type="checkbox" name="require_5ma_gt_20ma" value="1"{require_5ma_gt_20ma_checked}> 买入要求5MA&gt;20MA</label>
   <label>跌破均线止损 %<input name="stop_5ma_pct" value="{value("stop_5ma_pct", "7.5")}"></label>
   <label>连续跌破20MA天数<input name="below_20ma_stop_days" value="{value("below_20ma_stop_days", "2")}"></label>
   <label>成本强制止损 %<input name="hard_stop_pct" value="{value("hard_stop_pct", "20")}"></label>
@@ -1025,7 +1032,7 @@ def render_market_placeholder(active: str = "home") -> str:
 <section class="dashboard-grid">
   <div class="dashboard-panel">
     <h2>A股选股器</h2>
-    <p class="hint">硬条件为趋势通过 + J值冰点，红长绿短量能用于二次看图确认强弱。</p>
+    <p class="hint">硬条件为 MA5/B 点信号 + 20日均成交额达标，量能结构用于二次看图确认强弱。</p>
     <div class="quick-actions">
       <a class="btn" href="/cn/scanner">打开 A 股选股器</a>
       <a class="btn btn-secondary" href="/cn/scanner?mode=single&symbol=600487&j_threshold=14">验证 600487</a>
@@ -1036,7 +1043,7 @@ def render_market_placeholder(active: str = "home") -> str:
     <p class="hint">A 股自选池已独立保存，可从选股结果加入，也可以手动添加代码后看策略图。</p>
     <div class="quick-actions">
       <a class="btn btn-secondary" href="/cn/watchlist">打开 A 股自选池</a>
-      <a class="btn btn-secondary" href="/cn/backtest">A 股回测占位</a>
+      <a class="btn btn-secondary" href="/cn/backtest">A 股回测</a>
     </div>
   </div>
 </section>
@@ -1045,7 +1052,7 @@ def render_market_placeholder(active: str = "home") -> str:
         "home": ("A股复盘面板", "后续这里会显示 A 股市场环境、A 股扫描摘要和 A 股自选池状态。"),
         "scanner": ("A股选股器", "后续这里会接入 A 股股票池、A 股策略和 A 股盘后选股。"),
         "watchlist": ("A股自选池", "后续这里会维护 A 股自选列表，并和美股自选池分开保存。"),
-        "backtest": ("A股回测", "后续这里会使用 A 股独立交易规则、手续费、印花税、涨跌停和复权设置。"),
+        "backtest": ("A股回测", "这里使用 A 股独立交易规则、手续费、印花税、涨跌停和高开过滤。"),
         "batch": ("A股批量回测", "后续这里会批量验证 A 股策略参数和股票池表现。"),
     }
     title, description = labels.get(active, labels["home"])
@@ -1060,6 +1067,140 @@ def render_market_placeholder(active: str = "home") -> str:
 <section class="result">
   <h2>暂未开放</h2>
   <p class="hint">A 股数据源、策略、选股池、回测规则会从独立模块开始实现，不和当前美股 MA5 逻辑混在一起。</p>
+</section>
+"""
+
+
+def ashare_backtest_defaults(params: dict[str, list[str]]) -> dict[str, float | int | str]:
+    today = date.today()
+    return {
+        "symbol": field(params, "symbol", "600487"),
+        "start": field(params, "start", start_for_preset("1y", today).isoformat()),
+        "end": field(params, "end", today.isoformat()),
+        "initial_cash": number_field(params, "initial_cash", 100000),
+        "commission_pct": number_field(params, "commission_pct", 0.03),
+        "stamp_duty_pct": number_field(params, "stamp_duty_pct", 0.05),
+        "slippage_pct": number_field(params, "slippage_pct", 0.3),
+        "max_buy_gap_pct": number_field(params, "max_buy_gap_pct", 6.0),
+        "hard_stop_pct": number_field(params, "hard_stop_pct", 8.0),
+        "stop_5ma_pct": number_field(params, "stop_5ma_pct", 7.5),
+        "time_stop_days": int(number_field(params, "time_stop_days", 5)),
+        "vol_multiplier": number_field(params, "vol_multiplier", 1.8),
+    }
+
+
+def render_ashare_backtest_form(params: dict[str, list[str]] | None = None) -> str:
+    params = params or {}
+    defaults = ashare_backtest_defaults(params)
+
+    def value(name: str, default: object) -> str:
+        return html.escape(field(params, name, str(default)))
+
+    return f"""
+<section class="page-head">
+  <div>
+    <h1>A股回测</h1>
+    <p class="hint">复用 MA5/B 点核心信号，并启用 A 股执行规则：涨停不买、跌停卖不出、高开过滤、卖出印花税和时间止损。</p>
+  </div>
+  <div class="mode-pill">A Share | MA5/B</div>
+</section>
+<form class="form" action="/cn/run" method="get">
+  <label>股票代码<input name="symbol" value="{value("symbol", defaults["symbol"])}" placeholder="600487"></label>
+  <label>开始日期<input type="date" name="start" value="{value("start", defaults["start"])}"></label>
+  <label>结束日期<input type="date" name="end" value="{value("end", defaults["end"])}"></label>
+  <label>初始资金<input name="initial_cash" value="{value("initial_cash", defaults["initial_cash"])}"></label>
+  <label>手续费 %<input name="commission_pct" value="{value("commission_pct", defaults["commission_pct"])}"></label>
+  <label>卖出印花税 %<input name="stamp_duty_pct" value="{value("stamp_duty_pct", defaults["stamp_duty_pct"])}"></label>
+  <label>滑点 %<input name="slippage_pct" value="{value("slippage_pct", defaults["slippage_pct"])}"></label>
+  <label>最高可追高开 %<input name="max_buy_gap_pct" value="{value("max_buy_gap_pct", defaults["max_buy_gap_pct"])}"></label>
+  <label>巨量倍数<input name="vol_multiplier" value="{value("vol_multiplier", defaults["vol_multiplier"])}"></label>
+  <label>跌破MA5止损 %<input name="stop_5ma_pct" value="{value("stop_5ma_pct", defaults["stop_5ma_pct"])}"></label>
+  <label>硬止损 %<input name="hard_stop_pct" value="{value("hard_stop_pct", defaults["hard_stop_pct"])}"></label>
+  <label>时间止损天数<input name="time_stop_days" value="{value("time_stop_days", defaults["time_stop_days"])}"></label>
+  <button type="submit">运行 A 股回测</button>
+</form>
+"""
+
+
+def run_ashare_strategy(params: dict[str, list[str]]) -> str:
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    cleanup_old_reports()
+    defaults = ashare_backtest_defaults(params)
+    symbol = str(defaults["symbol"])
+    start = str(defaults["start"])
+    end = str(defaults["end"])
+    validate_backtest_range(start, end, 20)
+    bars_raw, data_source = fetch_ashare_bars(symbol, start, end)
+    bars = ashare_to_backtest_bars(bars_raw)
+    initial_cash = float(defaults["initial_cash"])
+    limit_pct = ashare_limit_pct(symbol)
+    trades, equity_curve = backtest(
+        bars=bars,
+        ma_length=5,
+        vol_length=20,
+        vol_multiplier=float(defaults["vol_multiplier"]),
+        initial_cash=initial_cash,
+        commission_pct=float(defaults["commission_pct"]),
+        slippage_pct=float(defaults["slippage_pct"]),
+        strategy_name="ratchet",
+        stop_5ma_pct=float(defaults["stop_5ma_pct"]),
+        hard_stop_pct=float(defaults["hard_stop_pct"]),
+        reentry_pct=4.5,
+        vol_high_days=2,
+        vol_high_multiplier=1.0,
+        massive_window=7,
+        massive_min_count=1,
+        massive_max_count=2,
+        below_20ma_stop_days=2,
+        market="cn",
+        limit_pct=limit_pct,
+        max_buy_gap_pct=float(defaults["max_buy_gap_pct"]),
+        stamp_duty_pct=float(defaults["stamp_duty_pct"]),
+        time_stop_days=int(defaults["time_stop_days"]),
+    )
+    summary = summarize(trades, equity_curve, initial_cash)
+    buy_hold = build_buy_hold(symbol, bars, initial_cash)
+    benchmark = {
+        "symbol": f"{symbol} 买入持有",
+        "return_pct": buy_hold["return_pct"],
+        "curve": buy_hold["curve"],
+        "buy_hold_symbol": symbol,
+        "buy_hold_return_pct": buy_hold["return_pct"],
+        "buy_hold_curve": buy_hold["curve"],
+    }
+    stem = safe_name(f"CN_{symbol}_ma5_{start}_{end}")
+    report_path = REPORT_DIR / f"{stem}_report.html"
+    trades_path = REPORT_DIR / f"{stem}_trades.csv"
+    equity_path = REPORT_DIR / f"{stem}_equity.csv"
+    strategy_settings = {
+        "market": "A股",
+        "data_source": data_source,
+        "limit_pct": limit_pct,
+        "max_buy_gap_pct": defaults["max_buy_gap_pct"],
+        "stamp_duty_pct": defaults["stamp_duty_pct"],
+        "time_stop_days": defaults["time_stop_days"],
+        "vol_high_days": 2,
+        "vol_multiplier": defaults["vol_multiplier"],
+        "hard_stop_pct": defaults["hard_stop_pct"],
+    }
+    make_report(report_path, f"{symbol} A股 MA5/B 回测 {start} to {end}", bars, trades, equity_curve, summary, benchmark=benchmark, strategy_settings=strategy_settings)
+    write_trades(trades_path, trades)
+    write_equity(equity_path, equity_curve)
+    report_url = f"/reports/{quote(report_path.name)}"
+    trades_url = f"/reports/{quote(trades_path.name)}"
+    equity_url = f"/reports/{quote(equity_path.name)}"
+    return f"""
+{render_ashare_backtest_form(params)}
+<section class="result">
+  <p class="hint">数据源：{html.escape(data_source)}；涨跌停阈值：{limit_pct:.0f}%；A 股执行规则已启用。</p>
+  <p class="links">
+    <a href="{report_url}" target="_blank">打开完整图表</a>
+    <a href="{trades_url}" target="_blank">交易明细 CSV</a>
+    <a href="{equity_url}" target="_blank">权益曲线 CSV</a>
+  </p>
+  {render_strategy_compare(summary, buy_hold, benchmark)}
+  {render_backtest_trade_table(trades, equity_curve)}
+  <iframe src="{report_url}" title="A Share backtest report"></iframe>
 </section>
 """
 
@@ -1080,14 +1221,14 @@ def render_ashare_scan_result(
             f'<td><button type="button" class="symbol-button" data-ashare-candidate-symbol="{html.escape(row.symbol)}">{html.escape(row.symbol)}</button></td>'
             f"<td>{html.escape(row.name or '-')}</td>"
             f"<td><span class=\"score-badge {cls}\">{html.escape(row.candidate_rating)}</span></td>"
+            f"<td>{html.escape(row.signal_type or '-')}</td>"
             f"<td>{row.volume_score:.1f}/5</td>"
-            f"<td>{row.j_value:.2f}</td>"
+            f"<td>{row.volume_ratio:.2f}</td>"
+            f"<td>{row.avg_amount_20d / 100_000_000:.2f}亿</td>"
+            f"<td>{html.escape(row.limit_state or '正常')}</td>"
             f"<td>{row.close:.2f}</td>"
             f"<td>{html.escape(row.latest_date)}</td>"
             f"<td>{row.recent_peak_to_base:.2f}</td>"
-            f"<td>{row.recent_avg10_to_base:.2f}</td>"
-            f"<td>{row.red_avg_to_green_avg:.2f}</td>"
-            f"<td>{row.top5_red_count}/5</td>"
             f"<td>{html.escape(row.data_source)}</td>"
             f'<td><a class="btn btn-secondary btn-small" href="/cn/watchlist/add?symbol={quote(row.symbol)}&name={quote(row.name or "")}">加入自选</a></td>'
             "</tr>"
@@ -1096,7 +1237,7 @@ def render_ashare_scan_result(
         """
   <div class="table-wrap">
     <table class="sortable resizable-table">
-      <thead><tr><th>代码</th><th>名称</th><th>评级</th><th>量能分</th><th>J值</th><th>收盘</th><th>交易日</th><th>峰值/基准</th><th>10日均/基准</th><th>红均/绿均</th><th>Top5红柱</th><th>数据源</th><th>操作</th></tr></thead>
+      <thead><tr><th>代码</th><th>名称</th><th>评级</th><th>B点</th><th>量能分</th><th>量比</th><th>20日均成交额</th><th>涨跌停</th><th>收盘</th><th>交易日</th><th>峰值/基准</th><th>数据源</th><th>操作</th></tr></thead>
       <tbody>
 """
         + "\n".join(rows)
@@ -1106,7 +1247,7 @@ def render_ashare_scan_result(
   </div>
 """
         if rows
-        else '<p class="hint">本次没有筛出候选。可以适当放宽 J 值阈值，或降低市值/扫描数量限制后再试。</p>'
+        else '<p class="hint">本次没有筛出候选。可以降低市值/扫描数量限制，或等待 MA5/B 点信号形成后再试。</p>'
     )
     error_note = ""
     if errors:
@@ -1118,7 +1259,7 @@ def render_ashare_scan_result(
   <div class="toolbar">
     <div>
       <h2>A股选股结果</h2>
-      <p class="hint">入选硬条件为趋势通过 + J值冰点；量能分用于二次看图确认。股票池来源：{html.escape(universe_source)}。</p>
+      <p class="hint">入选硬条件为 MA5/B 点信号 + 20日均成交额达标；量能分用于二次看图确认。股票池来源：{html.escape(universe_source)}。</p>
     </div>
   </div>
   <section class="status-strip">
@@ -1253,7 +1394,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
   <div class="toolbar">
     <div>
       <h2>{html.escape(snapshot.symbol)}{html.escape(name)} 策略验证</h2>
-      <p class="hint">当前只做单票验证，用于确认 A 股策略指标和量能结构；全市场扫描会在这个模块稳定后接入。</p>
+      <p class="hint">单票验证使用 MA5/B 点框架，并叠加 A 股成交额、涨跌停和次日执行约束。</p>
     </div>
     <div class="quick-actions">
       <span class="score-badge {rating_cls}">{signal_text}</span>
@@ -1271,7 +1412,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
   <section class="status-strip">
     <div class="stat-card"><div class="stat-label">最新交易日</div><div class="stat-value">{html.escape(snapshot.latest_date)}</div></div>
     <div class="stat-card"><div class="stat-label">收盘价</div><div class="stat-value">{snapshot.close:.2f}</div></div>
-    <div class="stat-card"><div class="stat-label">量能评分</div><div class="stat-value">{snapshot.volume_score:.1f}/5</div></div>
+    <div class="stat-card"><div class="stat-label">B点 / 量能</div><div class="stat-value">{html.escape(snapshot.signal_type or '-')} / {snapshot.volume_score:.1f}</div></div>
     <div class="stat-card"><div class="stat-label">板块</div><div class="stat-value">{html.escape(sector)}</div></div>
   </section>
   <p class="hint">数据源 / 日K：{html.escape(snapshot.data_source)} / {snapshot.bars_count}</p>
@@ -1280,16 +1421,16 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
       <thead><tr><th>条件</th><th>结果</th><th>关键数值</th><th>说明</th></tr></thead>
       <tbody>
         <tr>
-          <td>趋势条件</td>
+          <td>MA5/B点趋势</td>
           <td>{status_badge(snapshot.trend_ok)}</td>
-          <td>短期趋势 {snapshot.zx_short_trend:.2f} / 多空线 {snapshot.zx_multi_trend:.2f} / 斜率 {snapshot.zx_multi_slope:.2f}</td>
-          <td>短期趋势线在多空线之上，且多空线向上。</td>
+          <td>MA5 {snapshot.ma5:.2f} / MA20 {snapshot.ma20:.2f} / 斜率 {snapshot.zx_multi_slope:.2f}</td>
+          <td>复用美股 MA5/B 点核心：收盘在 MA5 上方，MA5 上行，并处于强趋势结构。</td>
         </tr>
         <tr>
-          <td>KDJ J 超卖</td>
-          <td>{status_badge(snapshot.j_oversold)}</td>
-          <td>J={snapshot.j_value:.2f} / 阈值 {j_threshold:.2f}</td>
-          <td>用于寻找强趋势中的短线冰点。</td>
+          <td>成交额过滤</td>
+          <td>{status_badge(snapshot.amount_ok)}</td>
+          <td>20日均成交额 {snapshot.avg_amount_20d / 100_000_000:.2f} 亿 / 量比 {snapshot.volume_ratio:.2f}</td>
+          <td>A 股优先过滤流动性，默认要求 20 日均成交额不低于 1 亿。</td>
         </tr>
         <tr>
           <td>红长绿短量能</td>
@@ -1306,6 +1447,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     <div class="stat-card"><div class="stat-label">红 / 绿天数</div><div class="stat-value">{snapshot.red_days} / {snapshot.green_days}</div></div>
     <div class="stat-card"><div class="stat-label">Top5 红柱数</div><div class="stat-value">{snapshot.top5_red_count} / 5</div></div>
   </section>
+  <p class="hint">执行提示：{html.escape(snapshot.execution_note)}</p>
   <section class="result">
     <div class="toolbar">
       <div>
@@ -1443,7 +1585,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
 <section class="page-head">
   <div>
     <h1>A股选股器</h1>
-    <p class="hint">趋势条件 + J值冰点作为候选硬条件，红长绿短量能用于二次看图确认强弱。首次进入不拉行情，点击按钮后才开始请求数据。</p>
+    <p class="hint">MA5/B 点信号 + 20日均成交额作为候选硬条件，红长绿短量能用于二次看图确认强弱。首次进入不拉行情，点击按钮后才开始请求数据。</p>
   </div>
   <div class="mode-pill">A Share | Scanner</div>
 </section>
@@ -2066,6 +2208,7 @@ def run_strategy(params: dict[str, list[str]]) -> str:
         massive_min_count=int(number_field(params, "massive_min_count", 1)),
         massive_max_count=int(number_field(params, "massive_max_count", 2)),
         b1_require_20ma_gt_50ma=checkbox_field(params, "b1_require_20ma_gt_50ma", False),
+        require_5ma_gt_20ma=checkbox_field(params, "require_5ma_gt_20ma", True),
         below_20ma_stop_days=int(number_field(params, "below_20ma_stop_days", 2)),
     )
     summary = summarize(trades, equity_curve, initial_cash)
@@ -2086,6 +2229,7 @@ def run_strategy(params: dict[str, list[str]]) -> str:
         "massive_min_count": int(number_field(params, "massive_min_count", 1)),
         "massive_max_count": int(number_field(params, "massive_max_count", 2)),
         "b1_require_20ma_gt_50ma": checkbox_field(params, "b1_require_20ma_gt_50ma", False),
+        "require_5ma_gt_20ma": checkbox_field(params, "require_5ma_gt_20ma", True),
         "reentry_pct": number_field(params, "reentry_pct", 4.5),
         "stop_5ma_pct": number_field(params, "stop_5ma_pct", 7.5),
         "hard_stop_pct": number_field(params, "hard_stop_pct", 20),
@@ -2123,7 +2267,7 @@ def render_batch_form(params: dict[str, list[str]] | None = None) -> str:
     def value(name: str, default: str) -> str:
         return html.escape(field(params, name, default))
 
-    b1_trend_checked = " checked" if checkbox_field(params, "b1_require_20ma_gt_50ma", False) else ""
+    require_5ma_gt_20ma_checked = " checked" if checkbox_field(params, "require_5ma_gt_20ma", True) else ""
 
     return f"""
 <section class="page-head">
@@ -2149,8 +2293,8 @@ def render_batch_form(params: dict[str, list[str]] | None = None) -> str:
   <label>巨量倍数<input name="vol_multiplier" value="{value("vol_multiplier", "1.45")}"></label>
   <label>巨量观察窗口<input name="massive_window" value="{value("massive_window", "7")}"></label>
   <label>巨量最少次数<input name="massive_min_count" value="{value("massive_min_count", "1")}"></label>
-  <label>巨量最多次数<input name="massive_max_count" value="{value("massive_max_count", "2")}"></label>
-  <label class="checkbox-label"><input type="checkbox" name="b1_require_20ma_gt_50ma" value="1"{b1_trend_checked}> B1要求20MA&gt;50MA</label>
+  <input type="hidden" name="require_5ma_gt_20ma" value="0">
+  <label class="checkbox-label"><input type="checkbox" name="require_5ma_gt_20ma" value="1"{require_5ma_gt_20ma_checked}> 买入要求5MA&gt;20MA</label>
   <label>跌破均线止损 %<input name="stop_5ma_pct" value="{value("stop_5ma_pct", "7.5")}"></label>
   <label>连续跌破20MA天数<input name="below_20ma_stop_days" value="{value("below_20ma_stop_days", "2")}"></label>
   <label>成本强制止损 %<input name="hard_stop_pct" value="{value("hard_stop_pct", "20")}"></label>
@@ -2192,6 +2336,7 @@ def run_batch_backtest(params: dict[str, list[str]]) -> str:
                 massive_min_count=int(number_field(params, "massive_min_count", 1)),
                 massive_max_count=int(number_field(params, "massive_max_count", 2)),
                 b1_require_20ma_gt_50ma=checkbox_field(params, "b1_require_20ma_gt_50ma", False),
+                require_5ma_gt_20ma=checkbox_field(params, "require_5ma_gt_20ma", True),
                 below_20ma_stop_days=int(number_field(params, "below_20ma_stop_days", 2)),
             )
             rows.append((symbol, summarize(trades, equity_curve, initial_cash)))
@@ -2794,6 +2939,7 @@ def scan_symbol_candidate(
     massive_min_count: int = 1,
     massive_max_count: int = 2,
     b1_require_20ma_gt_50ma: bool = False,
+    require_5ma_gt_20ma: bool = True,
 ) -> tuple[str, SignalResult | None, str | None]:
     try:
         signal_start = min(start, (date.fromisoformat(end) - timedelta(days=420)).isoformat())
@@ -2813,6 +2959,7 @@ def scan_symbol_candidate(
             massive_min_count,
             massive_max_count,
             b1_require_20ma_gt_50ma,
+            require_5ma_gt_20ma,
         )
         if not result:
             return symbol, None, None
@@ -2962,8 +3109,9 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
 
     asset_type = field(params, "asset_type", "stocks")
     hide_weak_checked = " checked" if field(params, "hide_weak", "1" if DEFAULT_HIDE_WEAK_CANDIDATES else "0") == "1" else ""
-    b1_trend_checked = " checked" if checkbox_field(params, "b1_require_20ma_gt_50ma", False) else ""
-    b1_trend_text = " + 20MA>50MA" if checkbox_field(params, "b1_require_20ma_gt_50ma", False) else ""
+    require_5ma_gt_20ma_checked = " checked" if checkbox_field(params, "require_5ma_gt_20ma", True) else ""
+    ma5_gt_20_b1_text = " + 5MA&gt;20MA" if checkbox_field(params, "require_5ma_gt_20ma", True) else ""
+    ma5_gt_20_b2_text = "5MA&gt;20MA + " if checkbox_field(params, "require_5ma_gt_20ma", True) else ""
     earnings_filter = field(params, "earnings_filter", "show")
     default_symbols = "ASTS,NVDA,TSLA,AAPL,MSFT,QQQ"
     return f"""
@@ -2979,8 +3127,8 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
 <section class="result">
   <strong>当前美股选股策略</strong>
   <div class="scan-facts">
-    <span class="scan-fact"><span>B1 起爆</span>站上5MA + 连续{value("vol_high_days", "3")}日成交量&gt;均量×{value("vol_high_multiplier", "1.0")} + {value("massive_window", "7")}日内{value("massive_min_count", "1")}-{value("massive_max_count", "2")}次巨量 + 5MA向上{b1_trend_text}</span>
-    <span class="scan-fact"><span>B2 回踩</span>已有B1趋势后，巨量阳线回踩5MA {value("reentry_pct", "4.5")}%内</span>
+    <span class="scan-fact"><span>B1 起爆</span>站上5MA{ma5_gt_20_b1_text} + 20MA&gt;50MA + 连续{value("vol_high_days", "3")}日成交量&gt;均量×{value("vol_high_multiplier", "1.0")} + {value("massive_window", "7")}日内至少{value("massive_min_count", "1")}次巨量 + 5MA向上</span>
+    <span class="scan-fact"><span>B2 回踩</span>已有B1趋势后，{ma5_gt_20_b2_text}巨量阳线回踩5MA {value("reentry_pct", "4.5")}%内</span>
     <span class="scan-fact"><span>执行</span>B1到50%，B2到100%，下一交易日开盘</span>
     <span class="scan-fact"><span>卖出</span>5MA下7.5% / 连续2日跌破20MA / 跌破成本20%</span>
   </div>
@@ -3033,8 +3181,8 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
   <label>巨量倍数<input name="vol_multiplier" value="{value("vol_multiplier", "1.45")}"></label>
   <label>巨量观察窗口<input name="massive_window" value="{value("massive_window", "7")}"></label>
   <label>巨量最少次数<input name="massive_min_count" value="{value("massive_min_count", "1")}"></label>
-  <label>巨量最多次数<input name="massive_max_count" value="{value("massive_max_count", "2")}"></label>
-  <label class="checkbox-label"><input type="checkbox" name="b1_require_20ma_gt_50ma" value="1"{b1_trend_checked}> B1要求20MA&gt;50MA</label>
+  <input type="hidden" name="require_5ma_gt_20ma" value="0">
+  <label class="checkbox-label"><input type="checkbox" name="require_5ma_gt_20ma" value="1"{require_5ma_gt_20ma_checked}> 买入要求5MA&gt;20MA</label>
   <label>反抽距离 %<input name="reentry_pct" value="{value("reentry_pct", "4.5")}"></label>
   <button type="submit">开始选股</button>
 </form>
@@ -3465,6 +3613,7 @@ def run_scanner(params: dict[str, list[str]]) -> str:
     massive_min_count = int(number_field(params, "massive_min_count", 1))
     massive_max_count = int(number_field(params, "massive_max_count", 2))
     b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", False)
+    require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", True)
     min_price = number_field(params, "min_price", 5)
     min_avg_dollar_volume = number_field(params, "min_avg_dollar_volume", 20_000_000)
     if source == "auto":
@@ -3512,6 +3661,7 @@ def run_scanner(params: dict[str, list[str]]) -> str:
                 massive_min_count,
                 massive_max_count,
                 b1_require_20ma_gt_50ma,
+                require_5ma_gt_20ma,
             )
             if result:
                 result = enrich_signal_result(result, metadata_by_symbol.get(symbol))
@@ -3593,6 +3743,7 @@ def render_candidate_detail(params: dict[str, list[str]]) -> str:
         int(number_field(params, "massive_min_count", 1)),
         int(number_field(params, "massive_max_count", 2)),
         checkbox_field(params, "b1_require_20ma_gt_50ma", False),
+        checkbox_field(params, "require_5ma_gt_20ma", True),
     )
     detail_panel = ""
     if signal_result:
@@ -3855,7 +4006,8 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
       <button type="button" data-preset="5y">5Y</button>
     </div>
     <div class="watchlist-chart-shell">
-      <div id="watchlist-chart" class="watchlist-chart"></div>
+      <div id="watchlist-chart" class="watchlist-chart watchlist-price-chart"></div>
+      <div id="watchlist-kdj-chart" class="watchlist-chart watchlist-kdj-chart"></div>
       <div id="watchlist-tooltip" class="chart-tooltip"></div>
       <div id="watch-chart-loading" class="loading-overlay"><div class="spinner"></div><div>正在拉取日 K 数据</div></div>
     </div>
@@ -3866,8 +4018,10 @@ const watchInitialSymbol = {json.dumps(default_symbol)};
 let watchCurrentSymbol = watchInitialSymbol;
 let watchCurrentPreset = "1y";
 let watchChart = null;
+let watchKdjChart = null;
 let watchSeries = {{}};
 const watchChartEl = document.getElementById("watchlist-chart");
+const watchKdjEl = document.getElementById("watchlist-kdj-chart");
 const watchTooltip = document.getElementById("watchlist-tooltip");
 const watchTitle = document.getElementById("watch-chart-title");
 const watchSubtitle = document.getElementById("watch-chart-subtitle");
@@ -3892,6 +4046,10 @@ function destroyWatchChart() {{
     watchChart.remove();
     watchChart = null;
     watchSeries = {{}};
+  }}
+  if (watchKdjChart) {{
+    watchKdjChart.remove();
+    watchKdjChart = null;
   }}
 }}
 
@@ -3922,6 +4080,33 @@ function makeWatchChart(payload) {{
   watchChart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
   const volMa = watchChart.addLineSeries({{ color: "#2962ff", lineWidth: 1, priceScaleId: "", title: "成交量均线", priceLineVisible: false, lastValueVisible: false }});
   volMa.setData(payload.volMa);
+  watchKdjChart = LightweightCharts.createChart(watchKdjEl, {{
+    layout: {{ background: {{ type: "solid", color: "#ffffff" }}, textColor: "#131722", fontFamily: "Inter, Microsoft YaHei UI, PingFang SC, Arial, sans-serif" }},
+    width: watchKdjEl.clientWidth,
+    height: watchKdjEl.clientHeight,
+    rightPriceScale: {{ borderColor: "#d6dbe3", scaleMargins: {{ top: 0.14, bottom: 0.14 }} }},
+    timeScale: {{ borderColor: "#d6dbe3", rightOffset: 6, barSpacing: 8, minBarSpacing: 3 }},
+    grid: {{ vertLines: {{ color: "#f1f3f6" }}, horzLines: {{ color: "#f1f3f6" }} }},
+    crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
+    handleScroll: {{ mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false }},
+    handleScale: {{ axisPressedMouseMove: true, mouseWheel: true, pinch: true }},
+  }});
+  watchKdjChart.addLineSeries({{ color: "#2563eb", lineWidth: 1.5, title: "K", priceLineVisible: false }}).setData(payload.kdjK || []);
+  watchKdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "D", priceLineVisible: false }}).setData(payload.kdjD || []);
+  watchKdjChart.addLineSeries({{ color: "#7c3aed", lineWidth: 2, title: "J", priceLineVisible: false }}).setData(payload.kdjJ || []);
+  watchKdjChart.addLineSeries({{ color: "#94a3b8", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: "80", priceLineVisible: false, lastValueVisible: false }}).setData(payload.kdjUpper || []);
+  watchKdjChart.addLineSeries({{ color: "#94a3b8", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: "20", priceLineVisible: false, lastValueVisible: false }}).setData(payload.kdjLower || []);
+  let syncingWatchRange = false;
+  function syncWatchRange(source, target) {{
+    source.timeScale().subscribeVisibleLogicalRangeChange(range => {{
+      if (!range || syncingWatchRange) return;
+      syncingWatchRange = true;
+      target.timeScale().setVisibleLogicalRange(range);
+      syncingWatchRange = false;
+    }});
+  }}
+  syncWatchRange(watchChart, watchKdjChart);
+  syncWatchRange(watchKdjChart, watchChart);
   candle.setMarkers(payload.markers || []);
   const rowByTime = new Map(payload.rows.map(row => [row.time, row]));
   watchChart.subscribeCrosshairMove(param => {{
@@ -3931,7 +4116,7 @@ function makeWatchChart(payload) {{
     const up = row.close >= row.open;
     const f = value => value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }});
     const fv = value => value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ maximumFractionDigits: 0 }});
-    watchTooltip.innerHTML = `<strong>${{row.time}}</strong><div><span class="${{up ? "up" : "down"}}">开 ${{f(row.open)}} 高 ${{f(row.high)}} 低 ${{f(row.low)}} 收 ${{f(row.close)}}</span></div><div>成交量 ${{fv(row.volume)}} &nbsp; 5MA ${{f(row.ma)}} &nbsp; 20MA ${{f(row.ma20)}}</div>`;
+    watchTooltip.innerHTML = `<strong>${{row.time}}</strong><div><span class="${{up ? "up" : "down"}}">开 ${{f(row.open)}} 高 ${{f(row.high)}} 低 ${{f(row.low)}} 收 ${{f(row.close)}}</span></div><div>成交量 ${{fv(row.volume)}} &nbsp; 5MA ${{f(row.ma)}} &nbsp; 20MA ${{f(row.ma20)}}</div><div>KDJ K ${{f(row.kdjK)}} &nbsp; D ${{f(row.kdjD)}} &nbsp; J ${{f(row.kdjJ)}}</div>`;
     watchTooltip.style.display = "block";
     watchTooltip.style.left = Math.min(param.point.x + 16, watchChartEl.clientWidth - 250) + "px";
     watchTooltip.style.top = Math.max(44, param.point.y - 72) + "px";
@@ -3941,7 +4126,13 @@ function makeWatchChart(payload) {{
     const rect = entries[0].contentRect;
     watchChart.applyOptions({{ width: Math.floor(rect.width), height: Math.floor(rect.height) }});
   }}).observe(watchChartEl);
+  new ResizeObserver(entries => {{
+    if (!watchKdjChart) return;
+    const rect = entries[0].contentRect;
+    watchKdjChart.applyOptions({{ width: Math.floor(rect.width), height: Math.floor(rect.height) }});
+  }}).observe(watchKdjEl);
   watchChart.timeScale().fitContent();
+  watchKdjChart.timeScale().fitContent();
 }}
 
 async function loadWatchChart(symbol, preset = watchCurrentPreset) {{
@@ -4043,6 +4234,10 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
     ma_points = []
     ma20_points = []
     vol_ma_points = []
+    k_values, d_values, j_values = calculate_kdj(bars)
+    k_points = []
+    d_points = []
+    j_points = []
     dynamic_points = []
     trend_stop_points = []
     volume_points = []
@@ -4064,6 +4259,9 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
                 "ma": ma,
                 "ma20": ma20,
                 "volMa": vol_ma,
+                "kdjK": k_values[i],
+                "kdjD": d_values[i],
+                "kdjJ": j_values[i],
                 "dynamicStop": dynamic_stop,
                 "trendStop": trend_stop,
             }
@@ -4074,6 +4272,12 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
             ma20_points.append({"time": bar.date, "value": ma20})
         if vol_ma is not None:
             vol_ma_points.append({"time": bar.date, "value": vol_ma})
+        if k_values[i] is not None:
+            k_points.append({"time": bar.date, "value": k_values[i]})
+        if d_values[i] is not None:
+            d_points.append({"time": bar.date, "value": d_values[i]})
+        if j_values[i] is not None:
+            j_points.append({"time": bar.date, "value": j_values[i]})
         if dynamic_stop is not None:
             dynamic_points.append({"time": bar.date, "value": dynamic_stop})
         if trend_stop is not None:
@@ -4095,6 +4299,11 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
         "ma": ma_points,
         "ma20": ma20_points,
         "volMa": vol_ma_points,
+        "kdjK": k_points,
+        "kdjD": d_points,
+        "kdjJ": j_points,
+        "kdjUpper": [{"time": bar.date, "value": 80} for bar in bars],
+        "kdjLower": [{"time": bar.date, "value": 20} for bar in bars],
         "dynamicStop": dynamic_points,
         "trendStop": trend_stop_points,
         "markers": sorted(markers, key=lambda item: str(item["time"])),
@@ -4199,6 +4408,7 @@ def execute_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
         massive_min_count = int(number_field(params, "massive_min_count", 1))
         massive_max_count = int(number_field(params, "massive_max_count", 2))
         b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", False)
+        require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", True)
         min_price = number_field(params, "min_price", 5)
         min_avg_dollar_volume = number_field(params, "min_avg_dollar_volume", 20_000_000)
 
@@ -4270,6 +4480,7 @@ def execute_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
                         massive_min_count,
                         massive_max_count,
                         b1_require_20ma_gt_50ma,
+                        require_5ma_gt_20ma,
                     )
                     pending[future] = symbol
                     next_index += 1
@@ -4512,7 +4723,9 @@ class Handler(BaseHTTPRequestHandler):
                 elif route_path == "/watchlist/chart":
                     self.ashare_watchlist_chart(params)
                 elif route_path == "/backtest":
-                    self.send_bytes(page_shell(render_market_placeholder("backtest"), "backtest", "cn"))
+                    self.send_bytes(page_shell(render_ashare_backtest_form(params), "backtest", "cn"))
+                elif route_path == "/run":
+                    self.send_bytes(page_shell(run_ashare_strategy(params), "backtest", "cn"))
                 elif route_path == "/batch":
                     self.send_bytes(page_shell(render_market_placeholder("batch"), "batch", "cn"))
                 else:

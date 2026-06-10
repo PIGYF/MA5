@@ -129,6 +129,7 @@ def latest_b_signal(
     massive_min_count: int = 1,
     massive_max_count: int = 2,
     b1_require_20ma_gt_50ma: bool = False,
+    require_5ma_gt_20ma: bool = True,
 ) -> SignalResult | None:
     result, _ = latest_b_signal_with_reason(
         symbol,
@@ -145,6 +146,7 @@ def latest_b_signal(
         massive_min_count,
         massive_max_count,
         b1_require_20ma_gt_50ma,
+        require_5ma_gt_20ma,
     )
     return result
 
@@ -164,6 +166,7 @@ def latest_b_signal_with_reason(
     massive_min_count: int = 1,
     massive_max_count: int = 2,
     b1_require_20ma_gt_50ma: bool = False,
+    require_5ma_gt_20ma: bool = True,
 ) -> tuple[SignalResult | None, str]:
     if len(bars) < max(ma_length, vol_length) + 10:
         return None, f"数据不足：需要至少 {max(ma_length, vol_length) + 10} 根日K，当前 {len(bars)} 根"
@@ -196,8 +199,9 @@ def latest_b_signal_with_reason(
 
     ma_is_rising = ma[i - 1] is not None and ma[i] > ma[i - 1]
     vol_days_high = i >= vol_high_days - 1 and all(is_vol_high[j] for j in range(i - vol_high_days + 1, i + 1))
-    has_massive_vol = massive_min_count <= massive_counts[i] <= massive_max_count
+    has_massive_vol = massive_counts[i] >= massive_min_count
     price_above_ma = bar.close > ma[i]
+    ma5_gt_20 = ma[i] is not None and ma20[i] is not None and ma[i] > ma20[i]
     ma20_gt_50 = ma20[i] is not None and ma50[i] is not None and ma20[i] > ma50[i]
 
     def bull_quality_ok_at(index: int) -> bool:
@@ -214,21 +218,32 @@ def latest_b_signal_with_reason(
             continue
         j_ma_rising = j > 0 and ma[j - 1] is not None and ma[j] > ma[j - 1]
         j_vol_days_high = j >= vol_high_days - 1 and all(is_vol_high[k] for k in range(j - vol_high_days + 1, j + 1))
-        j_has_massive_vol = massive_min_count <= massive_counts[j] <= massive_max_count
+        j_has_massive_vol = massive_counts[j] >= massive_min_count
         j_price_above_ma = bars[j].close > ma[j]
+        j_ma5_gt_20 = ma[j] is not None and ma20[j] is not None and ma[j] > ma20[j]
         j_ma20_gt_50 = ma20[j] is not None and ma50[j] is not None and ma20[j] > ma50[j]
-        j_initial_buy = j_price_above_ma and j_vol_days_high and j_has_massive_vol and j_ma_rising
-        if b1_require_20ma_gt_50ma:
-            j_initial_buy = j_initial_buy and j_ma20_gt_50
+        j_initial_buy = (
+            j_price_above_ma
+            and j_vol_days_high
+            and j_has_massive_vol
+            and j_ma_rising
+            and j_ma20_gt_50
+            and (j_ma5_gt_20 or not require_5ma_gt_20ma)
+        )
         if j_initial_buy:
             trend_confirmed = True
         if bars[j].close < ma[j] * 0.925:
             trend_confirmed = False
 
     dist_to_ma = abs(bar.close - ma[i]) / ma[i]
-    initial_buy = price_above_ma and vol_days_high and has_massive_vol and ma_is_rising
-    if b1_require_20ma_gt_50ma:
-        initial_buy = initial_buy and ma20_gt_50
+    initial_buy = (
+        price_above_ma
+        and vol_days_high
+        and has_massive_vol
+        and ma_is_rising
+        and ma20_gt_50
+        and (ma5_gt_20 or not require_5ma_gt_20ma)
+    )
     full_range = bar.high - bar.low
     body = abs(bar.close - bar.open)
     upper_shadow = bar.high - max(bar.open, bar.close)
@@ -241,6 +256,7 @@ def latest_b_signal_with_reason(
         and dist_to_ma <= reentry_pct / 100
         and bar.close > bar.open
         and ma_is_rising
+        and (ma5_gt_20 or not require_5ma_gt_20ma)
         and bull_quality_ok
         and upper_shadow_ok
     )
@@ -256,6 +272,10 @@ def latest_b_signal_with_reason(
             failed.append(f"7日巨量次数为 {int(massive_counts[i])}，不在1到2次")
         if b1_require_20ma_gt_50ma and not ma20_gt_50:
             failed.append("B1 20MA>50MA 趋势过滤未通过")
+        if require_5ma_gt_20ma and not ma5_gt_20:
+            failed.append("5MA 未大于 20MA")
+        if not ma20_gt_50:
+            failed.append("20MA 未大于 50MA")
         if not is_massive_vol[i]:
             failed.append("当日不是巨量")
         if dist_to_ma > reentry_pct / 100:
