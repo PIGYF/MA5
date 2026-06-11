@@ -1347,6 +1347,40 @@ def latest_ashare_scan_to_html() -> str:
 """
 
 
+def render_ashare_condition_panel() -> str:
+    return """
+<section class="result">
+  <div class="toolbar">
+    <div>
+      <h2>A股选股条件</h2>
+      <p class="hint">当前 A 股模块复用美股 MA5/B 点核心，但加入 A 股流动性、板块涨跌幅和次日成交限制。</p>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>类别</th><th>条件</th><th>当前规则</th><th>用途</th></tr></thead>
+      <tbody>
+        <tr><td>股票池</td><td>剔除 ST / 退市 / 异常名称</td><td>默认排除 ST、*ST、退市标的</td><td>规避不可复制的交易和退市风险。</td></tr>
+        <tr><td>股票池</td><td>板块范围</td><td>主板、创业板、科创板、北交所可勾选</td><td>不同板块涨跌幅限制不同，后续执行规则会分开处理。</td></tr>
+        <tr><td>股票池</td><td>最低市值</td><td>页面默认 50 亿元，可调整</td><td>过滤过小市值，降低流动性和极端波动影响。</td></tr>
+        <tr><td>股票池</td><td>最大扫描数</td><td>页面默认 300 只，可调整</td><td>控制本地行情请求耗时。</td></tr>
+        <tr><td>硬条件</td><td>MA5/B 点</td><td>收盘在 MA5 上方，MA5 上行，并触发 B1/B2</td><td>复制美股当前主策略的入场框架。</td></tr>
+        <tr><td>硬条件</td><td>趋势结构</td><td>MA5 与 MA20 同屏展示，候选以短线趋势转强为核心</td><td>避免只看单日放量。</td></tr>
+        <tr><td>硬条件</td><td>20日均成交额</td><td>默认不低于 1 亿元</td><td>A 股必须先保证可成交性。</td></tr>
+        <tr><td>量能评分</td><td>红长绿短</td><td>峰值/基准、10日均/基准、红均/绿均、Top5 红柱数</td><td>用于排序和人工复核，不再替代 B 点硬条件。</td></tr>
+        <tr><td>量能评分</td><td>量比</td><td>当日成交量 / 20日均量</td><td>明细图下方展示，用于判断放量强度。</td></tr>
+        <tr><td>涨跌幅</td><td>板块限制</td><td>主板 10%，创业板/科创板 20%，北交所 30%</td><td>用于识别涨停、跌停和次日无法成交场景。</td></tr>
+        <tr><td>执行约束</td><td>买入限制</td><td>次日接近涨停不买，高开超过阈值跳过</td><td>避免回测假设买到一字板或过度追高。</td></tr>
+        <tr><td>执行约束</td><td>卖出限制</td><td>接近跌停卖不出则顺延</td><td>贴近 A 股跌停流动性约束。</td></tr>
+        <tr><td>交易成本</td><td>费用</td><td>买卖佣金 + 卖出印花税 + 滑点</td><td>回测中单独纳入 A 股实际成本。</td></tr>
+        <tr><td>风控</td><td>时间止损</td><td>可设置持仓若干天未创新高则退出</td><td>处理 A 股震荡回落和资金占用。</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+"""
+
+
 def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     mode = field(params, "mode", "")
     symbol = field(params, "symbol", "")
@@ -1452,7 +1486,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     <div class="toolbar">
       <div>
         <h2>策略图表</h2>
-        <p class="hint">主图显示 K 线、趋势线、多空线；下方显示成交量与 KDJ。</p>
+        <p class="hint">主图显示 K 线、MA5/MA20 与 B1/B2 标记；下方显示量比与 20 日均成交额。</p>
       </div>
     </div>
     <div class="watchlist-chart-shell" style="height:780px;">
@@ -1498,10 +1532,10 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
       upColor: "#089981", downColor: "#f23645", borderUpColor: "#089981", borderDownColor: "#f23645", wickUpColor: "#089981", wickDownColor: "#f23645", priceLineVisible: false,
     }});
     candle.setData(candleRows);
-    const shortTrend = mainChart.addLineSeries({{ color: "#2563eb", lineWidth: 2, title: "趋势线", priceLineVisible: false }});
-    shortTrend.setData(toLine(payload.zx_short_trend));
-    const multiTrend = mainChart.addLineSeries({{ color: "#dc2626", lineWidth: 2, title: "多空线", priceLineVisible: false }});
-    multiTrend.setData(toLine(payload.zx_multi_trend));
+    const shortTrend = mainChart.addLineSeries({{ color: "#2563eb", lineWidth: 2, title: "MA5", priceLineVisible: false }});
+    shortTrend.setData(toLine(payload.ma5 || payload.zx_short_trend));
+    const multiTrend = mainChart.addLineSeries({{ color: "#dc2626", lineWidth: 2, title: "MA20", priceLineVisible: false }});
+    multiTrend.setData(toLine(payload.ma20 || payload.zx_multi_trend));
     const volSeries = mainChart.addHistogramSeries({{ priceScaleId: "", priceFormat: {{ type: "volume" }}, priceLineVisible: false, lastValueVisible: false }});
     volSeries.setData(volumeRows);
     mainChart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
@@ -1512,14 +1546,12 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
       shape: "arrowUp",
       text: row.text || "B",
     }})));
-    const kLine = kdjChart.addLineSeries({{ color: "#2563eb", lineWidth: 1.5, title: "K", priceLineVisible: false }});
-    kLine.setData(toLine(payload.k));
-    const dLine = kdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "D", priceLineVisible: false }});
-    dLine.setData(toLine(payload.d));
-    const jLine = kdjChart.addLineSeries({{ color: "#7c3aed", lineWidth: 2, title: "J", priceLineVisible: false }});
-    jLine.setData(toLine(payload.j));
-    const threshold = kdjChart.addLineSeries({{ color: "#ef4444", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: "J阈值", priceLineVisible: false }});
-    threshold.setData(candleRows.map(row => ({{ time: row.time, value: {j_threshold} }})));
+    const ratioLine = kdjChart.addLineSeries({{ color: "#7c3aed", lineWidth: 2, title: "量比", priceLineVisible: false }});
+    ratioLine.setData(toLine(payload.volume_ratio));
+    const amountLine = kdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "20日均成交额(亿)", priceLineVisible: false }});
+    amountLine.setData(toLine(payload.amount20));
+    const amountGate = kdjChart.addLineSeries({{ color: "#ef4444", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: "成交额1亿", priceLineVisible: false }});
+    amountGate.setData(candleRows.map(row => ({{ time: row.time, value: 1 }})));
     let syncing = false;
     function syncRange(source, target) {{
       source.timeScale().subscribeVisibleLogicalRangeChange(range => {{
@@ -1548,7 +1580,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
         return;
       }}
       const up = row.close >= row.open;
-      tooltip.innerHTML = `<strong>${{row.time}}</strong><div><span class="${{up ? "up" : "down"}}">开 ${{formatNum(row.open)}} 高 ${{formatNum(row.high)}} 低 ${{formatNum(row.low)}} 收 ${{formatNum(row.close)}}</span></div><div>成交量 ${{formatVol(row.volume)}} &nbsp; 短期趋势 ${{formatNum(param.seriesData.get(shortTrend)?.value)}} &nbsp; 多空线 ${{formatNum(param.seriesData.get(multiTrend)?.value)}}</div>`;
+      tooltip.innerHTML = `<strong>${{row.time}}</strong><div><span class="${{up ? "up" : "down"}}">开 ${{formatNum(row.open)}} 高 ${{formatNum(row.high)}} 低 ${{formatNum(row.low)}} 收 ${{formatNum(row.close)}}</span></div><div>成交量 ${{formatVol(row.volume)}} &nbsp; MA5 ${{formatNum(param.seriesData.get(shortTrend)?.value)}} &nbsp; MA20 ${{formatNum(param.seriesData.get(multiTrend)?.value)}}</div>`;
       tooltip.style.display = "block";
       tooltip.style.left = Math.min(param.point.x + 16, mainEl.clientWidth - 280) + "px";
       tooltip.style.top = Math.max(44, param.point.y - 72) + "px";
@@ -1591,18 +1623,19 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
 </section>
 <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 {render_ashare_latest_banner() if show_latest_banner else ""}
+{render_ashare_condition_panel()}
 <form class="form" action="/cn/scanner" method="get">
   <input type="hidden" name="mode" value="single">
+  <input type="hidden" name="j_threshold" value="{j_threshold:g}">
   <label>股票代码<input name="symbol" value="{html.escape(symbol)}" placeholder="600487"></label>
-  <label>J值阈值<input type="number" step="0.1" name="j_threshold" value="{j_threshold:g}"></label>
   <button type="submit">单票验证</button>
 </form>
 <form class="form" id="ashare-scanner-form" action="/cn/scanner" method="get" data-async-submit="true">
   <input type="hidden" name="mode" value="market">
+  <input type="hidden" name="j_threshold" value="{j_threshold:g}">
   <label>最低市值（亿元）<input type="number" step="1" name="min_market_cap" value="{min_market_cap:g}"></label>
   <label>最多扫描<input type="number" step="1" name="max_symbols" value="{max_symbols}"></label>
   <label>并发数<input type="number" step="1" name="max_workers" value="{int(number_field(params, "max_workers", 6))}"></label>
-  <label>J值阈值<input type="number" step="0.1" name="j_threshold" value="{j_threshold:g}"></label>
   <label class="wide">板块范围<div class="checkbox-row">{board_controls}</div></label>
   <button type="submit">开始选股</button>
 </form>
@@ -1871,18 +1904,17 @@ function renderAshareWatchChart(payload) {{
   ashareKdjChart = LightweightCharts.createChart(ashareKdjEl, {{ ...common, width: ashareKdjEl.clientWidth, height: ashareKdjEl.clientHeight, rightPriceScale: {{ borderColor: "#d6dbe3", scaleMargins: {{ top: 0.12, bottom: 0.12 }} }} }});
   const candle = ashareMainChart.addCandlestickSeries({{ upColor: "#089981", downColor: "#f23645", borderUpColor: "#089981", borderDownColor: "#f23645", wickUpColor: "#089981", wickDownColor: "#f23645", priceLineVisible: false }});
   candle.setData(candles);
-  const trend = ashareMainChart.addLineSeries({{ color: "#2563eb", lineWidth: 2, title: "趋势线", priceLineVisible: false }});
-  trend.setData(toLine(payload.zx_short_trend));
-  const multi = ashareMainChart.addLineSeries({{ color: "#dc2626", lineWidth: 2, title: "多空线", priceLineVisible: false }});
-  multi.setData(toLine(payload.zx_multi_trend));
+  const trend = ashareMainChart.addLineSeries({{ color: "#2563eb", lineWidth: 2, title: "MA5", priceLineVisible: false }});
+  trend.setData(toLine(payload.ma5 || payload.zx_short_trend));
+  const multi = ashareMainChart.addLineSeries({{ color: "#dc2626", lineWidth: 2, title: "MA20", priceLineVisible: false }});
+  multi.setData(toLine(payload.ma20 || payload.zx_multi_trend));
   const volSeries = ashareMainChart.addHistogramSeries({{ priceScaleId: "", priceFormat: {{ type: "volume" }}, priceLineVisible: false, lastValueVisible: false }});
   volSeries.setData(volumes);
   ashareMainChart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
   candle.setMarkers((payload.signals || []).map(row => ({{ time: row.x, position: "belowBar", color: "#16a34a", shape: "arrowUp", text: row.text || "B" }})));
-  ashareKdjChart.addLineSeries({{ color: "#2563eb", lineWidth: 1.5, title: "K", priceLineVisible: false }}).setData(toLine(payload.k));
-  ashareKdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "D", priceLineVisible: false }}).setData(toLine(payload.d));
-  ashareKdjChart.addLineSeries({{ color: "#7c3aed", lineWidth: 2, title: "J", priceLineVisible: false }}).setData(toLine(payload.j));
-  ashareKdjChart.addLineSeries({{ color: "#ef4444", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: "J阈值", priceLineVisible: false }}).setData(candles.map(row => ({{ time: row.time, value: payload.j_threshold || 14 }})));
+  ashareKdjChart.addLineSeries({{ color: "#7c3aed", lineWidth: 2, title: "量比", priceLineVisible: false }}).setData(toLine(payload.volume_ratio));
+  ashareKdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "20日均成交额(亿)", priceLineVisible: false }}).setData(toLine(payload.amount20));
+  ashareKdjChart.addLineSeries({{ color: "#ef4444", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: "成交额1亿", priceLineVisible: false }}).setData(candles.map(row => ({{ time: row.time, value: 1 }})));
   let syncing = false;
   function sync(source, target) {{
     source.timeScale().subscribeVisibleLogicalRangeChange(range => {{
@@ -1904,7 +1936,7 @@ function renderAshareWatchChart(payload) {{
     const row = rowByTime.get(param.time);
     if (!row) return;
     const up = row.close >= row.open;
-    ashareTooltip.innerHTML = `<strong>${{row.time}}</strong><div><span class="${{up ? "up" : "down"}}">开 ${{f(row.open)}} 高 ${{f(row.high)}} 低 ${{f(row.low)}} 收 ${{f(row.close)}}</span></div><div>成交量 ${{fv(row.volume)}} &nbsp; 趋势线 ${{f(param.seriesData.get(trend)?.value)}} &nbsp; 多空线 ${{f(param.seriesData.get(multi)?.value)}}</div>`;
+    ashareTooltip.innerHTML = `<strong>${{row.time}}</strong><div><span class="${{up ? "up" : "down"}}">开 ${{f(row.open)}} 高 ${{f(row.high)}} 低 ${{f(row.low)}} 收 ${{f(row.close)}}</span></div><div>成交量 ${{fv(row.volume)}} &nbsp; MA5 ${{f(param.seriesData.get(trend)?.value)}} &nbsp; MA20 ${{f(param.seriesData.get(multi)?.value)}}</div>`;
     ashareTooltip.style.display = "block";
     ashareTooltip.style.left = Math.min(param.point.x + 16, ashareMainEl.clientWidth - 280) + "px";
     ashareTooltip.style.top = Math.max(44, param.point.y - 72) + "px";

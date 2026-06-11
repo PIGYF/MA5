@@ -144,13 +144,40 @@ def ashare_indicator_series(bars: list[AShareBar], j_threshold: float = 14.0) ->
 def ashare_chart_payload(symbol: str, j_threshold: float = 14.0) -> dict[str, object]:
     clean = normalize_ashare_symbol(symbol)
     bars, source = fetch_ashare_bars(clean)
-    points = ashare_indicator_series(bars, j_threshold)
+    from backtest import build_ratchet_inputs, rolling_sma
+
+    bt_bars = ashare_to_backtest_bars(bars)
+    closes = [bar.close for bar in bt_bars]
+    volumes = [bar.volume for bar in bt_bars]
+    amounts = [bar.amount if bar.amount > 0 else bar.close * bar.volume for bar in bars]
+    ma5 = rolling_sma(closes, 5)
+    ma20 = rolling_sma(closes, 20)
+    amount20 = rolling_sma(amounts, 20)
+    volume_ma20 = rolling_sma(volumes, 20)
+    buy_signal, _, _, _, buy_target_pct, buy_stage = build_ratchet_inputs(
+        bt_bars,
+        ma_length=5,
+        vol_length=20,
+        vol_multiplier=1.8,
+        reentry_pct=0.045,
+        vol_high_days=2,
+        vol_high_multiplier=1.0,
+        massive_window=7,
+        massive_min_count=1,
+        massive_max_count=2,
+        b1_require_20ma_gt_50ma=False,
+    )
     name, sector = fetch_ashare_profile(clean)
+    volume_ratio = [
+        None if not volume_ma20[i] else bars[i].volume / float(volume_ma20[i])
+        for i in range(len(bars))
+    ]
     return {
         "symbol": clean,
         "name": name,
         "sector": sector,
         "source": source,
+        "strategy": "A股 MA5/B点",
         "ohlc": [{"x": bar.date, "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close} for bar in bars],
         "volume": [
             {
@@ -160,18 +187,18 @@ def ashare_chart_payload(symbol: str, j_threshold: float = 14.0) -> dict[str, ob
             }
             for i, bar in enumerate(bars)
         ],
-        "zx_short_trend": [{"x": point["time"], "y": point["zx_short_trend"]} for point in points if point["zx_short_trend"] is not None],
-        "zx_multi_trend": [{"x": point["time"], "y": point["zx_multi_trend"]} for point in points if point["zx_multi_trend"] is not None],
-        "k": [{"x": point["time"], "y": point["k"]} for point in points if point["k"] is not None],
-        "d": [{"x": point["time"], "y": point["d"]} for point in points if point["d"] is not None],
-        "j": [{"x": point["time"], "y": point["j"]} for point in points if point["j"] is not None],
+        "ma5": [{"x": bars[i].date, "y": value} for i, value in enumerate(ma5) if value is not None],
+        "ma20": [{"x": bars[i].date, "y": value} for i, value in enumerate(ma20) if value is not None],
+        "amount20": [{"x": bars[i].date, "y": value / 100_000_000} for i, value in enumerate(amount20) if value is not None],
+        "volume_ratio": [{"x": bars[i].date, "y": value} for i, value in enumerate(volume_ratio) if value is not None],
+        "zx_short_trend": [{"x": bars[i].date, "y": value} for i, value in enumerate(ma5) if value is not None],
+        "zx_multi_trend": [{"x": bars[i].date, "y": value} for i, value in enumerate(ma20) if value is not None],
         "signals": [
-            {"x": bar.date, "y": bar.low, "text": "B"}
-            for bar, point in zip(bars, points)
-            if point["signal"]
+            {"x": bars[i].date, "y": bars[i].low, "text": buy_stage[i] or "B", "target_pct": buy_target_pct[i]}
+            for i, signal in enumerate(buy_signal)
+            if signal
         ],
     }
-
 
 def normalize_ashare_symbol(symbol: str) -> str:
     clean = "".join(ch for ch in symbol.strip().upper() if ch.isalnum())
