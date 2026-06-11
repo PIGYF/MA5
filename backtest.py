@@ -380,6 +380,24 @@ def is_limit_down(bar: Bar, previous_close: float, limit_pct: float, tolerance_p
     return bar.open <= threshold and bar.low <= threshold and bar.close <= threshold
 
 
+def limit_volume_weight(bar: Bar, previous_close: float, limit_pct: float, tolerance_pct: float = 0.35) -> float:
+    if previous_close <= 0 or limit_pct <= 0:
+        return 1.0
+    limit_bar = is_limit_up(bar, previous_close, limit_pct, tolerance_pct) or is_limit_down(bar, previous_close, limit_pct, tolerance_pct)
+    if not limit_bar:
+        return 1.0
+    sealed_range = (bar.high - bar.low) / previous_close <= 0.005
+    return 0.0 if sealed_range else 0.5
+
+
+def adjust_limit_volumes(bars: list[Bar], limit_pct: float, tolerance_pct: float = 0.35) -> list[float]:
+    adjusted: list[float] = []
+    for i, bar in enumerate(bars):
+        previous_close = bars[i - 1].close if i > 0 else 0.0
+        adjusted.append(bar.volume * limit_volume_weight(bar, previous_close, limit_pct, tolerance_pct))
+    return adjusted
+
+
 def build_signals(
     bars: list[Bar],
     ma_length: int,
@@ -433,19 +451,20 @@ def build_ratchet_inputs(
     massive_max_count: int = 2,
     b1_require_20ma_gt_50ma: bool = False,
     require_5ma_gt_20ma: bool = True,
+    signal_volumes: list[float] | None = None,
 ) -> tuple[list[bool], list[bool], list[float | None], list[float | None], list[float], list[str]]:
     closes = [bar.close for bar in bars]
-    volumes = [bar.volume for bar in bars]
+    volumes = signal_volumes if signal_volumes is not None and len(signal_volumes) == len(bars) else [bar.volume for bar in bars]
     ma = rolling_sma(closes, ma_length)
     ma20 = rolling_sma(closes, 20)
     vol_ma = rolling_sma(volumes, vol_length)
     ma50 = rolling_sma(closes, 50)
 
     is_vol_high = [
-        vol_ma[i] is not None and bars[i].volume > vol_ma[i] * vol_high_multiplier for i in range(len(bars))
+        vol_ma[i] is not None and volumes[i] > vol_ma[i] * vol_high_multiplier for i in range(len(bars))
     ]
     is_massive_vol = [
-        vol_ma[i] is not None and bars[i].volume >= vol_ma[i] * vol_multiplier
+        vol_ma[i] is not None and volumes[i] >= vol_ma[i] * vol_multiplier
         for i in range(len(bars))
     ]
     massive_counts = rolling_sum([1 if x else 0 for x in is_massive_vol], massive_window)
@@ -546,6 +565,7 @@ def backtest(
     time_stop_days: int = 0,
 ) -> tuple[list[Trade], list[dict[str, float | str]]]:
     if strategy_name == "ratchet":
+        signal_volumes = adjust_limit_volumes(bars, limit_pct, buy_limit_tolerance_pct) if market == "cn" else None
         buy_signal, _, ma, vol_ma, buy_target_pct, buy_stage = build_ratchet_inputs(
             bars,
             ma_length,
@@ -559,6 +579,7 @@ def backtest(
             massive_max_count,
             b1_require_20ma_gt_50ma,
             require_5ma_gt_20ma,
+            signal_volumes,
         )
         sell_signal = [False] * len(bars)
         closes = [bar.close for bar in bars]

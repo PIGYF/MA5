@@ -39,6 +39,7 @@ from ma5_config import (
     DEFAULT_HIDE_WEAK_CANDIDATES,
     DEFAULT_MAX_SCAN_SYMBOLS,
     DEFAULT_MIN_MARKET_CAP_100M_USD,
+    DIVERGENCE_EVENTS_PATH,
     EARNINGS_CACHE_PATH,
     EARNINGS_CACHE_SECONDS,
     LATEST_SCAN_PATH,
@@ -77,7 +78,9 @@ from ashare_lab import (
     latest_ashare_signal,
     load_ashare_universe_for_scan,
     normalize_ashare_boards,
+    resolve_ashare_symbol_query,
     scan_ashare_candidates,
+    suggest_ashare_symbols,
 )
 from scan_next_b import SignalResult, latest_b_signal, load_symbols, unique_symbols, write_html
 
@@ -432,6 +435,210 @@ def update_watchlist_symbol(symbol: str, group: str, note: str) -> list[str]:
     raise ValueError(f"{clean} 不在自选池中。")
 
 
+EVENT_TYPE_LABELS = {
+    "bullish": "利好",
+    "bearish": "利空",
+}
+DIVERGENCE_TYPE_LABELS = {
+    "good_news_ignored": "利好未涨",
+    "bad_news_resilient": "利空不跌",
+}
+IMPORTANCE_LABELS = {
+    "major": "重大",
+    "medium": "中等",
+    "minor": "一般",
+}
+
+
+def load_divergence_events() -> list[dict[str, str]]:
+    if not DIVERGENCE_EVENTS_PATH.exists():
+        return []
+    try:
+        payload = json.loads(DIVERGENCE_EVENTS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    raw_events = payload.get("events", []) if isinstance(payload, dict) else []
+    events: list[dict[str, str]] = []
+    for raw in raw_events:
+        if not isinstance(raw, dict):
+            continue
+        symbol = normalize_yahoo_symbol(str(raw.get("symbol", "")))
+        event_date = str(raw.get("event_date", "")).strip()
+        try:
+            date.fromisoformat(event_date)
+        except ValueError:
+            continue
+        if not symbol:
+            continue
+        events.append(
+            {
+                "id": str(raw.get("id") or uuid.uuid4().hex[:12]),
+                "symbol": symbol.upper(),
+                "event_date": event_date,
+                "event_type": str(raw.get("event_type") or "bullish"),
+                "divergence_type": str(raw.get("divergence_type") or "good_news_ignored"),
+                "importance": str(raw.get("importance") or "medium"),
+                "note": str(raw.get("note") or "").strip()[:240],
+                "created_at": str(raw.get("created_at") or ""),
+            }
+        )
+    return sorted(events, key=lambda item: (item["symbol"], item["event_date"]), reverse=True)
+
+
+def save_divergence_events(events: list[dict[str, str]]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "events": events,
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    DIVERGENCE_EVENTS_PATH.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+
+
+def add_divergence_event(params: dict[str, list[str]]) -> dict[str, str]:
+    symbol = normalize_yahoo_symbol(field(params, "symbol", ""))
+    if not symbol:
+        raise ValueError("缺少股票代码。")
+    event_date = field(params, "event_date", "")
+    try:
+        date.fromisoformat(event_date)
+    except ValueError as exc:
+        raise ValueError("请输入有效的事件日期。") from exc
+    event_type = field(params, "event_type", "bullish")
+    divergence_type = field(params, "divergence_type", "good_news_ignored")
+    importance = field(params, "importance", "medium")
+    if event_type not in EVENT_TYPE_LABELS:
+        event_type = "bullish"
+    if divergence_type not in DIVERGENCE_TYPE_LABELS:
+        divergence_type = "good_news_ignored"
+    if importance not in IMPORTANCE_LABELS:
+        importance = "medium"
+    event = {
+        "id": uuid.uuid4().hex[:12],
+        "symbol": symbol.upper(),
+        "event_date": event_date,
+        "event_type": event_type,
+        "divergence_type": divergence_type,
+        "importance": importance,
+        "note": field(params, "note", "")[:240],
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    events = load_divergence_events()
+    events.append(event)
+    save_divergence_events(events)
+    return event
+
+
+def delete_divergence_event(event_id: str) -> None:
+    event_id = event_id.strip()
+    events = [event for event in load_divergence_events() if event.get("id") != event_id]
+    save_divergence_events(events)
+
+
+def business_days_between(start: date, end: date) -> int:
+    if end < start:
+        return -business_days_between(end, start)
+    days = 0
+    current = start
+    while current < end:
+        current += timedelta(days=1)
+        if current.weekday() < 5:
+            days += 1
+    return days
+
+
+def divergence_window_status(event_date: date, as_of: date) -> tuple[str, str, int]:
+    day_count = business_days_between(event_date, as_of)
+    if day_count < 0:
+        return "future", "未发生", day_count
+    if 13 <= day_count <= 27:
+        return "window", "分歧窗口", day_count
+    if day_count < 13:
+        return "building", "观察期", day_count
+    return "expired", "已过期", day_count
+
+
+def divergence_score(event: dict[str, str], status: str) -> int:
+    if status == "window":
+        score = 3
+    elif status == "building":
+        score = 2
+    else:
+        score = 0
+    if event.get("importance") == "major":
+        score += 1
+    if event.get("divergence_type") == "bad_news_resilient":
+        score += 1
+    return min(score, 5)
+
+
+def enriched_divergence_event(event: dict[str, str], as_of: date) -> dict[str, object]:
+    event_day = date.fromisoformat(event["event_date"])
+    status_key, status_label, day_count = divergence_window_status(event_day, as_of)
+    return {
+        **event,
+        "event_type_label": EVENT_TYPE_LABELS.get(event.get("event_type", ""), "事件"),
+        "divergence_type_label": DIVERGENCE_TYPE_LABELS.get(event.get("divergence_type", ""), "分歧"),
+        "importance_label": IMPORTANCE_LABELS.get(event.get("importance", ""), "中等"),
+        "status_key": status_key,
+        "status_label": status_label,
+        "day_count": day_count,
+        "score": divergence_score(event, status_key),
+    }
+
+
+def divergence_events_for_symbol(symbol: str, as_of: date | None = None) -> list[dict[str, object]]:
+    clean = normalize_yahoo_symbol(symbol)
+    if not clean:
+        return []
+    as_of = as_of or default_scan_end_date()
+    events = [event for event in load_divergence_events() if event["symbol"] == clean.upper()]
+    return [enriched_divergence_event(event, as_of) for event in sorted(events, key=lambda item: item["event_date"], reverse=True)]
+
+
+def best_divergence_for_symbol(symbol: str, as_of_text: str) -> dict[str, object] | None:
+    try:
+        as_of = date.fromisoformat(as_of_text)
+    except ValueError:
+        as_of = default_scan_end_date()
+    events = divergence_events_for_symbol(symbol, as_of)
+    if not events:
+        return None
+    rank = {"window": 0, "building": 1, "future": 2, "expired": 3}
+    return sorted(events, key=lambda item: (rank.get(str(item.get("status_key")), 9), -int(item.get("score", 0)), str(item.get("event_date", ""))), reverse=False)[0]
+
+
+def render_divergence_chip(event: dict[str, object] | None) -> str:
+    if not event:
+        return '<span class="divergence-chip divergence-none">无记录</span>'
+    status = html.escape(str(event.get("status_key", "none")))
+    label = html.escape(str(event.get("status_label", "-")))
+    event_date = html.escape(str(event.get("event_date", "-")))
+    div_label = html.escape(str(event.get("divergence_type_label", "-")))
+    importance = html.escape(str(event.get("importance_label", "-")))
+    day_count = event.get("day_count", "-")
+    return f'<span class="divergence-chip divergence-{status}" title="{event_date} · {importance} · {div_label}">D+{day_count} {label}</span>'
+
+
+def render_divergence_event_list(symbol: str, as_of: date | None = None) -> str:
+    events = divergence_events_for_symbol(symbol, as_of)
+    if not events:
+        return '<div class="divergence-empty">当前股票还没有记录分歧事件。</div>'
+    items = []
+    for event in events[:8]:
+        event_id = quote(str(event.get("id", "")))
+        status = html.escape(str(event.get("status_key", "none")))
+        note = html.escape(str(event.get("note", "")) or "-")
+        items.append(
+            f"""<div class="divergence-item divergence-{status}">
+  <div><strong>{html.escape(str(event.get("event_date", "-")))} · {html.escape(str(event.get("importance_label", "-")))} {html.escape(str(event.get("divergence_type_label", "-")))}</strong>
+  <span>D+{html.escape(str(event.get("day_count", "-")))} · {html.escape(str(event.get("status_label", "-")))} · {html.escape(str(event.get("score", 0)))}/5</span></div>
+  <p>{note}</p>
+  <a class="delete-link" href="/watchlist/divergence/delete?id={event_id}&symbol={quote(symbol)}" onclick="return confirm('确认删除这条分歧事件？');">删除</a>
+</div>"""
+        )
+    return "".join(items)
+
+
 def ashare_watchlist_path() -> Path:
     return DATA_DIR / "ashare" / "watchlist.json"
 
@@ -560,7 +767,7 @@ def delete_latest_ashare_scan() -> bool:
 
 
 def add_ashare_watchlist_symbol(symbol: str, group: str = "观察", note: str = "", name: str = "", sector: str = "") -> list[dict[str, str]]:
-    clean = normalize_ashare_code_for_storage(symbol)
+    clean = normalize_ashare_code_for_storage(resolve_ashare_symbol_query(symbol))
     if not name or not sector:
         try:
             fetched_name, fetched_sector = fetch_ashare_profile(clean)
@@ -743,6 +950,24 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .watch-detail-item {{ border: 1px solid #e3e7ee; background: #f8fafc; border-radius: 6px; padding: 8px 9px; }}
 .watch-detail-item span {{ display: block; color: #64748b; font-size: 11px; font-weight: 800; margin-bottom: 4px; }}
 .watch-detail-item strong {{ font-size: 13px; }}
+.divergence-panel {{ border: 1px solid #e3e7ee; background: #f8fafc; border-radius: 6px; padding: 10px; margin: 0 0 12px; }}
+.divergence-head {{ display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 8px; }}
+.divergence-head strong {{ font-size: 14px; }}
+.divergence-form {{ display: grid; grid-template-columns: 130px 110px 140px 100px minmax(160px, 1fr) auto; gap: 8px; align-items: end; }}
+.divergence-list {{ display: grid; gap: 8px; margin-top: 10px; }}
+.divergence-item {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; border: 1px solid #e3e7ee; background: #fff; border-left-width: 4px; border-radius: 6px; padding: 8px; }}
+.divergence-item strong {{ display: block; font-size: 13px; }}
+.divergence-item span, .divergence-item p {{ display: block; margin: 3px 0 0; color: #64748b; font-size: 12px; }}
+.divergence-window {{ border-left-color: #089981; }}
+.divergence-building {{ border-left-color: #2962ff; }}
+.divergence-expired {{ border-left-color: #94a3b8; }}
+.divergence-future {{ border-left-color: #f59e0b; }}
+.divergence-empty {{ color: #64748b; font-size: 12px; padding: 6px 0; }}
+.divergence-chip {{ display: inline-flex; align-items: center; white-space: nowrap; border-radius: 999px; padding: 4px 8px; font-size: 12px; font-weight: 900; border: 1px solid #e3e7ee; background: #f8fafc; color: #334155; }}
+.divergence-chip.divergence-window {{ border-color: #9fd8cc; background: rgba(8,153,129,.12); color: #067a6b; }}
+.divergence-chip.divergence-building {{ border-color: #bfdbfe; background: rgba(41,98,255,.10); color: #1e53e5; }}
+.divergence-chip.divergence-expired {{ color: #64748b; background: #f1f5f9; }}
+.divergence-chip.divergence-none {{ color: #94a3b8; background: #fff; }}
 .loading-overlay {{ position: absolute; inset: 0; z-index: 5; display: none; align-items: center; justify-content: center; flex-direction: column; gap: 10px; background: rgba(255,255,255,.82); color: #334155; font-weight: 800; }}
 .loading-overlay.active {{ display: flex; }}
 .spinner {{ width: 28px; height: 28px; border: 3px solid #d6dbe3; border-top-color: #2962ff; border-radius: 50%; animation: spin .8s linear infinite; }}
@@ -793,7 +1018,7 @@ th.resizable {{ position: sticky; user-select: none; }}
 .col-resizer {{ position: absolute; top: 0; right: -3px; width: 6px; height: 100%; cursor: col-resize; z-index: 2; }}
 th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5), th:nth-child(6), td:nth-child(6), th:nth-child(7), td:nth-child(7) {{ text-align: left; }}
 .empty {{ text-align: center; color: #607080; }}
-@media (max-width: 1200px) {{ .form {{ grid-template-columns: repeat(4, 1fr); }} .watchlist-grid {{ grid-template-columns: 1fr; }} .watchlist-chart-shell {{ min-width: 0; }} }}
+@media (max-width: 1200px) {{ .form {{ grid-template-columns: repeat(4, 1fr); }} .watchlist-grid {{ grid-template-columns: 1fr; }} .watchlist-chart-shell {{ min-width: 0; }} .divergence-form {{ grid-template-columns: repeat(2, minmax(140px, 1fr)); }} }}
 @media (max-width: 760px) {{ main {{ padding: 0 10px 18px; }} .app-topbar {{ margin: 0 -10px 12px; height: auto; padding: 10px; align-items: flex-start; flex-direction: column; }} .topbar-actions {{ width: 100%; flex-direction: column; align-items: stretch; gap: 8px; }} .market-switch, .tabs {{ width: 100%; overflow-x: auto; }} .form, .status-strip {{ grid-template-columns: repeat(2, 1fr); }} .wide {{ grid-column: span 2; }} .page-head {{ display: block; }} }}
 </style>
 </head>
@@ -1089,6 +1314,45 @@ def ashare_backtest_defaults(params: dict[str, list[str]]) -> dict[str, float | 
     }
 
 
+def render_ashare_symbol_autocomplete() -> str:
+    return """
+<datalist id="ashare-symbol-suggestions"></datalist>
+<script>
+(function() {
+  const list = document.getElementById("ashare-symbol-suggestions");
+  if (!list || list.dataset.ready === "true") return;
+  list.dataset.ready = "true";
+  let timer = 0;
+  let lastQuery = "";
+  async function updateSuggestions(query) {
+    const q = (query || "").trim();
+    if (q.length < 1 || q === lastQuery) return;
+    lastQuery = q;
+    try {
+      const res = await fetch(`/cn/suggest?q=${encodeURIComponent(q)}`);
+      const payload = await res.json();
+      list.innerHTML = "";
+      for (const item of payload.suggestions || []) {
+        const option = document.createElement("option");
+        option.value = item.value;
+        option.label = [item.name, item.sector, item.exchange].filter(Boolean).join(" / ");
+        list.appendChild(option);
+      }
+    } catch (error) {
+      list.innerHTML = "";
+    }
+  }
+  document.addEventListener("input", event => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || !input.matches("[data-ashare-symbol-input]")) return;
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => updateSuggestions(input.value), 160);
+  });
+})();
+</script>
+"""
+
+
 def render_ashare_backtest_form(params: dict[str, list[str]] | None = None) -> str:
     params = params or {}
     defaults = ashare_backtest_defaults(params)
@@ -1105,7 +1369,7 @@ def render_ashare_backtest_form(params: dict[str, list[str]] | None = None) -> s
   <div class="mode-pill">A Share | MA5/B</div>
 </section>
 <form class="form" action="/cn/run" method="get">
-  <label>股票代码<input name="symbol" value="{value("symbol", defaults["symbol"])}" placeholder="600487"></label>
+  <label>股票代码/名称<input name="symbol" value="{value("symbol", defaults["symbol"])}" placeholder="600487 或 亨通光电" list="ashare-symbol-suggestions" data-ashare-symbol-input></label>
   <label>开始日期<input type="date" name="start" value="{value("start", defaults["start"])}"></label>
   <label>结束日期<input type="date" name="end" value="{value("end", defaults["end"])}"></label>
   <label>初始资金<input name="initial_cash" value="{value("initial_cash", defaults["initial_cash"])}"></label>
@@ -1119,6 +1383,7 @@ def render_ashare_backtest_form(params: dict[str, list[str]] | None = None) -> s
   <label>时间止损天数<input name="time_stop_days" value="{value("time_stop_days", defaults["time_stop_days"])}"></label>
   <button type="submit">运行 A 股回测</button>
 </form>
+{render_ashare_symbol_autocomplete()}
 """
 
 
@@ -1126,7 +1391,7 @@ def run_ashare_strategy(params: dict[str, list[str]]) -> str:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     cleanup_old_reports()
     defaults = ashare_backtest_defaults(params)
-    symbol = str(defaults["symbol"])
+    symbol = resolve_ashare_symbol_query(str(defaults["symbol"]))
     start = str(defaults["start"])
     end = str(defaults["end"])
     validate_backtest_range(start, end, 20)
@@ -1226,6 +1491,7 @@ def render_ashare_scan_result(
             f"<td>{row.volume_ratio:.2f}</td>"
             f"<td>{row.avg_amount_20d / 100_000_000:.2f}亿</td>"
             f"<td>{html.escape(row.limit_state or '正常')}</td>"
+            f"<td>{html.escape(row.volume_context or '-')}</td>"
             f"<td>{row.close:.2f}</td>"
             f"<td>{html.escape(row.latest_date)}</td>"
             f"<td>{row.recent_peak_to_base:.2f}</td>"
@@ -1237,7 +1503,7 @@ def render_ashare_scan_result(
         """
   <div class="table-wrap">
     <table class="sortable resizable-table">
-      <thead><tr><th>代码</th><th>名称</th><th>评级</th><th>B点</th><th>量能分</th><th>量比</th><th>20日均成交额</th><th>涨跌停</th><th>收盘</th><th>交易日</th><th>峰值/基准</th><th>数据源</th><th>操作</th></tr></thead>
+      <thead><tr><th>代码</th><th>名称</th><th>评级</th><th>B点</th><th>量能分</th><th>量比</th><th>20日均成交额</th><th>涨跌停</th><th>量能语境</th><th>收盘</th><th>交易日</th><th>峰值/基准</th><th>数据源</th><th>操作</th></tr></thead>
       <tbody>
 """
         + "\n".join(rows)
@@ -1350,32 +1616,16 @@ def latest_ashare_scan_to_html() -> str:
 def render_ashare_condition_panel() -> str:
     return """
 <section class="result">
-  <div class="toolbar">
-    <div>
-      <h2>A股选股条件</h2>
-      <p class="hint">当前 A 股模块复用美股 MA5/B 点核心，但加入 A 股流动性、板块涨跌幅和次日成交限制。</p>
-    </div>
-  </div>
-  <div class="table-wrap">
-    <table>
-      <thead><tr><th>类别</th><th>条件</th><th>当前规则</th><th>用途</th></tr></thead>
-      <tbody>
-        <tr><td>股票池</td><td>剔除 ST / 退市 / 异常名称</td><td>默认排除 ST、*ST、退市标的</td><td>规避不可复制的交易和退市风险。</td></tr>
-        <tr><td>股票池</td><td>板块范围</td><td>主板、创业板、科创板、北交所可勾选</td><td>不同板块涨跌幅限制不同，后续执行规则会分开处理。</td></tr>
-        <tr><td>股票池</td><td>最低市值</td><td>页面默认 50 亿元，可调整</td><td>过滤过小市值，降低流动性和极端波动影响。</td></tr>
-        <tr><td>股票池</td><td>最大扫描数</td><td>页面默认 300 只，可调整</td><td>控制本地行情请求耗时。</td></tr>
-        <tr><td>硬条件</td><td>MA5/B 点</td><td>收盘在 MA5 上方，MA5 上行，并触发 B1/B2</td><td>复制美股当前主策略的入场框架。</td></tr>
-        <tr><td>硬条件</td><td>趋势结构</td><td>MA5 与 MA20 同屏展示，候选以短线趋势转强为核心</td><td>避免只看单日放量。</td></tr>
-        <tr><td>硬条件</td><td>20日均成交额</td><td>默认不低于 1 亿元</td><td>A 股必须先保证可成交性。</td></tr>
-        <tr><td>量能评分</td><td>红长绿短</td><td>峰值/基准、10日均/基准、红均/绿均、Top5 红柱数</td><td>用于排序和人工复核，不再替代 B 点硬条件。</td></tr>
-        <tr><td>量能评分</td><td>量比</td><td>当日成交量 / 20日均量</td><td>明细图下方展示，用于判断放量强度。</td></tr>
-        <tr><td>涨跌幅</td><td>板块限制</td><td>主板 10%，创业板/科创板 20%，北交所 30%</td><td>用于识别涨停、跌停和次日无法成交场景。</td></tr>
-        <tr><td>执行约束</td><td>买入限制</td><td>次日接近涨停不买，高开超过阈值跳过</td><td>避免回测假设买到一字板或过度追高。</td></tr>
-        <tr><td>执行约束</td><td>卖出限制</td><td>接近跌停卖不出则顺延</td><td>贴近 A 股跌停流动性约束。</td></tr>
-        <tr><td>交易成本</td><td>费用</td><td>买卖佣金 + 卖出印花税 + 滑点</td><td>回测中单独纳入 A 股实际成本。</td></tr>
-        <tr><td>风控</td><td>时间止损</td><td>可设置持仓若干天未创新高则退出</td><td>处理 A 股震荡回落和资金占用。</td></tr>
-      </tbody>
-    </table>
+  <strong>当前 A股选股策略</strong>
+  <div class="scan-facts">
+    <span class="scan-fact"><span>B1 起爆</span>收盘&gt;MA5 + MA5向上 + MA5&gt;MA20 + 放量确认</span>
+    <span class="scan-fact"><span>B2 回踩</span>已有B1趋势后，放量阳线回踩MA5附近再入</span>
+    <span class="scan-fact"><span>硬过滤</span>20日均成交额达标 + 剔除ST/退市 + 板块可选</span>
+    <span class="scan-fact"><span>量能</span>峰值/基准、10日均量、红绿量、Top5红柱、量比</span>
+    <span class="scan-fact"><span>涨跌停</span>一字板量能剔除，普通涨跌停量能50%权重</span>
+    <span class="scan-fact"><span>评级</span>Strong / Medium / Watch 按硬条件和量能分输出</span>
+    <span class="scan-fact"><span>执行</span>涨停不买，高开过大跳过，跌停卖出顺延</span>
+    <span class="scan-fact"><span>图表</span>主图K线+MA5/MA20+成交量，下方KDJ</span>
   </div>
 </section>
 """
@@ -1387,6 +1637,17 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     j_threshold = number_field(params, "j_threshold", 14.0)
     min_market_cap = number_field(params, "min_market_cap", 50.0)
     max_symbols = int(number_field(params, "max_symbols", 300))
+    min_avg_amount_20d_100m = number_field(params, "min_avg_amount_20d_100m", 1.0)
+    min_control_amount_20d_100m = number_field(params, "min_control_amount_20d_100m", 2.0)
+    vol_high_days = int(number_field(params, "vol_high_days", 2))
+    vol_high_multiplier = number_field(params, "vol_high_multiplier", 1.0)
+    vol_multiplier = number_field(params, "vol_multiplier", 1.8)
+    massive_window = int(number_field(params, "massive_window", 7))
+    massive_min_count = int(number_field(params, "massive_min_count", 1))
+    reentry_pct = number_field(params, "reentry_pct", 4.5)
+    strong_volume_score = number_field(params, "strong_volume_score", 4.0)
+    medium_volume_score = number_field(params, "medium_volume_score", 2.5)
+    require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", True)
     selected_boards = normalize_ashare_boards(params.get("boards", []))
     embed = field(params, "embed", "0") == "1"
     show_latest_banner = field(params, "_skip_latest_banner", "0") != "1"
@@ -1394,7 +1655,23 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     result_html = ""
     if mode == "market":
         try:
-            scan = scan_ashare_candidates(min_market_cap, max_symbols, j_threshold, boards=selected_boards)
+            scan = scan_ashare_candidates(
+                min_market_cap,
+                max_symbols,
+                j_threshold,
+                boards=selected_boards,
+                min_avg_amount_20d=min_avg_amount_20d_100m * 100_000_000,
+                min_control_amount_20d=min_control_amount_20d_100m * 100_000_000,
+                vol_multiplier=vol_multiplier,
+                vol_high_days=vol_high_days,
+                vol_high_multiplier=vol_high_multiplier,
+                massive_window=massive_window,
+                massive_min_count=massive_min_count,
+                reentry_pct=reentry_pct / 100,
+                strong_volume_score=strong_volume_score,
+                medium_volume_score=medium_volume_score,
+                require_5ma_gt_20ma=require_5ma_gt_20ma,
+            )
             result_html = render_ashare_scan_result(
                 scan.candidates,
                 scan.errors,
@@ -1406,8 +1683,23 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
             result_html = f'<div class="error">{html.escape(str(exc))}</div>'
     elif mode == "single" and symbol.strip():
         try:
-            snapshot = latest_ashare_signal(symbol, j_threshold)
-            chart_payload = ashare_chart_payload(symbol, j_threshold)
+            resolved_symbol = resolve_ashare_symbol_query(symbol)
+            snapshot = latest_ashare_signal(
+                resolved_symbol,
+                j_threshold,
+                min_avg_amount_20d=min_avg_amount_20d_100m * 100_000_000,
+                min_control_amount_20d=min_control_amount_20d_100m * 100_000_000,
+                vol_multiplier=vol_multiplier,
+                vol_high_days=vol_high_days,
+                vol_high_multiplier=vol_high_multiplier,
+                massive_window=massive_window,
+                massive_min_count=massive_min_count,
+                reentry_pct=reentry_pct / 100,
+                strong_volume_score=strong_volume_score,
+                medium_volume_score=medium_volume_score,
+                require_5ma_gt_20ma=require_5ma_gt_20ma,
+            )
+            chart_payload = ashare_chart_payload(resolved_symbol, j_threshold)
 
             def status_badge(value: bool) -> str:
                 cls = "score-Strong" if value else "score-Weak"
@@ -1455,22 +1747,58 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
       <thead><tr><th>条件</th><th>结果</th><th>关键数值</th><th>说明</th></tr></thead>
       <tbody>
         <tr>
+          <td>B点触发</td>
+          <td>{status_badge(snapshot.signal)}</td>
+          <td>B点类型 {html.escape(snapshot.signal_type or '-')} / 候选评级 {html.escape(signal_text)}</td>
+          <td>单票验证不再使用旧 J 值条件；是否入选首先看 MA5/B1-B2 信号是否触发。</td>
+        </tr>
+        <tr>
           <td>MA5/B点趋势</td>
           <td>{status_badge(snapshot.trend_ok)}</td>
           <td>MA5 {snapshot.ma5:.2f} / MA20 {snapshot.ma20:.2f} / 斜率 {snapshot.zx_multi_slope:.2f}</td>
-          <td>复用美股 MA5/B 点核心：收盘在 MA5 上方，MA5 上行，并处于强趋势结构。</td>
+          <td>复用美股 MA5/B 点核心：收盘在 MA5 上方，MA5 上行，MA5 高于 MA20，并处于转强结构。</td>
         </tr>
         <tr>
           <td>成交额过滤</td>
           <td>{status_badge(snapshot.amount_ok)}</td>
           <td>20日均成交额 {snapshot.avg_amount_20d / 100_000_000:.2f} 亿 / 量比 {snapshot.volume_ratio:.2f}</td>
-          <td>A 股优先过滤流动性，默认要求 20 日均成交额不低于 1 亿。</td>
+          <td>A 股优先过滤流动性，默认要求 20 日均成交额不低于 1 亿；量比已按涨跌停语境调整。</td>
+        </tr>
+        <tr>
+          <td>涨跌停量能</td>
+          <td><span class="score-badge score-Medium">{html.escape(snapshot.limit_state or '正常')}</span></td>
+          <td>{html.escape(snapshot.volume_context or '-')}</td>
+          <td>一字涨跌停剔除成交量，普通涨跌停按 50% 权重计入量能评分。</td>
         </tr>
         <tr>
           <td>红长绿短量能</td>
           <td><span class="score-badge {rating_cls}">{snapshot.volume_score:.1f}/5</span></td>
           <td>峰值/基准 {snapshot.recent_peak_to_base:.2f}，10日均量/基准 {snapshot.recent_avg10_to_base:.2f}，红均/绿均 {snapshot.red_avg_to_green_avg:.2f}</td>
           <td>该项用于二次看图确认强弱，不再作为入选硬条件。</td>
+        </tr>
+        <tr>
+          <td>Top5 红柱</td>
+          <td><span class="score-badge score-Medium">{snapshot.top5_red_count}/5</span></td>
+          <td>上涨日 {snapshot.red_days} 天 / 下跌日 {snapshot.green_days} 天</td>
+          <td>近 20 日成交量最大的 5 天里，红柱越多，说明大成交更偏向主动买入。</td>
+        </tr>
+        <tr>
+          <td>候选评级</td>
+          <td><span class="score-badge {rating_cls}">{html.escape(signal_text)}</span></td>
+          <td>Strong: 硬条件通过且量能分 >= 4；Medium: >= 2.5；Watch: 硬条件通过但量能不足。</td>
+          <td>信号日接近涨停不会给 Strong，避免把买不到的板当作强买点。</td>
+        </tr>
+        <tr>
+          <td>次日执行</td>
+          <td><span class="score-badge score-Medium">A股规则</span></td>
+          <td>{html.escape(snapshot.execution_note)}</td>
+          <td>次日接近涨停不买，高开超过阈值跳过；卖出遇跌停则顺延。</td>
+        </tr>
+        <tr>
+          <td>图表口径</td>
+          <td><span class="score-badge score-Strong">新版</span></td>
+          <td>主图: K线 + MA5 + MA20 + 成交量 + B1/B2；副图: KDJ。</td>
+          <td>A 股单票图表按美股图表结构展示，策略仍使用 MA5/B 点口径。</td>
         </tr>
       </tbody>
     </table>
@@ -1486,7 +1814,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     <div class="toolbar">
       <div>
         <h2>策略图表</h2>
-        <p class="hint">主图显示 K 线、MA5/MA20 与 B1/B2 标记；下方显示量比与 20 日均成交额。</p>
+        <p class="hint">主图显示 K 线、MA5/MA20、成交量与 B1/B2 标记；下方显示 KDJ。</p>
       </div>
     </div>
     <div class="watchlist-chart-shell" style="height:780px;">
@@ -1546,12 +1874,12 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
       shape: "arrowUp",
       text: row.text || "B",
     }})));
-    const ratioLine = kdjChart.addLineSeries({{ color: "#7c3aed", lineWidth: 2, title: "量比", priceLineVisible: false }});
-    ratioLine.setData(toLine(payload.volume_ratio));
-    const amountLine = kdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "20日均成交额(亿)", priceLineVisible: false }});
-    amountLine.setData(toLine(payload.amount20));
-    const amountGate = kdjChart.addLineSeries({{ color: "#ef4444", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: "成交额1亿", priceLineVisible: false }});
-    amountGate.setData(candleRows.map(row => ({{ time: row.time, value: 1 }})));
+    const kLine = kdjChart.addLineSeries({{ color: "#2563eb", lineWidth: 1.5, title: "K", priceLineVisible: false }});
+    kLine.setData(toLine(payload.k));
+    const dLine = kdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "D", priceLineVisible: false }});
+    dLine.setData(toLine(payload.d));
+    const jLine = kdjChart.addLineSeries({{ color: "#7c3aed", lineWidth: 2, title: "J", priceLineVisible: false }});
+    jLine.setData(toLine(payload.j));
     let syncing = false;
     function syncRange(source, target) {{
       source.timeScale().subscribeVisibleLogicalRangeChange(range => {{
@@ -1627,15 +1955,28 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
 <form class="form" action="/cn/scanner" method="get">
   <input type="hidden" name="mode" value="single">
   <input type="hidden" name="j_threshold" value="{j_threshold:g}">
-  <label>股票代码<input name="symbol" value="{html.escape(symbol)}" placeholder="600487"></label>
+  <label>股票代码/名称<input name="symbol" value="{html.escape(symbol)}" placeholder="600487 或 亨通光电" list="ashare-symbol-suggestions" data-ashare-symbol-input></label>
   <button type="submit">单票验证</button>
 </form>
+{render_ashare_symbol_autocomplete()}
 <form class="form" id="ashare-scanner-form" action="/cn/scanner" method="get" data-async-submit="true">
   <input type="hidden" name="mode" value="market">
   <input type="hidden" name="j_threshold" value="{j_threshold:g}">
   <label>最低市值（亿元）<input type="number" step="1" name="min_market_cap" value="{min_market_cap:g}"></label>
   <label>最多扫描<input type="number" step="1" name="max_symbols" value="{max_symbols}"></label>
   <label>并发数<input type="number" step="1" name="max_workers" value="{int(number_field(params, "max_workers", 6))}"></label>
+  <label>20日均成交额（亿元）<input type="number" step="0.1" name="min_avg_amount_20d_100m" value="{min_avg_amount_20d_100m:g}"></label>
+  <label>低流动性提示（亿元）<input type="number" step="0.1" name="min_control_amount_20d_100m" value="{min_control_amount_20d_100m:g}"></label>
+  <label>连续放量天数<input type="number" step="1" name="vol_high_days" value="{vol_high_days}"></label>
+  <label>连续放量倍数<input type="number" step="0.1" name="vol_high_multiplier" value="{vol_high_multiplier:g}"></label>
+  <label>巨量倍数<input type="number" step="0.1" name="vol_multiplier" value="{vol_multiplier:g}"></label>
+  <label>巨量观察窗口<input type="number" step="1" name="massive_window" value="{massive_window}"></label>
+  <label>巨量最少次数<input type="number" step="1" name="massive_min_count" value="{massive_min_count}"></label>
+  <label>B2回踩距离 %<input type="number" step="0.1" name="reentry_pct" value="{reentry_pct:g}"></label>
+  <label>Strong量能分<input type="number" step="0.1" name="strong_volume_score" value="{strong_volume_score:g}"></label>
+  <label>Medium量能分<input type="number" step="0.1" name="medium_volume_score" value="{medium_volume_score:g}"></label>
+  <input type="hidden" name="require_5ma_gt_20ma" value="0">
+  <label class="checkbox-label"><input type="checkbox" name="require_5ma_gt_20ma" value="1"{" checked" if require_5ma_gt_20ma else ""}> 买入要求MA5&gt;MA20</label>
   <label class="wide">板块范围<div class="checkbox-row">{board_controls}</div></label>
   <button type="submit">开始选股</button>
 </form>
@@ -1825,11 +2166,12 @@ def render_ashare_watchlist_page(params: dict[str, list[str]] | None = None) -> 
   <div class="mode-pill">A Share | Watchlist</div>
 </section>
 <form class="form" action="/cn/watchlist/add" method="get">
-  <label>股票代码<input name="symbol" value="{html.escape(field(params, "symbol", ""))}" placeholder="600487"></label>
+  <label>股票代码/名称<input name="symbol" value="{html.escape(field(params, "symbol", ""))}" placeholder="600487 或 亨通光电" list="ashare-symbol-suggestions" data-ashare-symbol-input></label>
   <label>分组<input name="group" value="{html.escape(field(params, "group", "观察"))}" placeholder="观察 / 候选 / 持仓"></label>
   <label class="wide">备注<input name="note" value="{html.escape(field(params, "note", ""))}" placeholder="关注原因、板块、阻力位等"></label>
   <button type="submit">添加到自选</button>
 </form>
+{render_ashare_symbol_autocomplete()}
 <section class="status-strip">
   <div class="stat-card"><div class="stat-label">自选数量</div><div class="stat-value">{len(items)}</div></div>
   <div class="stat-card"><div class="stat-label">存储位置</div><div class="stat-value">data/ashare</div></div>
@@ -1912,9 +2254,9 @@ function renderAshareWatchChart(payload) {{
   volSeries.setData(volumes);
   ashareMainChart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
   candle.setMarkers((payload.signals || []).map(row => ({{ time: row.x, position: "belowBar", color: "#16a34a", shape: "arrowUp", text: row.text || "B" }})));
-  ashareKdjChart.addLineSeries({{ color: "#7c3aed", lineWidth: 2, title: "量比", priceLineVisible: false }}).setData(toLine(payload.volume_ratio));
-  ashareKdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "20日均成交额(亿)", priceLineVisible: false }}).setData(toLine(payload.amount20));
-  ashareKdjChart.addLineSeries({{ color: "#ef4444", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: "成交额1亿", priceLineVisible: false }}).setData(candles.map(row => ({{ time: row.time, value: 1 }})));
+  ashareKdjChart.addLineSeries({{ color: "#2563eb", lineWidth: 1.5, title: "K", priceLineVisible: false }}).setData(toLine(payload.k));
+  ashareKdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "D", priceLineVisible: false }}).setData(toLine(payload.d));
+  ashareKdjChart.addLineSeries({{ color: "#7c3aed", lineWidth: 2, title: "J", priceLineVisible: false }}).setData(toLine(payload.j));
   let syncing = false;
   function sync(source, target) {{
     source.timeScale().subscribeVisibleLogicalRangeChange(range => {{
@@ -3514,31 +3856,50 @@ def render_candidate_table(rows: list[SignalResult]) -> str:
             pieces.append(f"财报 {row.earnings_days}天")
         return " / ".join(pieces)
 
-    table_rows = "\n".join(
-        f'<tr><td><button type="button" class="symbol-button" data-candidate-symbol="{html.escape(r.symbol)}">{html.escape(r.symbol)}</button></td><td>{html.escape(r.company_name or "-")}</td>'
-        f"<td>{r.market_cap / 1_000_000_000:.2f}</td>"
-        f"<td>{html.escape(candidate_summary(r))}</td>"
-        f"<td>{technical_badge(r)}</td>"
-        f"<td>{r.second_stage_score_total}/20</td>"
-        f'<td><span class="rating rating-{html.escape(r.second_stage_rating or "Pending")}">{html.escape(r.second_stage_rating or "Pending")}</span></td>'
-        f'<td><button type="button" class="mini-action" data-add-watchlist="{html.escape(r.symbol)}" data-watch-note="{html.escape((r.second_stage_rating or "") + " " + (r.catalyst_label or ""))}">加入自选</button></td>'
-        f"<td>{earnings_badge(r)}</td>"
-        f'<td>{r.catalyst_score}/5 {html.escape(r.catalyst_label or "Manual review")} <a href="{html.escape(r.catalyst_yahoo_url or yahoo_news_url(r.symbol))}" target="_blank">Yahoo</a> <a href="{html.escape(catalyst_secondary_url(r))}" target="_blank">雪球</a></td>'
-        f"<td>{r.sector_score}/5 {html.escape(r.sector_label or '-')} ({r.sector_peer_count}/{r.industry_peer_count})</td>"
-        f"<td>{r.space_score}/5 {html.escape(r.space_label or '-')} / 52W {r.distance_52w_high_pct:.1f}% / 200MA {html.escape(r.above_200ma or '-')}</td>"
-        f"<td>{r.candle_score}/5 {html.escape(r.candle_label or '-')} / close pos {r.close_position_pct:.0f}% / upper shadow {format_metric(r.upper_shadow_body_ratio, 'x')}</td>"
-        f"<td>{html.escape(r.sector or '-')}</td><td>{html.escape(r.industry or '-')}</td>"
-        f"<td>{html.escape(r.signal_date)}</td><td>{html.escape(r.signal_type)}</td>"
-        f"<td>{r.close:.2f}</td><td>{r.ma:.2f}</td><td>{r.dist_to_ma_pct:.2f}%</td>"
-        f"<td>{r.volume_ratio:.2f}x</td><td>{r.massive_count_7d}</td><td>{r.avg_dollar_volume_20d / 1_000_000:.1f}M</td></tr>"
-        for r in rows
-    )
+    def divergence_note(event: dict[str, object] | None) -> str:
+        if not event:
+            return "-"
+        parts = [
+            str(event.get("event_date", "-")),
+            str(event.get("importance_label", "-")),
+            str(event.get("divergence_type_label", "-")),
+        ]
+        note = str(event.get("note", "") or "").strip()
+        if note:
+            parts.append(note)
+        return " · ".join(parts)
+
+    rendered_rows = []
+    for r in rows:
+        divergence = best_divergence_for_symbol(r.symbol, r.signal_date)
+        rendered_rows.append(
+            f'<tr><td><button type="button" class="symbol-button" data-candidate-symbol="{html.escape(r.symbol)}">{html.escape(r.symbol)}</button></td><td>{html.escape(r.company_name or "-")}</td>'
+            f"<td>{r.market_cap / 1_000_000_000:.2f}</td>"
+            f"<td>{html.escape(candidate_summary(r))}</td>"
+            f"<td>{render_divergence_chip(divergence)}</td>"
+            f"<td>{(divergence or {}).get('score', 0)}/5</td>"
+            f"<td>{html.escape(divergence_note(divergence))}</td>"
+            f"<td>{technical_badge(r)}</td>"
+            f"<td>{r.second_stage_score_total}/20</td>"
+            f'<td><span class="rating rating-{html.escape(r.second_stage_rating or "Pending")}">{html.escape(r.second_stage_rating or "Pending")}</span></td>'
+            f'<td><button type="button" class="mini-action" data-add-watchlist="{html.escape(r.symbol)}" data-watch-note="{html.escape((r.second_stage_rating or "") + " " + (r.catalyst_label or ""))}">加入自选</button></td>'
+            f"<td>{earnings_badge(r)}</td>"
+            f'<td>{r.catalyst_score}/5 {html.escape(r.catalyst_label or "Manual review")} <a href="{html.escape(r.catalyst_yahoo_url or yahoo_news_url(r.symbol))}" target="_blank">Yahoo</a> <a href="{html.escape(catalyst_secondary_url(r))}" target="_blank">雪球</a></td>'
+            f"<td>{r.sector_score}/5 {html.escape(r.sector_label or '-')} ({r.sector_peer_count}/{r.industry_peer_count})</td>"
+            f"<td>{r.space_score}/5 {html.escape(r.space_label or '-')} / 52W {r.distance_52w_high_pct:.1f}% / 200MA {html.escape(r.above_200ma or '-')}</td>"
+            f"<td>{r.candle_score}/5 {html.escape(r.candle_label or '-')} / close pos {r.close_position_pct:.0f}% / upper shadow {format_metric(r.upper_shadow_body_ratio, 'x')}</td>"
+            f"<td>{html.escape(r.sector or '-')}</td><td>{html.escape(r.industry or '-')}</td>"
+            f"<td>{html.escape(r.signal_date)}</td><td>{html.escape(r.signal_type)}</td>"
+            f"<td>{r.close:.2f}</td><td>{r.ma:.2f}</td><td>{r.dist_to_ma_pct:.2f}%</td>"
+            f"<td>{r.volume_ratio:.2f}x</td><td>{r.massive_count_7d}</td><td>{r.avg_dollar_volume_20d / 1_000_000:.1f}M</td></tr>"
+        )
+    table_rows = "\n".join(rendered_rows)
     if not table_rows:
-        table_rows = '<tr><td colspan="23" class="empty">No visible candidates.</td></tr>'
+        table_rows = '<tr><td colspan="26" class="empty">No visible candidates.</td></tr>'
     return f"""
 <div class="table-wrap">
 <table class="resizable-table">
-  <thead><tr><th>Symbol</th><th>Company</th><th>Mkt Cap $B</th><th>Summary</th><th>Tech</th><th>Total</th><th>Rating</th><th>Watch</th><th>Next Earnings</th><th>Catalyst</th><th>Sector Score</th><th>Space</th><th>Candle</th><th>Sector</th><th>Industry</th><th>Signal Date</th><th>Signal</th><th>Close</th><th>MA</th><th>Dist</th><th>Vol Ratio</th><th>Massive 7D</th><th>20D $Vol</th></tr></thead>
+  <thead><tr><th>Symbol</th><th>Company</th><th>Mkt Cap $B</th><th>Summary</th><th>Divergence</th><th>D Score</th><th>D Event</th><th>Tech</th><th>Total</th><th>Rating</th><th>Watch</th><th>Next Earnings</th><th>Catalyst</th><th>Sector Score</th><th>Space</th><th>Candle</th><th>Sector</th><th>Industry</th><th>Signal Date</th><th>Signal</th><th>Close</th><th>MA</th><th>Dist</th><th>Vol Ratio</th><th>Massive 7D</th><th>20D $Vol</th></tr></thead>
   <tbody>{table_rows}</tbody>
 </table>
 </div>
@@ -3979,8 +4340,10 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
     rows = "\n".join(watchlist_row(item, metadata.get(item["symbol"].upper())) for item in items)
     if not rows:
         rows = '<tr><td colspan="3" class="empty">暂无自选股。先在上方添加股票代码。</td></tr>'
-    default_symbol = symbols[0] if symbols else ""
+    requested_symbol = normalize_yahoo_symbol(field(params, "symbol", "")) if params else None
+    default_symbol = requested_symbol.upper() if requested_symbol and requested_symbol.upper() in symbols else (symbols[0] if symbols else "")
     cache = price_cache_summary(symbols)
+    default_event_date = default_scan_end_date().isoformat()
     return f"""
 <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 <section class="page-head">
@@ -4029,6 +4392,22 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
       <div class="watch-detail-item"><span>财报</span><strong id="watch-detail-earnings">-</strong></div>
       <div class="watch-detail-item"><span>备注</span><strong id="watch-detail-note">-</strong></div>
     </div>
+    <div class="divergence-panel">
+      <div class="divergence-head">
+        <strong>市场分歧事件</strong>
+        <span class="hint">按 D+13 到 D+27 交易日作为观察窗口</span>
+      </div>
+      <form class="divergence-form" action="/watchlist/divergence/add" method="get">
+        <input type="hidden" name="symbol" id="divergence-symbol-input" value="{html.escape(default_symbol)}">
+        <label>事件日期<input type="date" name="event_date" value="{html.escape(default_event_date)}"></label>
+        <label>方向<select name="event_type"><option value="bullish">利好</option><option value="bearish">利空</option></select></label>
+        <label>分歧类型<select name="divergence_type"><option value="good_news_ignored">利好未涨</option><option value="bad_news_resilient">利空不跌</option></select></label>
+        <label>级别<select name="importance"><option value="major">重大</option><option value="medium">中等</option><option value="minor">一般</option></select></label>
+        <label>备注<input name="note" placeholder="财报、政策、合同、监管等"></label>
+        <button type="submit">保存事件</button>
+      </form>
+      <div class="divergence-list" id="divergence-list">{render_divergence_event_list(default_symbol) if default_symbol else '<div class="divergence-empty">先选择一个股票。</div>'}</div>
+    </div>
     <div class="period-tabs" id="watch-periods">
       <button type="button" data-preset="1m">1M</button>
       <button type="button" data-preset="3m">3M</button>
@@ -4058,8 +4437,13 @@ const watchTooltip = document.getElementById("watchlist-tooltip");
 const watchTitle = document.getElementById("watch-chart-title");
 const watchSubtitle = document.getElementById("watch-chart-subtitle");
 const watchLoading = document.getElementById("watch-chart-loading");
+const divergenceSymbolInput = document.getElementById("divergence-symbol-input");
+const divergenceList = document.getElementById("divergence-list");
 function attr(node, name, fallback = "-") {{
   return node?.getAttribute(name) || fallback;
+}}
+function escapeHtml(value) {{
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({{ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }}[ch]));
 }}
 function updateWatchDetail(button) {{
   if (!button) return;
@@ -4071,6 +4455,31 @@ function updateWatchDetail(button) {{
   document.getElementById("watch-detail-signal").textContent = `${{attr(button, "data-bStatus")}} / ${{attr(button, "data-sStatus")}}`;
   document.getElementById("watch-detail-earnings").textContent = attr(button, "data-earnings");
   document.getElementById("watch-detail-note").textContent = attr(button, "data-note");
+  if (divergenceSymbolInput) divergenceSymbolInput.value = attr(button, "data-watch-symbol", "");
+}}
+
+function renderDivergenceEvents(events) {{
+  if (!divergenceList) return;
+  if (!events || !events.length) {{
+    divergenceList.innerHTML = '<div class="divergence-empty">当前股票还没有记录分歧事件。</div>';
+    return;
+  }}
+  divergenceList.innerHTML = events.map(event => {{
+    const status = event.status_key || "none";
+    const note = escapeHtml(event.note || "-");
+    const eventDate = escapeHtml(event.event_date || "-");
+    const importance = escapeHtml(event.importance_label || "-");
+    const divergenceType = escapeHtml(event.divergence_type_label || "-");
+    const statusLabel = escapeHtml(event.status_label || "-");
+    const score = escapeHtml(event.score ?? 0);
+    const dayCount = escapeHtml(event.day_count ?? "-");
+    return `<div class="divergence-item divergence-${{status}}">
+      <div><strong>${{eventDate}} · ${{importance}} ${{divergenceType}}</strong>
+      <span>D+${{dayCount}} · ${{statusLabel}} · ${{score}}/5</span></div>
+      <p>${{note}}</p>
+      <a class="delete-link" href="/watchlist/divergence/delete?id=${{encodeURIComponent(event.id)}}&symbol=${{encodeURIComponent(event.symbol || watchCurrentSymbol)}}" onclick="return confirm('确认删除这条分歧事件？');">删除</a>
+    </div>`;
+  }}).join("");
 }}
 
 function destroyWatchChart() {{
@@ -4148,7 +4557,8 @@ function makeWatchChart(payload) {{
     const up = row.close >= row.open;
     const f = value => value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }});
     const fv = value => value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ maximumFractionDigits: 0 }});
-    watchTooltip.innerHTML = `<strong>${{row.time}}</strong><div><span class="${{up ? "up" : "down"}}">开 ${{f(row.open)}} 高 ${{f(row.high)}} 低 ${{f(row.low)}} 收 ${{f(row.close)}}</span></div><div>成交量 ${{fv(row.volume)}} &nbsp; 5MA ${{f(row.ma)}} &nbsp; 20MA ${{f(row.ma20)}}</div><div>KDJ K ${{f(row.kdjK)}} &nbsp; D ${{f(row.kdjD)}} &nbsp; J ${{f(row.kdjJ)}}</div>`;
+    const eventHtml = (row.events || []).map(event => `<div>分歧事件：${{escapeHtml(event.event_date)}} · ${{escapeHtml(event.importance_label)}} ${{escapeHtml(event.divergence_type_label)}} · D+${{escapeHtml(event.day_count)}}<br>${{escapeHtml(event.note || "")}}</div>`).join("");
+    watchTooltip.innerHTML = `<strong>${{row.time}}</strong><div><span class="${{up ? "up" : "down"}}">开 ${{f(row.open)}} 高 ${{f(row.high)}} 低 ${{f(row.low)}} 收 ${{f(row.close)}}</span></div><div>成交量 ${{fv(row.volume)}} &nbsp; 5MA ${{f(row.ma)}} &nbsp; 20MA ${{f(row.ma20)}}</div><div>KDJ K ${{f(row.kdjK)}} &nbsp; D ${{f(row.kdjD)}} &nbsp; J ${{f(row.kdjJ)}}</div>${{eventHtml}}`;
     watchTooltip.style.display = "block";
     watchTooltip.style.left = Math.min(param.point.x + 16, watchChartEl.clientWidth - 250) + "px";
     watchTooltip.style.top = Math.max(44, param.point.y - 72) + "px";
@@ -4184,6 +4594,7 @@ async function loadWatchChart(symbol, preset = watchCurrentPreset) {{
       return;
     }}
     watchSubtitle.textContent = `${{payload.start}} 到 ${{payload.end}}，日 K`;
+    renderDivergenceEvents(payload.divergenceEvents || []);
     makeWatchChart(payload);
   }} catch (error) {{
     const message = error?.message || "图表加载失败";
@@ -4211,7 +4622,7 @@ document.getElementById("watch-periods").addEventListener("click", event => {{
 }});
 if (window.initializeResizableTables) initializeResizableTables(document);
 if (window.initializeSortableTables) initializeSortableTables(document);
-const initialWatchButton = document.querySelector("[data-watch-symbol]");
+const initialWatchButton = document.querySelector(`[data-watch-symbol="${{watchInitialSymbol}}"]`) || document.querySelector("[data-watch-symbol]");
 if (initialWatchButton) updateWatchDetail(initialWatchButton);
 if (watchInitialSymbol) loadWatchChart(watchInitialSymbol, "1y");
 </script>
@@ -4261,6 +4672,36 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
         {"time": trade.exit_date, "position": "aboveBar", "color": "#f23645", "shape": "arrowDown", "text": "卖"}
         for trade in trades
     ]
+    symbol_events = divergence_events_for_symbol(symbol, date.fromisoformat(bars[-1].date))
+    event_by_time: dict[str, list[dict[str, object]]] = {}
+    bar_dates = [date.fromisoformat(bar.date) for bar in bars]
+    for event in symbol_events:
+        try:
+            event_day = date.fromisoformat(str(event.get("event_date", "")))
+        except ValueError:
+            continue
+        marker_day = None
+        for bar_day in bar_dates:
+            if bar_day >= event_day:
+                marker_day = bar_day
+                break
+        if marker_day is None:
+            continue
+        marker_time = marker_day.isoformat()
+        marker_color = "#f97316" if event.get("event_type") == "bearish" else "#2962ff"
+        marker_text = "分歧"
+        markers.append(
+            {
+                "time": marker_time,
+                "position": "aboveBar",
+                "color": marker_color,
+                "shape": "circle",
+                "text": marker_text,
+            }
+        )
+        display_event = dict(event)
+        display_event["marker_time"] = marker_time
+        event_by_time.setdefault(marker_time, []).append(display_event)
     trade_exit_dates = {trade.exit_date for trade in trades}
     rows = []
     ma_points = []
@@ -4296,6 +4737,7 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
                 "kdjJ": j_values[i],
                 "dynamicStop": dynamic_stop,
                 "trendStop": trend_stop,
+                "events": event_by_time.get(bar.date, []),
             }
         )
         if ma is not None:
@@ -4340,6 +4782,7 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
         "trendStop": trend_stop_points,
         "markers": sorted(markers, key=lambda item: str(item["time"])),
         "rows": rows,
+        "divergenceEvents": symbol_events,
     }
 
 
@@ -4575,6 +5018,17 @@ def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
         max_symbols = int(number_field(params, "max_symbols", 300))
         max_workers = max(1, min(12, int(number_field(params, "max_workers", 6))))
         j_threshold = number_field(params, "j_threshold", 14.0)
+        min_avg_amount_20d = number_field(params, "min_avg_amount_20d_100m", 1.0) * 100_000_000
+        min_control_amount_20d = number_field(params, "min_control_amount_20d_100m", 2.0) * 100_000_000
+        vol_high_days = int(number_field(params, "vol_high_days", 2))
+        vol_high_multiplier = number_field(params, "vol_high_multiplier", 1.0)
+        vol_multiplier = number_field(params, "vol_multiplier", 1.8)
+        massive_window = int(number_field(params, "massive_window", 7))
+        massive_min_count = int(number_field(params, "massive_min_count", 1))
+        reentry_pct = number_field(params, "reentry_pct", 4.5) / 100
+        strong_volume_score = number_field(params, "strong_volume_score", 4.0)
+        medium_volume_score = number_field(params, "medium_volume_score", 2.5)
+        require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", True)
         selected_boards = normalize_ashare_boards(params.get("boards", []))
         board_label = ashare_board_filter_label(selected_boards)
 
@@ -4605,7 +5059,22 @@ def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
         set_job(job_id, stage="扫描日线", message="正在扫描 A 股日线信号", total=len(universe), scanned=0, candidates=0, errors=0)
 
         def run_one(item) -> AShareSignalSnapshot:
-            snapshot = latest_ashare_signal(item.symbol, j_threshold, fetch_name_value=False)
+            snapshot = latest_ashare_signal(
+                item.symbol,
+                j_threshold,
+                fetch_name_value=False,
+                min_avg_amount_20d=min_avg_amount_20d,
+                min_control_amount_20d=min_control_amount_20d,
+                vol_multiplier=vol_multiplier,
+                vol_high_days=vol_high_days,
+                vol_high_multiplier=vol_high_multiplier,
+                massive_window=massive_window,
+                massive_min_count=massive_min_count,
+                reentry_pct=reentry_pct,
+                strong_volume_score=strong_volume_score,
+                medium_volume_score=medium_volume_score,
+                require_5ma_gt_20ma=require_5ma_gt_20ma,
+            )
             snapshot.name = item.name
             snapshot.sector = item.sector
             return snapshot
@@ -4731,6 +5200,8 @@ class Handler(BaseHTTPRequestHandler):
             if market == "cn":
                 if route_path in ("/", ""):
                     self.send_bytes(page_shell(render_market_placeholder("home"), "home", "cn"))
+                elif route_path == "/suggest":
+                    self.send_json({"suggestions": suggest_ashare_symbols(field(params, "q", ""), int(number_field(params, "limit", 12)))})
                 elif route_path == "/scanner":
                     content = render_ashare_scanner(params)
                     self.send_bytes(content.encode("utf-8") if field(params, "embed", "0") == "1" else page_shell(content, "scanner", "cn"))
@@ -4782,6 +5253,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.update_watchlist_item(params)
             elif route_path == "/watchlist/delete":
                 self.delete_watchlist_item(params)
+            elif route_path == "/watchlist/divergence/add":
+                self.add_watchlist_divergence_event(params)
+            elif route_path == "/watchlist/divergence/delete":
+                self.delete_watchlist_divergence_event(params)
             elif route_path == "/watchlist/chart":
                 self.send_json(watchlist_chart_payload(params))
             elif route_path == "/scanner":
@@ -4848,6 +5323,19 @@ class Handler(BaseHTTPRequestHandler):
         symbol = field(params, "symbol", "")
         delete_watchlist_symbol(symbol)
         self.send_bytes(page_shell(render_watchlist_page({}), "watchlist"))
+
+    def add_watchlist_divergence_event(self, params: dict[str, list[str]]) -> None:
+        try:
+            event = add_divergence_event(params)
+            content = render_watchlist_page({"symbol": [str(event["symbol"])]})
+        except ValueError as exc:
+            content = render_watchlist_page(params) + f'<div class="error">{html.escape(str(exc))}</div>'
+        self.send_bytes(page_shell(content, "watchlist", "us"))
+
+    def delete_watchlist_divergence_event(self, params: dict[str, list[str]]) -> None:
+        delete_divergence_event(field(params, "id", ""))
+        symbol = field(params, "symbol", "")
+        self.send_bytes(page_shell(render_watchlist_page({"symbol": [symbol]}), "watchlist", "us"))
 
     def start_ashare_scan_job(self, params: dict[str, list[str]]) -> None:
         active = active_scan_job()

@@ -12,6 +12,7 @@ REPORT_DIR = Path(os.environ.get("MA5_REPORT_DIR", ROOT / "reports")).expanduser
 SCAN_DIR = DATA_DIR / "scans"
 LATEST_SCAN_PATH = SCAN_DIR / "latest.json"
 WATCHLIST_PATH = DATA_DIR / "watchlist.json"
+DIVERGENCE_EVENTS_PATH = DATA_DIR / "divergence_events.json"
 NASDAQ_CACHE_PATH = DATA_DIR / "cache" / "nasdaq_screener.json"
 LEGACY_NASDAQ_CACHE_PATH = ROOT / "nasdaq_screener_cache.json"
 EARNINGS_CACHE_PATH = DATA_DIR / "cache" / "earnings_dates.json"

@@ -65,6 +65,7 @@ class AShareSignalSnapshot:
     avg_amount_20d: float = 0.0
     amount_ok: bool = False
     limit_state: str = ""
+    volume_context: str = ""
     execution_note: str = ""
 
 
@@ -144,16 +145,19 @@ def ashare_indicator_series(bars: list[AShareBar], j_threshold: float = 14.0) ->
 def ashare_chart_payload(symbol: str, j_threshold: float = 14.0) -> dict[str, object]:
     clean = normalize_ashare_symbol(symbol)
     bars, source = fetch_ashare_bars(clean)
-    from backtest import build_ratchet_inputs, rolling_sma
+    from backtest import adjust_limit_volumes, build_ratchet_inputs, calculate_kdj, rolling_sma
 
     bt_bars = ashare_to_backtest_bars(bars)
     closes = [bar.close for bar in bt_bars]
-    volumes = [bar.volume for bar in bt_bars]
+    limit_pct = ashare_limit_pct(clean)
+    adjusted_volumes = adjust_limit_volumes(bt_bars, limit_pct)
+    volumes = adjusted_volumes
     amounts = [bar.amount if bar.amount > 0 else bar.close * bar.volume for bar in bars]
     ma5 = rolling_sma(closes, 5)
     ma20 = rolling_sma(closes, 20)
     amount20 = rolling_sma(amounts, 20)
     volume_ma20 = rolling_sma(volumes, 20)
+    k_values, d_values, j_values = calculate_kdj(bt_bars)
     buy_signal, _, _, _, buy_target_pct, buy_stage = build_ratchet_inputs(
         bt_bars,
         ma_length=5,
@@ -166,10 +170,11 @@ def ashare_chart_payload(symbol: str, j_threshold: float = 14.0) -> dict[str, ob
         massive_min_count=1,
         massive_max_count=2,
         b1_require_20ma_gt_50ma=False,
+        signal_volumes=adjusted_volumes,
     )
     name, sector = fetch_ashare_profile(clean)
     volume_ratio = [
-        None if not volume_ma20[i] else bars[i].volume / float(volume_ma20[i])
+        None if not volume_ma20[i] else adjusted_volumes[i] / float(volume_ma20[i])
         for i in range(len(bars))
     ]
     return {
@@ -191,6 +196,9 @@ def ashare_chart_payload(symbol: str, j_threshold: float = 14.0) -> dict[str, ob
         "ma20": [{"x": bars[i].date, "y": value} for i, value in enumerate(ma20) if value is not None],
         "amount20": [{"x": bars[i].date, "y": value / 100_000_000} for i, value in enumerate(amount20) if value is not None],
         "volume_ratio": [{"x": bars[i].date, "y": value} for i, value in enumerate(volume_ratio) if value is not None],
+        "k": [{"x": bars[i].date, "y": value} for i, value in enumerate(k_values) if value is not None],
+        "d": [{"x": bars[i].date, "y": value} for i, value in enumerate(d_values) if value is not None],
+        "j": [{"x": bars[i].date, "y": value} for i, value in enumerate(j_values) if value is not None],
         "zx_short_trend": [{"x": bars[i].date, "y": value} for i, value in enumerate(ma5) if value is not None],
         "zx_multi_trend": [{"x": bars[i].date, "y": value} for i, value in enumerate(ma20) if value is not None],
         "signals": [
@@ -670,6 +678,77 @@ def fetch_ashare_profile(symbol: str) -> tuple[str, str]:
     name = fetch_ashare_name(clean)
     sector_map = load_ashare_sector_map()
     return name, sector_map.get(clean, "")
+
+
+def cached_ashare_universe_items() -> list[AShareUniverseItem]:
+    payload = read_json_cache(ASHARE_UNIVERSE_CACHE_PATH, 30 * 24 * 60 * 60) or {}
+    items_by_symbol: dict[str, AShareUniverseItem] = {}
+    for entry in (payload.get("entries") or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        for raw in entry.get("items") or []:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                item = deserialize_universe_item(raw)
+                if item.symbol and item.symbol not in items_by_symbol:
+                    items_by_symbol[item.symbol] = item
+            except Exception:
+                continue
+    return sorted(items_by_symbol.values(), key=lambda item: item.turnover or item.market_cap_100m, reverse=True)
+
+
+def suggest_ashare_symbols(query: str, limit: int = 12) -> list[dict[str, object]]:
+    q_raw = query.strip()
+    q = q_raw.upper()
+    if not q:
+        return []
+    items = cached_ashare_universe_items()
+    if not items:
+        try:
+            items, _, _ = load_ashare_universe_for_scan(0, 800)
+        except Exception:
+            items = []
+    scored: list[tuple[int, AShareUniverseItem]] = []
+    for item in items:
+        symbol = item.symbol.upper()
+        name = item.name.upper()
+        if symbol == q or item.name == q_raw:
+            score = 0
+        elif symbol.startswith(q):
+            score = 1
+        elif q in symbol:
+            score = 2
+        elif item.name.startswith(q_raw):
+            score = 3
+        elif q in name or q_raw in item.name:
+            score = 4
+        else:
+            continue
+        scored.append((score, item))
+    scored.sort(key=lambda pair: (pair[0], -(pair[1].turnover or pair[1].market_cap_100m)))
+    return [
+        {
+            "symbol": item.symbol,
+            "name": item.name,
+            "sector": item.sector,
+            "exchange": item.exchange,
+            "label": f"{item.symbol} {item.name}".strip(),
+            "value": f"{item.symbol} {item.name}".strip(),
+        }
+        for _, item in scored[: max(1, int(limit))]
+    ]
+
+
+def resolve_ashare_symbol_query(query: str) -> str:
+    raw = query.strip()
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) >= 6:
+        return normalize_ashare_symbol(digits[:6])
+    suggestions = suggest_ashare_symbols(raw, 1)
+    if suggestions:
+        return normalize_ashare_symbol(str(suggestions[0]["symbol"]))
+    return normalize_ashare_symbol(raw)
 
 
 def ashare_exchange(symbol: str) -> str:
@@ -1189,47 +1268,83 @@ def ashare_to_backtest_bars(bars: list[AShareBar]):
     return [Bar(date=bar.date, open=bar.open, high=bar.high, low=bar.low, close=bar.close, volume=bar.volume) for bar in bars]
 
 
-def latest_ashare_signal(symbol: str, j_threshold: float = 14.0, fetch_name_value: bool = True) -> AShareSignalSnapshot:
+def ashare_limit_volume_context(bar: AShareBar, previous_close: float, limit_pct: float) -> tuple[str, str]:
+    if previous_close <= 0 or limit_pct <= 0:
+        return "正常", "正常交易日：成交量按原始值参与评分"
+    up_threshold = previous_close * (1 + (limit_pct - 0.35) / 100)
+    down_threshold = previous_close * (1 - (limit_pct - 0.35) / 100)
+    sealed = (bar.high - bar.low) / previous_close <= 0.005
+    if bar.open >= up_threshold and bar.high >= up_threshold and bar.close >= up_threshold:
+        if sealed:
+            return "一字涨停", "一字涨停：成交量失真，量能评分已剔除该日成交量"
+        return "涨停", "涨停分歧：成交量按 50% 权重参与评分"
+    if bar.open <= down_threshold and bar.low <= down_threshold and bar.close <= down_threshold:
+        if sealed:
+            return "一字跌停", "一字跌停：成交量失真，量能评分已剔除该日成交量"
+        return "跌停", "跌停分歧：成交量按 50% 权重参与评分"
+    return "正常", "正常交易日：成交量按原始值参与评分"
+
+
+def latest_ashare_signal(
+    symbol: str,
+    j_threshold: float = 14.0,
+    fetch_name_value: bool = True,
+    min_avg_amount_20d: float = 100_000_000,
+    min_control_amount_20d: float = 200_000_000,
+    vol_multiplier: float = 1.8,
+    vol_high_days: int = 2,
+    vol_high_multiplier: float = 1.0,
+    massive_window: int = 7,
+    massive_min_count: int = 1,
+    reentry_pct: float = 0.045,
+    strong_volume_score: float = 4.0,
+    medium_volume_score: float = 2.5,
+    require_5ma_gt_20ma: bool = True,
+) -> AShareSignalSnapshot:
     clean = normalize_ashare_symbol(symbol)
     bars, source = fetch_ashare_bars(clean)
     if len(bars) < 130:
         raise ValueError(f"数据不足：至少需要 130 根日 K，当前 {len(bars)} 根。")
 
-    from backtest import build_ratchet_inputs, rolling_sma
+    from backtest import adjust_limit_volumes, build_ratchet_inputs, rolling_sma
 
     bt_bars = ashare_to_backtest_bars(bars)
     closes = [bar.close for bar in bt_bars]
-    volumes = [bar.volume for bar in bt_bars]
+    limit_pct = ashare_limit_pct(clean)
+    adjusted_volumes = adjust_limit_volumes(bt_bars, limit_pct)
+    volumes = adjusted_volumes
     amounts = [bar.amount if bar.amount > 0 else bar.close * bar.volume for bar in bars]
     ma5_series = rolling_sma(closes, 5)
     ma20_series = rolling_sma(closes, 20)
-    vol_ma20 = rolling_sma(volumes, 20)
+    vol_ma20 = rolling_sma(adjusted_volumes, 20)
     avg_amount20_series = rolling_sma(amounts, 20)
     buy_signal, _, ma, vol_ma, buy_target_pct, buy_stage = build_ratchet_inputs(
         bt_bars,
         ma_length=5,
         vol_length=20,
-        vol_multiplier=1.8,
-        reentry_pct=0.045,
-        vol_high_days=2,
-        vol_high_multiplier=1.0,
-        massive_window=7,
-        massive_min_count=1,
+        vol_multiplier=vol_multiplier,
+        reentry_pct=reentry_pct,
+        vol_high_days=max(1, int(vol_high_days)),
+        vol_high_multiplier=vol_high_multiplier,
+        massive_window=max(1, int(massive_window)),
+        massive_min_count=max(1, int(massive_min_count)),
         massive_max_count=2,
         b1_require_20ma_gt_50ma=False,
+        require_5ma_gt_20ma=require_5ma_gt_20ma,
+        signal_volumes=adjusted_volumes,
     )
 
     i = len(bars) - 1
     latest = bt_bars[i]
     previous_close = bt_bars[i - 1].close if i > 0 else 0.0
-    limit_pct = ashare_limit_pct(clean)
     limit_up = previous_close > 0 and latest.close >= previous_close * (1 + (limit_pct - 0.35) / 100)
     limit_down = previous_close > 0 and latest.close <= previous_close * (1 - (limit_pct - 0.35) / 100)
+    limit_state, volume_context = ashare_limit_volume_context(bars[i], previous_close, limit_pct)
     avg_amount_20d = float(avg_amount20_series[i] or 0.0)
-    amount_ok = avg_amount_20d >= 100_000_000
+    amount_ok = avg_amount_20d >= min_avg_amount_20d
     ma5 = float(ma5_series[i] or 0.0)
     ma20 = float(ma20_series[i] or 0.0)
-    volume_ratio = latest.volume / float(vol_ma20[i] or 0.0) if vol_ma20[i] else 0.0
+    volume_ratio = adjusted_volumes[i] / float(vol_ma20[i] or 0.0) if vol_ma20[i] else 0.0
     trend_ok = bool(ma5 and ma20 and latest.close > ma5 and ma5 > ma20 and i > 0 and ma5_series[i - 1] and ma5 > float(ma5_series[i - 1]))
     signal_type = str(buy_stage[i] or "")
     hard_candidate = bool(buy_signal[i] and amount_ok)
@@ -1274,9 +1389,9 @@ def latest_ashare_signal(symbol: str, j_threshold: float = 14.0, fetch_name_valu
     volume_score += min(0.5, volume_ratio / 2) if volume_ratio else 0.0
     volume_score = round(min(5.0, volume_score), 2)
 
-    if hard_candidate and volume_score >= 4.0 and not limit_up:
+    if hard_candidate and volume_score >= strong_volume_score and not limit_up:
         candidate_rating = "Strong"
-    elif hard_candidate and volume_score >= 2.5:
+    elif hard_candidate and volume_score >= medium_volume_score:
         candidate_rating = "Medium"
     elif hard_candidate:
         candidate_rating = "Watch"
@@ -1286,10 +1401,11 @@ def latest_ashare_signal(symbol: str, j_threshold: float = 14.0, fetch_name_valu
     execution_note = ""
     if limit_up:
         execution_note = "信号日接近涨停，次日若一字板或高开过大应跳过"
-    elif avg_amount_20d < 200_000_000:
+    elif avg_amount_20d < min_control_amount_20d:
         execution_note = "成交额达标但不高，实盘需控制仓位"
     else:
         execution_note = "按 A 股执行规则：次日非涨停且高开不超过 6% 才买入"
+    execution_note = f"{execution_note}；{volume_context}"
 
     name = ""
     sector = ""
@@ -1327,7 +1443,8 @@ def latest_ashare_signal(symbol: str, j_threshold: float = 14.0, fetch_name_valu
         volume_ratio=volume_ratio,
         avg_amount_20d=avg_amount_20d,
         amount_ok=amount_ok,
-        limit_state="涨停" if limit_up else "跌停" if limit_down else "正常",
+        limit_state=limit_state,
+        volume_context=volume_context,
         execution_note=execution_note,
     )
 
@@ -1337,6 +1454,17 @@ def scan_ashare_candidates(
     j_threshold: float = 14.0,
     max_workers: int = 6,
     boards: list[str] | None = None,
+    min_avg_amount_20d: float = 100_000_000,
+    min_control_amount_20d: float = 200_000_000,
+    vol_multiplier: float = 1.8,
+    vol_high_days: int = 2,
+    vol_high_multiplier: float = 1.0,
+    massive_window: int = 7,
+    massive_min_count: int = 1,
+    reentry_pct: float = 0.045,
+    strong_volume_score: float = 4.0,
+    medium_volume_score: float = 2.5,
+    require_5ma_gt_20ma: bool = True,
 ) -> AShareScanResult:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -1349,7 +1477,22 @@ def scan_ashare_candidates(
     errors: list[tuple[str, str]] = []
 
     def run_one(item: AShareUniverseItem) -> AShareSignalSnapshot:
-        snapshot = latest_ashare_signal(item.symbol, j_threshold, fetch_name_value=False)
+        snapshot = latest_ashare_signal(
+            item.symbol,
+            j_threshold,
+            fetch_name_value=False,
+            min_avg_amount_20d=min_avg_amount_20d,
+            min_control_amount_20d=min_control_amount_20d,
+            vol_multiplier=vol_multiplier,
+            vol_high_days=vol_high_days,
+            vol_high_multiplier=vol_high_multiplier,
+            massive_window=massive_window,
+            massive_min_count=massive_min_count,
+            reentry_pct=reentry_pct,
+            strong_volume_score=strong_volume_score,
+            medium_volume_score=medium_volume_score,
+            require_5ma_gt_20ma=require_5ma_gt_20ma,
+        )
         snapshot.name = item.name
         snapshot.sector = item.sector
         return snapshot
