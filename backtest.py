@@ -749,11 +749,11 @@ def backtest(
 
             stop_reasons = []
             if defense_warning:
-                stop_reasons.append("5MA 7.5% stop")
+                stop_reasons.append(f"5MA {stop_5ma_pct:g}% stop")
             if trend_stop:
-                stop_reasons.append("2-day 20MA break")
+                stop_reasons.append(f"{below_20ma_stop_days}-day 20MA break")
             if cost_stop:
-                stop_reasons.append("Cost 20% forced stop")
+                stop_reasons.append(f"Cost {hard_stop_pct:g}% forced stop")
             if time_stop_days > 0 and i - entry_index >= time_stop_days and highest_close_since_entry <= entry_signal_close:
                 stop_reasons.append(f"{time_stop_days}-day no new high")
             ratchet_sell_today = bool(stop_reasons)
@@ -1432,6 +1432,8 @@ def make_report(
         "ma": [{"time": dates[i], "value": value} for i, value in enumerate(ma_values) if value is not None],
         "ma20": [{"time": dates[i], "value": value} for i, value in enumerate(ma20_values) if value is not None],
         "volMa": [{"time": dates[i], "value": value} for i, value in enumerate(vol_ma_values) if value is not None],
+        "volThreshold": [{"time": dates[i], "value": value * vol_multiplier} for i, value in enumerate(vol_ma_values) if value is not None],
+        "volMultiplier": vol_multiplier,
         "kdjK": [{"time": dates[i], "value": value} for i, value in enumerate(k_values) if value is not None],
         "kdjD": [{"time": dates[i], "value": value} for i, value in enumerate(d_values) if value is not None],
         "kdjJ": [{"time": dates[i], "value": value} for i, value in enumerate(j_values) if value is not None],
@@ -1450,6 +1452,7 @@ def make_report(
                 "ma": ma_values[i],
                 "ma20": ma20_values[i],
                 "volMa": vol_ma_values[i],
+                "volThreshold": vol_ma_values[i] * vol_multiplier if vol_ma_values[i] is not None else None,
                 "kdjK": k_values[i],
                 "kdjD": d_values[i],
                 "kdjJ": j_values[i],
@@ -1768,6 +1771,8 @@ volumeSeries.setData(chartData.volume);
 priceChart.priceScale('').applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
 const volMaSeries = priceChart.addLineSeries({{ color: '#2962ff', lineWidth: 1, priceScaleId: '', title: chartLabels.volume_ma, priceLineVisible: false, lastValueVisible: false }});
 volMaSeries.setData(chartData.volMa);
+const volThresholdSeries = priceChart.addLineSeries({{ color: '#f97316', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, priceScaleId: '', title: `${{chartData.volMultiplier || ''}}x Vol`, priceLineVisible: false, lastValueVisible: false }});
+volThresholdSeries.setData(chartData.volThreshold || []);
 const kdjChart = LightweightCharts.createChart(kdjElement, {{
   layout: {{ background: {{ type: 'solid', color: '#ffffff' }}, textColor: '#131722', fontFamily: 'Inter, Microsoft YaHei UI, PingFang SC, Arial, sans-serif' }},
   width: kdjElement.clientWidth,
@@ -1807,7 +1812,7 @@ priceChart.subscribeCrosshairMove(param => {{
   const up = row.close >= row.open;
   tooltip.innerHTML = `<strong>${{row.time}}</strong>` +
     `<div><span class="${{up ? 'up' : 'down'}}">${{chartLabels.open}} ${{formatNumber(row.open)}} &nbsp; ${{chartLabels.high}} ${{formatNumber(row.high)}} &nbsp; ${{chartLabels.low}} ${{formatNumber(row.low)}} &nbsp; ${{chartLabels.close}} ${{formatNumber(row.close)}}</span></div>` +
-    `<div>${{chartLabels.volume}} ${{formatVolume(row.volume)}} &nbsp; 5MA ${{formatNumber(row.ma)}} &nbsp; 20MA ${{formatNumber(row.ma20)}}</div>` +
+    `<div>${{chartLabels.volume}} ${{formatVolume(row.volume)}} &nbsp; 阈值量 ${{formatVolume(row.volThreshold)}} &nbsp; 5MA ${{formatNumber(row.ma)}} &nbsp; 20MA ${{formatNumber(row.ma20)}}</div>` +
     `<div>KDJ K ${{formatNumber(row.kdjK)}} &nbsp; D ${{formatNumber(row.kdjD)}} &nbsp; J ${{formatNumber(row.kdjJ)}}</div>`;
   tooltip.style.display = 'block';
   const left = Math.min(param.point.x + 16, chartElement.clientWidth - 250);
