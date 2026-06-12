@@ -1309,6 +1309,7 @@ def ashare_backtest_defaults(params: dict[str, list[str]]) -> dict[str, float | 
         "max_buy_gap_pct": number_field(params, "max_buy_gap_pct", 6.0),
         "hard_stop_pct": number_field(params, "hard_stop_pct", 8.0),
         "stop_5ma_pct": number_field(params, "stop_5ma_pct", 7.5),
+        "below_20ma_stop_days": int(number_field(params, "below_20ma_stop_days", 2)),
         "time_stop_days": int(number_field(params, "time_stop_days", 5)),
         "vol_multiplier": number_field(params, "vol_multiplier", 1.8),
     }
@@ -1379,6 +1380,7 @@ def render_ashare_backtest_form(params: dict[str, list[str]] | None = None) -> s
   <label>最高可追高开 %<input name="max_buy_gap_pct" value="{value("max_buy_gap_pct", defaults["max_buy_gap_pct"])}"></label>
   <label>巨量倍数<input name="vol_multiplier" value="{value("vol_multiplier", defaults["vol_multiplier"])}"></label>
   <label>跌破MA5止损 %<input name="stop_5ma_pct" value="{value("stop_5ma_pct", defaults["stop_5ma_pct"])}"></label>
+  <label>连续跌破20MA天数<input name="below_20ma_stop_days" value="{value("below_20ma_stop_days", defaults["below_20ma_stop_days"])}"></label>
   <label>硬止损 %<input name="hard_stop_pct" value="{value("hard_stop_pct", defaults["hard_stop_pct"])}"></label>
   <label>时间止损天数<input name="time_stop_days" value="{value("time_stop_days", defaults["time_stop_days"])}"></label>
   <button type="submit">运行 A 股回测</button>
@@ -1416,7 +1418,7 @@ def run_ashare_strategy(params: dict[str, list[str]]) -> str:
         massive_window=7,
         massive_min_count=1,
         massive_max_count=2,
-        below_20ma_stop_days=2,
+        below_20ma_stop_days=int(defaults["below_20ma_stop_days"]),
         market="cn",
         limit_pct=limit_pct,
         max_buy_gap_pct=float(defaults["max_buy_gap_pct"]),
@@ -1444,6 +1446,7 @@ def run_ashare_strategy(params: dict[str, list[str]]) -> str:
         "max_buy_gap_pct": defaults["max_buy_gap_pct"],
         "stamp_duty_pct": defaults["stamp_duty_pct"],
         "time_stop_days": defaults["time_stop_days"],
+        "below_20ma_stop_days": defaults["below_20ma_stop_days"],
         "vol_high_days": 2,
         "vol_multiplier": defaults["vol_multiplier"],
         "hard_stop_pct": defaults["hard_stop_pct"],
@@ -1625,6 +1628,7 @@ def render_ashare_condition_panel() -> str:
     <span class="scan-fact"><span>涨跌停</span>一字板量能剔除，普通涨跌停量能50%权重</span>
     <span class="scan-fact"><span>评级</span>Strong / Medium / Watch 按硬条件和量能分输出</span>
     <span class="scan-fact"><span>执行</span>涨停不买，高开过大跳过，跌停卖出顺延</span>
+    <span class="scan-fact"><span>卖出</span>跌破MA5阈值 / 连续跌破20MA / 跌破成本 / 持仓未创新高</span>
     <span class="scan-fact"><span>图表</span>主图K线+MA5/MA20+成交量，下方KDJ</span>
   </div>
 </section>
@@ -1793,6 +1797,12 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
           <td><span class="score-badge score-Medium">A股规则</span></td>
           <td>{html.escape(snapshot.execution_note)}</td>
           <td>次日接近涨停不买，高开超过阈值跳过；卖出遇跌停则顺延。</td>
+        </tr>
+        <tr>
+          <td>卖出风控</td>
+          <td><span class="score-badge score-Medium">回测执行</span></td>
+          <td>跌破MA5阈值 / 连续跌破20MA / 跌破成本 / 时间止损</td>
+          <td>这些卖出条件在 A 股回测中执行，选股器单票页主要展示买入候选和次日可成交性。</td>
         </tr>
         <tr>
           <td>图表口径</td>
@@ -4521,6 +4531,8 @@ function makeWatchChart(payload) {{
   watchChart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
   const volMa = watchChart.addLineSeries({{ color: "#2962ff", lineWidth: 1, priceScaleId: "", title: "成交量均线", priceLineVisible: false, lastValueVisible: false }});
   volMa.setData(payload.volMa);
+  const volThreshold = watchChart.addLineSeries({{ color: "#f97316", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, priceScaleId: "", title: `${{payload.volMultiplier || ""}}x Vol`, priceLineVisible: false, lastValueVisible: false }});
+  volThreshold.setData(payload.volThreshold || []);
   watchKdjChart = LightweightCharts.createChart(watchKdjEl, {{
     layout: {{ background: {{ type: "solid", color: "#ffffff" }}, textColor: "#131722", fontFamily: "Inter, Microsoft YaHei UI, PingFang SC, Arial, sans-serif" }},
     width: watchKdjEl.clientWidth,
@@ -4558,7 +4570,7 @@ function makeWatchChart(payload) {{
     const f = value => value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }});
     const fv = value => value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ maximumFractionDigits: 0 }});
     const eventHtml = (row.events || []).map(event => `<div>分歧事件：${{escapeHtml(event.event_date)}} · ${{escapeHtml(event.importance_label)}} ${{escapeHtml(event.divergence_type_label)}} · D+${{escapeHtml(event.day_count)}}<br>${{escapeHtml(event.note || "")}}</div>`).join("");
-    watchTooltip.innerHTML = `<strong>${{row.time}}</strong><div><span class="${{up ? "up" : "down"}}">开 ${{f(row.open)}} 高 ${{f(row.high)}} 低 ${{f(row.low)}} 收 ${{f(row.close)}}</span></div><div>成交量 ${{fv(row.volume)}} &nbsp; 5MA ${{f(row.ma)}} &nbsp; 20MA ${{f(row.ma20)}}</div><div>KDJ K ${{f(row.kdjK)}} &nbsp; D ${{f(row.kdjD)}} &nbsp; J ${{f(row.kdjJ)}}</div>${{eventHtml}}`;
+    watchTooltip.innerHTML = `<strong>${{row.time}}</strong><div><span class="${{up ? "up" : "down"}}">开 ${{f(row.open)}} 高 ${{f(row.high)}} 低 ${{f(row.low)}} 收 ${{f(row.close)}}</span></div><div>成交量 ${{fv(row.volume)}} &nbsp; 阈值量 ${{fv(row.volThreshold)}} &nbsp; 5MA ${{f(row.ma)}} &nbsp; 20MA ${{f(row.ma20)}}</div><div>KDJ K ${{f(row.kdjK)}} &nbsp; D ${{f(row.kdjD)}} &nbsp; J ${{f(row.kdjJ)}}</div>${{eventHtml}}`;
     watchTooltip.style.display = "block";
     watchTooltip.style.left = Math.min(param.point.x + 16, watchChartEl.clientWidth - 250) + "px";
     watchTooltip.style.top = Math.max(44, param.point.y - 72) + "px";
@@ -4634,6 +4646,7 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
     if not symbol:
         return {"error": "缺少股票代码。"}
     preset = field(params, "preset", "1y").lower()
+    vol_multiplier = number_field(params, "vol_multiplier", 1.45)
     end_day = default_scan_end_date()
     start_day = chart_start_for_preset(preset, end_day)
     try:
@@ -4647,7 +4660,7 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
             bars=bars,
             ma_length=5,
             vol_length=20,
-            vol_multiplier=1.45,
+            vol_multiplier=vol_multiplier,
             initial_cash=100000,
             commission_pct=0.1,
             slippage_pct=0,
@@ -4707,6 +4720,7 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
     ma_points = []
     ma20_points = []
     vol_ma_points = []
+    vol_threshold_points = []
     k_values, d_values, j_values = calculate_kdj(bars)
     k_points = []
     d_points = []
@@ -4732,6 +4746,7 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
                 "ma": ma,
                 "ma20": ma20,
                 "volMa": vol_ma,
+                "volThreshold": vol_ma * vol_multiplier if vol_ma is not None else None,
                 "kdjK": k_values[i],
                 "kdjD": d_values[i],
                 "kdjJ": j_values[i],
@@ -4746,6 +4761,7 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
             ma20_points.append({"time": bar.date, "value": ma20})
         if vol_ma is not None:
             vol_ma_points.append({"time": bar.date, "value": vol_ma})
+            vol_threshold_points.append({"time": bar.date, "value": vol_ma * vol_multiplier})
         if k_values[i] is not None:
             k_points.append({"time": bar.date, "value": k_values[i]})
         if d_values[i] is not None:
@@ -4773,6 +4789,8 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
         "ma": ma_points,
         "ma20": ma20_points,
         "volMa": vol_ma_points,
+        "volThreshold": vol_threshold_points,
+        "volMultiplier": vol_multiplier,
         "kdjK": k_points,
         "kdjD": d_points,
         "kdjJ": j_points,
