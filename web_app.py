@@ -1031,6 +1031,75 @@ def price_cache_summary(symbols: list[str]) -> dict[str, object]:
     }
 
 
+def file_group_summary(paths: list[Path]) -> dict[str, object]:
+    files = [path for path in paths if path.exists() and path.is_file()]
+    total_size = sum(path.stat().st_size for path in files)
+    latest = max((path.stat().st_mtime for path in files), default=0)
+    return {
+        "files": len(files),
+        "size_mb": total_size / 1_000_000,
+        "latest": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(latest)) if latest else "-",
+    }
+
+
+def directory_file_summary(path: Path) -> dict[str, object]:
+    files = [item for item in path.iterdir() if item.is_file()] if path.exists() else []
+    return file_group_summary(files)
+
+
+def cache_dashboard_summary() -> dict[str, dict[str, object]]:
+    us_market_paths = [NASDAQ_CACHE_PATH, EARNINGS_CACHE_PATH]
+    if LEGACY_NASDAQ_CACHE_PATH != NASDAQ_CACHE_PATH:
+        us_market_paths.append(LEGACY_NASDAQ_CACHE_PATH)
+    ashare_cache_paths = [DATA_DIR / "ashare" / "universe_cache.json", DATA_DIR / "ashare" / "sector_map.json"]
+    latest_scan_paths = [LATEST_SCAN_PATH, ashare_latest_scan_path()]
+    return {
+        "reports": directory_file_summary(REPORT_DIR),
+        "prices": directory_file_summary(PRICE_CACHE_DIR),
+        "us_market": file_group_summary(us_market_paths),
+        "ashare": file_group_summary(ashare_cache_paths),
+        "latest": file_group_summary(latest_scan_paths),
+    }
+
+
+def delete_files(paths: list[Path]) -> int:
+    deleted = 0
+    for path in paths:
+        try:
+            if path.exists() and path.is_file():
+                path.unlink()
+                deleted += 1
+        except OSError:
+            pass
+    return deleted
+
+
+def delete_directory_files(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return delete_files([item for item in path.iterdir() if item.is_file()])
+
+
+def clear_cache_area(area: str) -> str:
+    if area == "reports":
+        deleted = delete_directory_files(REPORT_DIR)
+        return f"已清理报告文件 {deleted} 个。"
+    if area == "prices":
+        deleted = delete_directory_files(PRICE_CACHE_DIR)
+        return f"已清理行情缓存 {deleted} 个。"
+    if area == "us_market":
+        deleted = delete_files([NASDAQ_CACHE_PATH, LEGACY_NASDAQ_CACHE_PATH, EARNINGS_CACHE_PATH])
+        return f"已清理美股市场/财报缓存 {deleted} 个。"
+    if area == "ashare":
+        deleted = delete_files([DATA_DIR / "ashare" / "universe_cache.json", DATA_DIR / "ashare" / "sector_map.json"])
+        return f"已清理 A 股股票池/板块缓存 {deleted} 个。"
+    if area == "latest":
+        us_deleted = delete_latest_scan()
+        cn_deleted = 1 if delete_latest_ashare_scan() else 0
+        return f"已清理最新扫描结果 {us_deleted + cn_deleted} 个相关文件。"
+    return "未知缓存类型，未执行清理。"
+
+
 def page_shell(content: str, active: str = "backtest", market: str = "us") -> bytes:
     prefix = "/cn" if market == "cn" else "/us"
     home_active = " active" if active == "home" else ""
@@ -1137,6 +1206,10 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .scan-facts {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 9px; }}
 .scan-fact {{ display: inline-flex; gap: 6px; align-items: center; border: 1px solid #e3e7ee; background: #f8fafc; border-radius: 999px; padding: 5px 9px; font-size: 12px; color: #334155; }}
 .scan-fact span {{ color: #64748b; font-weight: 700; }}
+.cache-actions {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }}
+.cache-actions form {{ margin: 0; }}
+.cache-actions button {{ min-height: 30px; padding: 6px 10px; font-size: 12px; }}
+.notice {{ background: #eefbf7; border: 1px solid #9fd8cc; color: #067a6b; padding: 10px 12px; border-radius: 6px; margin: 0 0 12px; font-weight: 800; }}
 .strategy-condition-panel {{ padding: 0; overflow: hidden; }}
 .strategy-condition-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; padding: 12px 14px; border-bottom: 1px solid #e3e7ee; background: #fbfcfe; }}
 .strategy-condition-head strong {{ display: block; font-size: 15px; }}
@@ -1507,7 +1580,8 @@ backtestForm.addEventListener("submit", (event) => {{
 """
 
 
-def render_action_dashboard() -> str:
+def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
+    params = params or {}
     us_latest = load_latest_scan()
     us_summary = us_latest.get("summary", {}) if us_latest else {}
     us_signal = str(us_latest.get("signal_date", "-")) if us_latest else "-"
@@ -1521,6 +1595,21 @@ def render_action_dashboard() -> str:
     cn_candidates = int(cn_summary.get("candidates", 0) or 0) if cn_latest else 0
     cn_scanned = int(cn_summary.get("scanned", 0) or 0) if cn_latest else 0
     cn_watch_count = len(load_ashare_watchlist_items())
+    cache = cache_dashboard_summary()
+    notice = field(params, "cache_message", "").strip()
+    notice_html = f'<section class="notice">{html.escape(notice)}</section>' if notice else ""
+
+    def cache_fact(key: str, label: str) -> str:
+        item = cache[key]
+        return f'<span class="scan-fact"><span>{html.escape(label)}</span>{int(item["files"])} 个 / {float(item["size_mb"]):.1f} MB</span>'
+
+    def clear_form(area: str, label: str, danger: bool = False) -> str:
+        cls = "danger" if danger else "secondary"
+        return f"""
+      <form action="/cache/clear" method="get" onsubmit="return confirm('确认清理{html.escape(label)}？自选池不会被删除，但下次打开会重新拉取相关数据。');">
+        <input type="hidden" name="area" value="{html.escape(area)}">
+        <button class="{cls}" type="submit">{html.escape(label)}</button>
+      </form>"""
 
     return f"""
 <section class="page-head">
@@ -1530,6 +1619,7 @@ def render_action_dashboard() -> str:
   </div>
   <div class="mode-pill">Global | Action Desk</div>
 </section>
+{notice_html}
 <section class="dashboard-grid">
   <div class="dashboard-panel">
     <h2>美股</h2>
@@ -1559,6 +1649,24 @@ def render_action_dashboard() -> str:
       <a class="btn btn-secondary" href="/cn/scanner">选股器</a>
       <a class="btn btn-secondary" href="/cn/watchlist">自选池</a>
       <a class="btn btn-secondary" href="/cn/backtest">回测</a>
+    </div>
+  </div>
+  <div class="dashboard-panel">
+    <h2>缓存维护</h2>
+    <p class="hint">清理的是服务器本地缓存和生成报告，不会删除美股/A股自选池。</p>
+    <div class="scan-facts">
+      {cache_fact("reports", "报告")}
+      {cache_fact("prices", "行情缓存")}
+      {cache_fact("us_market", "美股缓存")}
+      {cache_fact("ashare", "A股缓存")}
+      {cache_fact("latest", "扫描结果")}
+    </div>
+    <div class="cache-actions">
+      {clear_form("reports", "清理报告", True)}
+      {clear_form("prices", "清理行情缓存")}
+      {clear_form("us_market", "清理美股缓存")}
+      {clear_form("ashare", "清理A股缓存")}
+      {clear_form("latest", "清理扫描结果", True)}
     </div>
   </div>
   <div class="dashboard-panel">
@@ -6583,9 +6691,9 @@ class Handler(BaseHTTPRequestHandler):
         raw_path = parsed.path
         market = "us"
         route_path = raw_path
-        if raw_path == "/":
+        if raw_path == "/" or raw_path == "/cache/clear":
             market = "global"
-            route_path = "/"
+            route_path = raw_path
         elif raw_path == ASHARE_ROUTE:
             market = "cn"
             route_path = "/scanner"
@@ -6597,7 +6705,10 @@ class Handler(BaseHTTPRequestHandler):
             route_path = raw_path[3:] or "/"
         try:
             if market == "global":
-                self.send_bytes(page_shell(render_action_dashboard(), "home", "global"))
+                if route_path == "/cache/clear":
+                    self.clear_cache(params)
+                else:
+                    self.send_bytes(page_shell(render_action_dashboard(params), "home", "global"))
             elif market == "cn":
                 if route_path in ("/", ""):
                     self.redirect("/cn/scanner")
@@ -6688,8 +6799,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(404)
         except Exception as exc:
             active = "scanner" if route_path in ("/scanner", "/scan") or route_path.startswith("/scan/") else "watchlist" if route_path.startswith("/watchlist") else "batch" if route_path.startswith("/batch") else "home" if route_path in ("/", "") else "backtest"
-            form = render_action_dashboard() if market == "global" else render_ashare_scanner(params) if market == "cn" and active in ("scanner", "home") else render_ashare_watchlist_page(params) if market == "cn" and active == "watchlist" else render_market_placeholder(active) if market == "cn" else render_scanner_form(params) if active in ("scanner", "home") else render_watchlist_page(params) if active == "watchlist" else render_batch_form(params) if active == "batch" else render_backtest_form(params)
+            form = render_action_dashboard(params) if market == "global" else render_ashare_scanner(params) if market == "cn" and active in ("scanner", "home") else render_ashare_watchlist_page(params) if market == "cn" and active == "watchlist" else render_market_placeholder(active) if market == "cn" else render_scanner_form(params) if active in ("scanner", "home") else render_watchlist_page(params) if active == "watchlist" else render_batch_form(params) if active == "batch" else render_backtest_form(params)
             self.send_bytes(page_shell(form + f'<div class="error">{html.escape(str(exc))}</div>', active, market), 500)
+
+    def clear_cache(self, params: dict[str, list[str]]) -> None:
+        area = field(params, "area", "")
+        message = clear_cache_area(area)
+        self.redirect(f"/?cache_message={quote(message)}")
 
     def add_watchlist_item(self, params: dict[str, list[str]]) -> None:
         symbol = field(params, "symbol", "")
