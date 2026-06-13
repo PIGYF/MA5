@@ -1302,6 +1302,9 @@ def make_report(
     report_mode: str = "backtest",
 ) -> None:
     is_candidate_report = report_mode == "candidate"
+    is_batch_chart_report = report_mode == "batch_chart"
+    hide_summary = is_candidate_report or is_batch_chart_report
+    show_context_markers = not is_batch_chart_report
     labels = {
         "net_profit": "\u51c0\u5229\u6da6",
         "return_pct": "\u6536\u76ca\u7387",
@@ -1472,15 +1475,19 @@ def make_report(
             {"time": trade.exit_date, "position": "aboveBar", "color": "#f23645", "shape": "arrowDown", "text": "卖"}
             for trade in trades
         ],
-        "holdBuyMarkers": buy_signal_markers,
-        "holdSellMarkers": [
-            {"time": day, "position": "aboveBar", "color": "#f97316", "shape": "circle", "text": "S"}
-            for day in hold_sell_x
-        ],
+        "holdBuyMarkers": buy_signal_markers if show_context_markers else [],
+        "holdSellMarkers": (
+            [
+                {"time": day, "position": "aboveBar", "color": "#f97316", "shape": "circle", "text": "S"}
+                for day in hold_sell_x
+            ]
+            if show_context_markers
+            else []
+        ),
         "entryText": entry_text,
         "exitText": exit_text,
-        "holdBuyText": hold_buy_text,
-        "holdSellText": hold_sell_text,
+        "holdBuyText": hold_buy_text if show_context_markers else [],
+        "holdSellText": hold_sell_text if show_context_markers else [],
     }
 
     benchmark_html = ""
@@ -1544,7 +1551,7 @@ def make_report(
     analysis_tables = "".join(f"<tr><td>{html.escape(label)}</td><td>{value}</td></tr>" for label, value in analysis_rows)
     summary_html = (
         ""
-        if is_candidate_report
+        if hide_summary
         else f"""
 <div class="metrics">{card_html}</div>
 <section class="tester">

@@ -2,6 +2,7 @@
 
 import csv
 import html
+import importlib.util
 import json
 import os
 import re
@@ -88,6 +89,18 @@ from scan_next_b import SignalResult, latest_b_signal, load_symbols, unique_symb
 SCAN_JOBS: dict[str, dict[str, object]] = {}
 SCAN_JOBS_LOCK = threading.Lock()
 ACTIVE_SCAN_STATUSES = {"queued", "running", "pausing", "paused", "stopping"}
+FINISHED_SCAN_STATUSES = {"done", "stopped", "error"}
+ASHARE_DEFAULT_MAX_SCAN_SYMBOLS = 6000
+JOB_STATUS_LABELS = {
+    "queued": "排队中",
+    "running": "运行中",
+    "pausing": "正在暂停",
+    "paused": "已暂停",
+    "stopping": "正在终止",
+    "stopped": "已终止",
+    "done": "已完成",
+    "error": "失败",
+}
 
 
 def cleanup_old_reports() -> None:
@@ -117,6 +130,9 @@ def cleanup_old_reports() -> None:
 def set_job(job_id: str, **updates: object) -> None:
     with SCAN_JOBS_LOCK:
         job = SCAN_JOBS.setdefault(job_id, {})
+        if "created_at" not in job:
+            job["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         job.update(updates)
 
 
@@ -134,6 +150,58 @@ def active_scan_job() -> tuple[str, dict[str, object]] | None:
     return None
 
 
+def job_market(job_id: str, job: dict[str, object] | None = None) -> str:
+    if job and isinstance(job.get("market"), str):
+        return str(job["market"])
+    return "cn" if str(job_id).startswith("ashare-") else "us"
+
+
+def normalize_job_payload(job_id: str, job: dict[str, object]) -> dict[str, object]:
+    payload = dict(job)
+    status = str(payload.get("status", ""))
+    total = int(payload.get("total") or 0)
+    scanned = int(payload.get("scanned") or 0)
+    if status in FINISHED_SCAN_STATUSES:
+        progress_pct = 100
+    elif total > 0:
+        progress_pct = max(1, min(99, round(scanned / total * 100)))
+    elif status in ACTIVE_SCAN_STATUSES:
+        progress_pct = 8
+    else:
+        progress_pct = 0
+    market = job_market(job_id, payload)
+    payload.update(
+        {
+            "job_id": job_id,
+            "market": market,
+            "market_label": "A股" if market == "cn" else "美股",
+            "status_label": JOB_STATUS_LABELS.get(status, status or "-"),
+            "is_active": status in ACTIVE_SCAN_STATUSES,
+            "is_finished": status in FINISHED_SCAN_STATUSES,
+            "can_stop": status in ACTIVE_SCAN_STATUSES,
+            "progress_pct": progress_pct,
+        }
+    )
+    return payload
+
+
+def latest_job_for_market(market: str, include_finished: bool = True) -> tuple[str, dict[str, object]] | None:
+    latest_job_id = ""
+    latest_job: dict[str, object] | None = None
+    with SCAN_JOBS_LOCK:
+        for job_id, job in SCAN_JOBS.items():
+            if job_market(job_id, job) != market:
+                continue
+            if job.get("status") in ACTIVE_SCAN_STATUSES:
+                return job_id, dict(job)
+            if include_finished and job.get("status") in FINISHED_SCAN_STATUSES:
+                latest_job_id = job_id
+                latest_job = dict(job)
+    if latest_job:
+        return latest_job_id, latest_job
+    return None
+
+
 def job_pause_requested(job_id: str) -> bool:
     job = get_job(job_id)
     return bool(job and job.get("pause_requested"))
@@ -144,11 +212,155 @@ def job_stop_requested(job_id: str) -> bool:
     return bool(job and job.get("stop_requested"))
 
 
+def classify_scan_error(reason: str) -> str:
+    text = str(reason or "").lower()
+    if any(token in text for token in ("缺少", "no module", "importerror", "install yfinance", "pip install")):
+        return "依赖缺失"
+    if any(token in text for token in ("timeout", "timed out", "connection", "network", "http", "urlopen", "远程", "网络")):
+        return "网络/接口"
+    if any(token in text for token in ("no data", "empty", "没有可用", "日线", "数据源", "possibly delisted")):
+        return "无数据"
+    if any(token in text for token in ("symbol", "代码", "6 位", "invalid", "not found")):
+        return "代码/标的"
+    return "其他"
+
+
+def summarize_error_categories(errors: list[tuple[str, str]]) -> dict[str, int]:
+    summary: dict[str, int] = {}
+    for _, reason in errors:
+        category = classify_scan_error(reason)
+        summary[category] = summary.get(category, 0) + 1
+    return summary
+
+
+def render_error_category_chips(errors: list[tuple[str, str]]) -> str:
+    summary = summarize_error_categories(errors)
+    if not summary:
+        return ""
+    chips = "".join(
+        f'<span class="scan-fact"><span>{html.escape(category)}</span>{count}</span>'
+        for category, count in sorted(summary.items(), key=lambda item: (-item[1], item[0]))
+    )
+    return f'<div class="scan-facts">{chips}</div>'
+
+
 def checkbox_field(params: dict[str, list[str]], name: str, default: bool = False) -> bool:
     values = params.get(name)
     if not values:
         return default
     return any(str(value).strip().lower() in {"1", "true", "on", "yes"} for value in values)
+
+
+def display_preset_for_dates(params: dict[str, list[str]], preset: str, default_end: date) -> str:
+    if preset == "custom":
+        return "custom"
+    if "start" not in params and "end" not in params:
+        return preset
+    start_value = field(params, "start", "")
+    end_value = field(params, "end", default_end.isoformat())
+    try:
+        end_date = date.fromisoformat(end_value)
+    except ValueError:
+        return "custom"
+    expected_start = start_for_preset(preset, end_date).isoformat()
+    return preset if start_value == expected_start else "custom"
+
+
+def package_health(name: str) -> tuple[str, str]:
+    return ("正常", "condition-on") if importlib.util.find_spec(name) else ("缺失", "condition-off")
+
+
+def file_health(path: Path, max_age_seconds: int | None = None) -> tuple[str, str]:
+    if not path.exists():
+        return "无缓存", "condition-off"
+    if max_age_seconds is None:
+        return "已缓存", "condition-on"
+    age = time.time() - path.stat().st_mtime
+    if age <= max_age_seconds:
+        return "新鲜", "condition-on"
+    days = max(1, int(age // 86400))
+    return f"{days}天前", "condition-off"
+
+
+def render_health_tag(label: str, value: str, cls: str = "condition-primary") -> str:
+    return f'<span class="condition-tag {cls}">{html.escape(label)} {html.escape(value)}</span>'
+
+
+def render_data_health_panel(market: str) -> str:
+    if market == "cn":
+        packages = [("efinance", "efinance"), ("pytdx", "pytdx"), ("yfinance备用", "yfinance")]
+        latest = load_latest_ashare_scan()
+        latest_errors = [
+            (str(item.get("symbol", "")), str(item.get("reason", "")))
+            for item in (latest or {}).get("errors", [])
+            if isinstance(item, dict)
+        ]
+        universe_status, universe_cls = file_health(DATA_DIR / "ashare" / "universe_cache.json", 18 * 60 * 60)
+        sector_status, sector_cls = file_health(DATA_DIR / "ashare" / "sector_map.json", 7 * 24 * 60 * 60)
+        job = latest_job_for_market("cn", include_finished=True)
+        source_tags = [
+            render_health_tag(label, *package_health(package))
+            for label, package in packages
+        ]
+        cache_tags = [
+            render_health_tag("股票池缓存", universe_status, universe_cls),
+            render_health_tag("行业缓存", sector_status, sector_cls),
+        ]
+        title = "A股数据源状态"
+        note = "A股优先使用直连/efinance/通达信等多数据源；这里显示依赖和缓存是否可用。"
+    else:
+        latest = load_latest_scan()
+        latest_errors = [
+            (str(item.get("symbol", "")), str(item.get("reason", "")))
+            for item in (latest or {}).get("errors", [])
+            if isinstance(item, dict)
+        ]
+        nasdaq_status, nasdaq_cls = file_health(NASDAQ_CACHE_PATH if NASDAQ_CACHE_PATH.exists() else LEGACY_NASDAQ_CACHE_PATH, NASDAQ_CACHE_SECONDS)
+        earnings_status, earnings_cls = file_health(EARNINGS_CACHE_PATH, EARNINGS_CACHE_SECONDS)
+        price_files = len(list(PRICE_CACHE_DIR.glob("*.csv"))) if PRICE_CACHE_DIR.exists() else 0
+        job = latest_job_for_market("us", include_finished=True)
+        source_tags = [render_health_tag("yfinance", *package_health("yfinance"))]
+        cache_tags = [
+            render_health_tag("股票池缓存", nasdaq_status, nasdaq_cls),
+            render_health_tag("财报缓存", earnings_status, earnings_cls),
+            render_health_tag("价格缓存", f"{price_files}个", "condition-on" if price_files else "condition-off"),
+        ]
+        title = "美股数据源状态"
+        note = "美股行情和财报主要依赖 yfinance，股票池使用 Nasdaq 缓存和接口。"
+
+    job_tags = []
+    if job:
+        job_id, job_payload = job
+        normalized = normalize_job_payload(job_id, job_payload)
+        job_tags.append(render_health_tag("最近任务", str(normalized["status_label"]), "condition-on" if normalized["is_active"] else "condition-primary"))
+        job_tags.append(render_health_tag("进度", f'{normalized["progress_pct"]}%', "condition-primary"))
+    else:
+        job_tags.append(render_health_tag("最近任务", "无", "condition-off"))
+
+    error_html = ""
+    if latest_errors:
+        error_html = f"""
+    <div class="condition-note">最近扫描失败分类</div>
+    {render_error_category_chips(latest_errors)}
+"""
+
+    return f"""
+<section class="result strategy-condition-panel">
+  <div class="strategy-condition-head">
+    <div>
+      <strong>{title}</strong>
+      <p class="hint">{note}</p>
+    </div>
+    <span class="condition-tag condition-primary">Health</span>
+  </div>
+  <div class="scan-facts">
+    {''.join(source_tags)}
+    {''.join(cache_tags)}
+    {''.join(job_tags)}
+  </div>
+  {error_html}
+</section>
+"""
 
 
 def build_benchmark(symbol: str, start: str, end: str, initial_cash: float) -> dict[str, object]:
@@ -1194,6 +1406,7 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
     params = params or {}
     today = date.today()
     preset = field(params, "preset", "1y")
+    display_preset = display_preset_for_dates(params, preset, today)
     start_default = start_for_preset(preset, today).isoformat()
 
     def value(name: str, default: str) -> str:
@@ -1221,11 +1434,11 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
   <input type="hidden" name="strategy_name" value="ratchet">
   <label>回测周期
     <select name="preset" id="preset">
-      <option value="6m"{selected(preset, "6m")}>近 6 个月</option>
-      <option value="1y"{selected(preset, "1y")}>近 1 年</option>
-      <option value="3y"{selected(preset, "3y")}>近 3 年</option>
-      <option value="5y"{selected(preset, "5y")}>近 5 年</option>
-      <option value="custom"{selected(preset, "custom")}>自定义</option>
+      <option value="6m"{selected(display_preset, "6m")}>近 6 个月</option>
+      <option value="1y"{selected(display_preset, "1y")}>近 1 年</option>
+      <option value="3y"{selected(display_preset, "3y")}>近 3 年</option>
+      <option value="5y"{selected(display_preset, "5y")}>近 5 年</option>
+      <option value="custom"{selected(display_preset, "custom")}>自定义</option>
     </select>
   </label>
   <label>开始日期<input type="date" name="start" id="start" value="{value("start", start_default)}"></label>
@@ -1277,7 +1490,8 @@ function applyPreset() {{
   start.value = isoDate(startDate);
 }}
 preset.addEventListener("change", applyPreset);
-end.addEventListener("change", applyPreset);
+start.addEventListener("change", () => {{ preset.value = "custom"; }});
+end.addEventListener("change", () => {{ preset.value = "custom"; }});
 backtestForm.addEventListener("submit", (event) => {{
   const startDate = new Date(start.value);
   const endDate = new Date(end.value);
@@ -1639,6 +1853,7 @@ def render_ashare_backtest_form(params: dict[str, list[str]] | None = None) -> s
     params = params or {}
     defaults = ashare_backtest_defaults(params)
     preset = str(defaults["preset"])
+    display_preset = display_preset_for_dates(params, preset, date.today())
 
     def value(name: str, default: object) -> str:
         return html.escape(field(params, name, str(default)))
@@ -1662,11 +1877,11 @@ def render_ashare_backtest_form(params: dict[str, list[str]] | None = None) -> s
   <label>股票代码/名称<input name="symbol" value="{value("symbol", defaults["symbol"])}" placeholder="600487 或 亨通光电" list="ashare-symbol-suggestions" data-ashare-symbol-input></label>
   <label>回测周期
     <select name="preset" id="ashare-preset">
-      <option value="6m"{selected(preset, "6m")}>近 6 个月</option>
-      <option value="1y"{selected(preset, "1y")}>近 1 年</option>
-      <option value="3y"{selected(preset, "3y")}>近 3 年</option>
-      <option value="5y"{selected(preset, "5y")}>近 5 年</option>
-      <option value="custom"{selected(preset, "custom")}>自定义</option>
+      <option value="6m"{selected(display_preset, "6m")}>近 6 个月</option>
+      <option value="1y"{selected(display_preset, "1y")}>近 1 年</option>
+      <option value="3y"{selected(display_preset, "3y")}>近 3 年</option>
+      <option value="5y"{selected(display_preset, "5y")}>近 5 年</option>
+      <option value="custom"{selected(display_preset, "custom")}>自定义</option>
     </select>
   </label>
   <label>开始日期<input type="date" name="start" id="ashare-start" value="{value("start", defaults["start"])}"></label>
@@ -1712,8 +1927,7 @@ def render_ashare_backtest_form(params: dict[str, list[str]] | None = None) -> s
   }}
   preset.addEventListener("change", applyPreset);
   start.addEventListener("change", () => {{ preset.value = "custom"; }});
-  end.addEventListener("change", applyPreset);
-  form.addEventListener("submit", applyPreset);
+  end.addEventListener("change", () => {{ preset.value = "custom"; }});
 }})();
 </script>
 """
@@ -1856,7 +2070,7 @@ def render_ashare_scan_result(
     error_note = ""
     if errors:
         sample = "; ".join(f"{symbol}: {reason[:80]}" for symbol, reason in errors[:5])
-        error_note = f'<p class="hint">有 {len(errors)} 只股票扫描失败：{html.escape(sample)}</p>'
+        error_note = f'<p class="hint">有 {len(errors)} 只股票扫描失败：{html.escape(sample)}</p>{render_error_category_chips(errors)}{render_failure_table(errors)}'
     cap_note = "已按总市值过滤" if market_cap_filter_applied else "总市值接口不可用，本次按行情接口取前 N 只，市值过滤未生效"
     return f"""
 <section class="result">
@@ -1956,9 +2170,9 @@ def render_ashare_condition_panel(params: dict[str, list[str]]) -> str:
         return html.escape(field(params, name, default))
 
     selected_boards = normalize_ashare_boards(params.get("boards", []))
-    require_ma5_rising = checkbox_field(params, "require_ma5_rising", True)
-    require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", True)
-    b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", True)
+    require_ma5_rising = checkbox_field(params, "require_ma5_rising", False)
+    require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", False)
+    b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", False)
 
     def toggle_tag(enabled: bool, label: str) -> str:
         cls = "condition-on" if enabled else "condition-off"
@@ -2011,7 +2225,7 @@ def render_ashare_condition_panel(params: dict[str, list[str]]) -> str:
       <ul class="condition-list">
         <li><b>板块范围</b><span>{html.escape(ashare_board_filter_label(selected_boards))}</span></li>
         <li><b>最低市值</b><span>{value("min_market_cap", "50")} 亿元</span></li>
-        <li><b>最多扫描</b><span>{value("max_symbols", "300")} 只</span></li>
+        <li><b>最多扫描</b><span>{value("max_symbols", str(ASHARE_DEFAULT_MAX_SCAN_SYMBOLS))} 只</span></li>
         <li><b>基础排除</b><span>剔除 ST / 退市 / 停牌不可用标的</span></li>
       </ul>
     </div>
@@ -2034,7 +2248,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     symbol = field(params, "symbol", "")
     j_threshold = number_field(params, "j_threshold", 14.0)
     min_market_cap = number_field(params, "min_market_cap", 50.0)
-    max_symbols = int(number_field(params, "max_symbols", 300))
+    max_symbols = int(number_field(params, "max_symbols", ASHARE_DEFAULT_MAX_SCAN_SYMBOLS))
     min_avg_amount_20d_100m = number_field(params, "min_avg_amount_20d_100m", 1.0)
     min_control_amount_20d_100m = number_field(params, "min_control_amount_20d_100m", 2.0)
     vol_high_days = int(number_field(params, "vol_high_days", 2))
@@ -2045,9 +2259,9 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     reentry_pct = number_field(params, "reentry_pct", 4.5)
     strong_volume_score = number_field(params, "strong_volume_score", 4.0)
     medium_volume_score = number_field(params, "medium_volume_score", 2.5)
-    b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", True)
-    require_ma5_rising = checkbox_field(params, "require_ma5_rising", True)
-    require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", True)
+    b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", False)
+    require_ma5_rising = checkbox_field(params, "require_ma5_rising", False)
+    require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", False)
     selected_boards = normalize_ashare_boards(params.get("boards", []))
     embed = field(params, "embed", "0") == "1"
     show_latest_banner = field(params, "_skip_latest_banner", "0") != "1"
@@ -2372,6 +2586,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
 </section>
 <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 {render_ashare_latest_banner() if show_latest_banner else ""}
+{render_data_health_panel("cn")}
 {render_ashare_condition_panel(params)}
 <form class="form" action="/cn/scanner" method="get">
   <input type="hidden" name="mode" value="single">
@@ -3068,10 +3283,15 @@ def run_strategy(params: dict[str, list[str]]) -> str:
 def render_batch_form(params: dict[str, list[str]] | None = None) -> str:
     params = params or {}
     today = date.today()
-    start_default = start_for_preset("1y", today).isoformat()
+    preset_value = field(params, "preset", "1y")
+    display_preset = display_preset_for_dates(params, preset_value, today)
+    start_default = start_for_preset(preset_value, today).isoformat()
 
     def value(name: str, default: str) -> str:
         return html.escape(field(params, name, default))
+
+    def selected(current: str, expected: str) -> str:
+        return " selected" if current == expected else ""
 
     require_ma5_rising_checked = " checked" if checkbox_field(params, "require_ma5_rising", True) else ""
     b1_require_20ma_gt_50ma_checked = " checked" if checkbox_field(params, "b1_require_20ma_gt_50ma", True) else ""
@@ -3081,18 +3301,30 @@ def render_batch_form(params: dict[str, list[str]] | None = None) -> str:
 <section class="page-head">
   <div>
     <h1>批量回测</h1>
-    <p class="hint">用同一组策略参数批量验证多个股票，避免只看单票结果造成过拟合。</p>
+    <p class="hint">组合资金池回测：一笔总资金同时交易多个股票，每次买入按固定金额下单，卖出后现金回到组合。</p>
   </div>
-  <div class="mode-pill">Batch Backtest</div>
+  <div class="mode-pill">Portfolio Backtest</div>
 </section>
 {render_us_strategy_condition_panel(params, "batch")}
 <form class="form" action="/batch/run" method="get">
   <label class="wide">股票代码，逗号或换行分隔
     <textarea name="symbols" placeholder="AAPL,MSFT,NVDA,TSM">{value("symbols", "AAPL,MSFT,NVDA,TSM")}</textarea>
   </label>
+  <label>回测周期
+    <select name="preset" id="batch-preset">
+      <option value="1m"{selected(display_preset, "1m")}>最近1个月</option>
+      <option value="3m"{selected(display_preset, "3m")}>最近3个月</option>
+      <option value="6m"{selected(display_preset, "6m")}>最近6个月</option>
+      <option value="1y"{selected(display_preset, "1y")}>最近1年</option>
+      <option value="3y"{selected(display_preset, "3y")}>最近3年</option>
+      <option value="5y"{selected(display_preset, "5y")}>最近5年</option>
+      <option value="custom"{selected(display_preset, "custom")}>自定义</option>
+    </select>
+  </label>
   <label>开始日期<input type="date" name="start" value="{value("start", start_default)}"></label>
   <label>结束日期<input type="date" name="end" value="{value("end", today.isoformat())}"></label>
-  <label>初始资金<input name="initial_cash" value="{value("initial_cash", "100000")}"></label>
+  <label>组合总资金<input name="initial_cash" value="{value("initial_cash", "100000")}"></label>
+  <label>每次买入金额<input name="position_cash" value="{value("position_cash", "10000")}"></label>
   <label>手续费 %<input name="commission_pct" value="{value("commission_pct", "0.1")}"></label>
   <label>滑点 %<input name="slippage_pct" value="{value("slippage_pct", "0")}"></label>
   <label>均线周期<input name="ma_length" value="{value("ma_length", "5")}"></label>
@@ -3114,31 +3346,86 @@ def render_batch_form(params: dict[str, list[str]] | None = None) -> str:
   <label>反抽距离 %<input name="reentry_pct" value="{value("reentry_pct", "4.5")}"></label>
   <button type="submit">运行批量回测</button>
 </form>
+<script>
+(function() {{
+  const preset = document.getElementById("batch-preset");
+  if (!preset) return;
+  const form = preset.closest("form");
+  const start = form.querySelector('input[name="start"]');
+  const end = form.querySelector('input[name="end"]');
+  const pad = value => String(value).padStart(2, "0");
+  const fmt = d => `${{d.getFullYear()}}-${{pad(d.getMonth() + 1)}}-${{pad(d.getDate())}}`;
+  const offsets = {{ "1m": 31, "3m": 92, "6m": 183, "1y": 365, "3y": 365 * 3, "5y": 365 * 5 }};
+  preset.addEventListener("change", () => {{
+    if (preset.value === "custom") return;
+    const endDate = end.value ? new Date(end.value + "T00:00:00") : new Date();
+    const nextStart = new Date(endDate);
+    nextStart.setDate(nextStart.getDate() - (offsets[preset.value] || 365));
+    start.value = fmt(nextStart);
+    end.value = fmt(endDate);
+  }});
+  start.addEventListener("change", () => {{ preset.value = "custom"; }});
+  end.addEventListener("change", () => {{ preset.value = "custom"; }});
+}})();
+</script>
 """
+
+def portfolio_pct(value: float) -> str:
+    cls = "pos" if value >= 0 else "neg"
+    return f'<span class="{cls}">{value:.2f}%</span>'
+
+
+def portfolio_money(value: float) -> str:
+    cls = "pos" if value >= 0 else "neg"
+    return f'<span class="{cls}">{value:,.2f}</span>'
+
 
 def run_batch_backtest(params: dict[str, list[str]]) -> str:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     cleanup_old_reports()
     symbols = parse_symbols_text(field(params, "symbols", "AAPL,MSFT,NVDA,TSM"))
-    start = field(params, "start", start_for_preset("1y", date.today()).isoformat())
+    preset = field(params, "preset", "1y")
+    start = field(params, "start", start_for_preset(preset, date.today()).isoformat())
     end = field(params, "end", date.today().isoformat())
     initial_cash = number_field(params, "initial_cash", 100000)
+    position_cash = number_field(params, "position_cash", 10000)
     ma_length = int(number_field(params, "ma_length", 5))
     vol_length = int(number_field(params, "vol_length", 20))
     validate_backtest_range(start, end, vol_length)
-    rows = []
-    errors = []
+    if initial_cash <= 0:
+        raise ValueError("组合总资金必须大于 0。")
+    if position_cash <= 0:
+        raise ValueError("每次买入金额必须大于 0。")
+
+    commission_pct = number_field(params, "commission_pct", 0.1)
+    slippage_pct = number_field(params, "slippage_pct", 0)
+    strategy_settings = {
+        "vol_high_days": int(number_field(params, "vol_high_days", 3)),
+        "vol_high_multiplier": number_field(params, "vol_high_multiplier", 1.0),
+        "massive_window": int(number_field(params, "massive_window", 7)),
+        "massive_min_count": int(number_field(params, "massive_min_count", 1)),
+        "massive_max_count": int(number_field(params, "massive_max_count", 2)),
+        "b1_require_20ma_gt_50ma": checkbox_field(params, "b1_require_20ma_gt_50ma", True),
+        "require_ma5_rising": checkbox_field(params, "require_ma5_rising", True),
+        "require_5ma_gt_20ma": checkbox_field(params, "require_5ma_gt_20ma", True),
+        "reentry_pct": number_field(params, "reentry_pct", 4.5),
+        "stop_5ma_pct": number_field(params, "stop_5ma_pct", 7.5),
+        "hard_stop_pct": number_field(params, "hard_stop_pct", 20),
+        "below_20ma_stop_days": int(number_field(params, "below_20ma_stop_days", 2)),
+    }
+    symbol_data: dict[str, dict[str, object]] = {}
+    errors: list[tuple[str, str]] = []
     for symbol in symbols:
         try:
             bars = fetch_bars("yfinance", symbol, start, end, "qfq", None)
-            trades, equity_curve = backtest(
+            chart_trades, signal_curve = backtest(
                 bars=bars,
                 ma_length=ma_length,
                 vol_length=vol_length,
                 vol_multiplier=number_field(params, "vol_multiplier", 1.45),
                 initial_cash=initial_cash,
-                commission_pct=number_field(params, "commission_pct", 0.1),
-                slippage_pct=number_field(params, "slippage_pct", 0),
+                commission_pct=commission_pct,
+                slippage_pct=slippage_pct,
                 strategy_name="ratchet",
                 stop_5ma_pct=number_field(params, "stop_5ma_pct", 7.5),
                 hard_stop_pct=number_field(params, "hard_stop_pct", 20),
@@ -3153,38 +3440,316 @@ def run_batch_backtest(params: dict[str, list[str]]) -> str:
                 require_5ma_gt_20ma=checkbox_field(params, "require_5ma_gt_20ma", True),
                 below_20ma_stop_days=int(number_field(params, "below_20ma_stop_days", 2)),
             )
-            rows.append((symbol, summarize(trades, equity_curve, initial_cash)))
+            chart_summary = summarize(chart_trades, signal_curve, initial_cash)
+            chart_path = REPORT_DIR / f"{safe_name(f'batch_{symbol}_{start}_{end}_{int(time.time())}')}.html"
+            make_report(
+                chart_path,
+                f"{symbol} batch chart {start} to {end}",
+                bars,
+                chart_trades,
+                signal_curve,
+                chart_summary,
+                benchmark=None,
+                strategy_settings=strategy_settings,
+                report_mode="batch_chart",
+            )
+            symbol_data[symbol] = {
+                "bars": bars,
+                "bars_by_date": {bar.date: bar for bar in bars},
+                "rows_by_date": {str(row["date"]): row for row in signal_curve},
+                "last_close": 0.0,
+                "report_url": f"/reports/{quote(chart_path.name)}",
+            }
         except Exception as exc:
             errors.append((symbol, str(exc)))
-    rows.sort(key=lambda item: item[1]["return_pct"], reverse=True)
-    body_rows = "\n".join(
+
+    all_dates = sorted({bar.date for data in symbol_data.values() for bar in data["bars"]})  # type: ignore[index]
+    cash = initial_cash
+    positions: dict[str, dict[str, object]] = {}
+    orders: list[dict[str, object]] = []
+    realized_by_symbol: dict[str, float] = {}
+    equity_curve: list[dict[str, float | str]] = []
+    skipped_orders = 0
+
+    for day in all_dates:
+        for symbol, data in symbol_data.items():
+            bar = data["bars_by_date"].get(day)  # type: ignore[union-attr]
+            if bar:
+                data["last_close"] = float(bar.close)
+
+        for symbol, position in list(positions.items()):
+            data = symbol_data.get(symbol)
+            if not data:
+                continue
+            row = data["rows_by_date"].get(day)  # type: ignore[union-attr]
+            bar = data["bars_by_date"].get(day)  # type: ignore[union-attr]
+            if not row or not bar or not str(row.get("sell_action", "")):
+                continue
+            shares = int(position["shares"])
+            fill_price = float(bar.open) * (1 - slippage_pct / 100)
+            gross = shares * fill_price
+            fee = gross * commission_pct / 100
+            net = gross - fee
+            cost_basis = float(position["avg_cost"]) * shares
+            pnl = net - cost_basis
+            cash += net
+            realized_by_symbol[symbol] = realized_by_symbol.get(symbol, 0.0) + pnl
+            orders.append(
+                {
+                    "date": day,
+                    "symbol": symbol,
+                    "action": "卖出",
+                    "signal_date": "-",
+                    "stage": "S",
+                    "shares": shares,
+                    "price": fill_price,
+                    "amount": net,
+                    "cash_after": cash,
+                    "pnl": pnl,
+                    "note": str(row.get("sell_action", "卖出")),
+                }
+            )
+            positions.pop(symbol, None)
+
+        for symbol, data in symbol_data.items():
+            row = data["rows_by_date"].get(day)  # type: ignore[union-attr]
+            bar = data["bars_by_date"].get(day)  # type: ignore[union-attr]
+            if not row or not bar or not str(row.get("buy_action", "")):
+                continue
+            budget = min(position_cash, cash)
+            fill_price = float(bar.open) * (1 + slippage_pct / 100)
+            cost_per_share = fill_price * (1 + commission_pct / 100)
+            shares = int(budget // cost_per_share) if cost_per_share > 0 else 0
+            if shares <= 0:
+                skipped_orders += 1
+                orders.append(
+                    {
+                        "date": day,
+                        "symbol": symbol,
+                        "action": "跳过买入",
+                        "signal_date": str(row.get("buy_action_signal_date", "-") or "-"),
+                        "stage": str(row.get("buy_action_stage", "B") or "B"),
+                        "shares": 0,
+                        "price": fill_price,
+                        "amount": 0.0,
+                        "cash_after": cash,
+                        "pnl": 0.0,
+                        "note": "现金不足，无法按每次买入金额下单",
+                    }
+                )
+                continue
+            gross = shares * fill_price
+            fee = gross * commission_pct / 100
+            total_cost = gross + fee
+            if total_cost > cash:
+                continue
+            old = positions.get(symbol)
+            old_shares = int(old["shares"]) if old else 0
+            old_cost = float(old["avg_cost"]) * old_shares if old else 0.0
+            new_shares = old_shares + shares
+            cash -= total_cost
+            positions[symbol] = {
+                "shares": new_shares,
+                "avg_cost": (old_cost + total_cost) / new_shares,
+                "entry_date": old.get("entry_date") if old else day,
+                "last_buy_date": day,
+                "last_stage": str(row.get("buy_action_stage", "B") or "B"),
+            }
+            orders.append(
+                {
+                    "date": day,
+                    "symbol": symbol,
+                    "action": "买入" if old_shares == 0 else "加仓",
+                    "signal_date": str(row.get("buy_action_signal_date", "-") or "-"),
+                    "stage": str(row.get("buy_action_stage", "B") or "B"),
+                    "shares": shares,
+                    "price": fill_price,
+                    "amount": total_cost,
+                    "cash_after": cash,
+                    "pnl": 0.0,
+                    "note": f"目标买入金额 {position_cash:,.2f}",
+                }
+            )
+
+        market_value = 0.0
+        for symbol, position in positions.items():
+            last_close = float(symbol_data.get(symbol, {}).get("last_close", 0.0))
+            market_value += int(position["shares"]) * last_close
+        equity = cash + market_value
+        equity_curve.append({"date": day, "cash": cash, "market_value": market_value, "equity": equity})
+
+    final_equity = float(equity_curve[-1]["equity"]) if equity_curve else initial_cash
+    net_profit = final_equity - initial_cash
+    return_pct = net_profit / initial_cash * 100
+    peak = initial_cash
+    max_drawdown = 0.0
+    for row in equity_curve:
+        equity = float(row["equity"])
+        peak = max(peak, equity)
+        if peak > 0:
+            max_drawdown = max(max_drawdown, (peak - equity) / peak * 100)
+
+    completed_sells = [row for row in orders if row["action"] == "卖出"]
+    wins = [row for row in completed_sells if float(row["pnl"]) > 0]
+    win_rate = len(wins) / len(completed_sells) * 100 if completed_sells else 0.0
+    symbol_rows = sorted(
+        (
+            (
+                symbol,
+                realized_by_symbol.get(symbol, 0.0),
+                int(sum(int(row["shares"]) for row in orders if row["symbol"] == symbol and row["action"] in ("买入", "加仓"))),
+                sum(1 for row in orders if row["symbol"] == symbol and row["action"] in ("买入", "加仓")),
+                sum(1 for row in orders if row["symbol"] == symbol and row["action"] == "卖出"),
+            )
+            for symbol in symbol_data
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    symbol_body = "\n".join(
+        "<tr>"
+        f'<td><button type="button" class="symbol-button" data-batch-chart-jump="{html.escape(symbol)}">{html.escape(symbol)}</button></td>'
+        f"<td>{portfolio_money(pnl)}</td>"
+        f"<td>{buy_count}</td>"
+        f"<td>{sell_count}</td>"
+        f"<td>{shares}</td>"
+        "</tr>"
+        for symbol, pnl, shares, buy_count, sell_count in symbol_rows
+    )
+    if not symbol_body:
+        symbol_body = '<tr><td colspan="5" class="empty">没有成功回测的股票。</td></tr>'
+
+    holding_body = "\n".join(
         "<tr>"
         f"<td>{html.escape(symbol)}</td>"
-        f"<td>{summary['return_pct']:.2f}%</td>"
-        f"<td>{summary['net_profit']:.2f}</td>"
-        f"<td>{summary['max_drawdown_pct']:.2f}%</td>"
-        f"<td>{summary['trades']}</td>"
-        f"<td>{summary['win_rate_pct']:.2f}%</td>"
-        f"<td>{summary['profit_factor']:.2f}</td>"
-        f"<td>{summary['avg_trade_drawdown_pct']:.2f}%</td>"
-        f"<td>{summary['avg_max_favorable_pct']:.2f}%</td>"
+        f"<td>{int(position['shares'])}</td>"
+        f"<td>{float(position['avg_cost']):.2f}</td>"
+        f"<td>{float(symbol_data.get(symbol, {}).get('last_close', 0.0)):.2f}</td>"
+        f"<td>{portfolio_money(int(position['shares']) * float(symbol_data.get(symbol, {}).get('last_close', 0.0)) - int(position['shares']) * float(position['avg_cost']))}</td>"
+        f"<td>{html.escape(str(position.get('last_stage', '-')))}</td>"
         "</tr>"
-        for symbol, summary in rows
+        for symbol, position in sorted(positions.items())
     )
-    if not body_rows:
-        body_rows = '<tr><td colspan="9" class="empty">No successful backtests.</td></tr>'
+    if not holding_body:
+        holding_body = '<tr><td colspan="6" class="empty">期末没有持仓。</td></tr>'
+
+    order_body = "\n".join(
+        "<tr>"
+        f"<td>{html.escape(str(row['date']))}</td>"
+        f"<td>{html.escape(str(row['symbol']))}</td>"
+        f"<td>{html.escape(str(row['action']))}</td>"
+        f"<td>{html.escape(str(row['stage']))}</td>"
+        f"<td>{html.escape(str(row['signal_date']))}</td>"
+        f"<td>{int(row['shares'])}</td>"
+        f"<td>{float(row['price']):.2f}</td>"
+        f"<td>{float(row['amount']):,.2f}</td>"
+        f"<td>{portfolio_money(float(row['pnl']))}</td>"
+        f"<td>{float(row['cash_after']):,.2f}</td>"
+        f"<td>{html.escape(str(row['note']))}</td>"
+        "</tr>"
+        for row in orders[-300:]
+    )
+    if not order_body:
+        order_body = '<tr><td colspan="11" class="empty">没有组合交易。</td></tr>'
+
+    chart_items = [(symbol, str(data.get("report_url", "#"))) for symbol, data in symbol_data.items()]
+    first_chart_url = chart_items[0][1] if chart_items else "#"
+    chart_buttons = "\n".join(
+        f'<button type="button" class="{"active" if index == 0 else ""}" '
+        f'data-batch-chart-symbol="{html.escape(symbol)}" '
+        f'data-batch-chart-url="{html.escape(url)}">{html.escape(symbol)}</button>'
+        for index, (symbol, url) in enumerate(chart_items)
+    )
+    chart_viewer = (
+        f"""
+<section class="result" id="batch-chart-viewer">
+  <div class="toolbar">
+    <div>
+      <h2>个股交易图</h2>
+      <p class="hint">点击股票切换图表；批量页图表只显示组合实际执行的买入、卖出点，不显示未执行信号。</p>
+    </div>
+    <div class="links"><a id="batch-chart-open" href="{html.escape(first_chart_url)}" target="_blank">打开完整图表</a></div>
+  </div>
+  <div class="period-tabs" id="batch-chart-tabs">{chart_buttons}</div>
+  <iframe id="batch-chart-frame" src="{html.escape(first_chart_url)}" title="batch chart"></iframe>
+</section>
+<script>
+(function() {{
+  const tabs = document.getElementById("batch-chart-tabs");
+  const frame = document.getElementById("batch-chart-frame");
+  const openLink = document.getElementById("batch-chart-open");
+  const viewer = document.getElementById("batch-chart-viewer");
+  if (!tabs || !frame) return;
+  function selectChart(symbol, shouldScroll) {{
+    const buttons = Array.from(tabs.querySelectorAll("[data-batch-chart-symbol]"));
+    const button = buttons.find((item) => item.dataset.batchChartSymbol === symbol);
+    if (!button) return;
+    buttons.forEach((item) => item.classList.remove("active"));
+    button.classList.add("active");
+    const url = button.dataset.batchChartUrl || "#";
+    frame.src = url;
+    frame.title = `${{symbol}} batch chart`;
+    if (openLink) openLink.href = url;
+    if (shouldScroll && viewer) viewer.scrollIntoView({{ behavior: "smooth", block: "start" }});
+  }}
+  tabs.addEventListener("click", (event) => {{
+    const button = event.target.closest("[data-batch-chart-symbol]");
+    if (!button) return;
+    selectChart(button.dataset.batchChartSymbol || "", false);
+  }});
+  document.addEventListener("click", (event) => {{
+    const button = event.target.closest("[data-batch-chart-jump]");
+    if (!button) return;
+    selectChart(button.dataset.batchChartJump || "", true);
+  }});
+}})();
+</script>
+"""
+        if chart_items
+        else """
+<section class="result">
+  <h2>个股交易图</h2>
+  <p class="empty">没有可显示的股票图表。</p>
+</section>
+"""
+    )
     return f"""
 {render_batch_form(params)}
 <section class="result">
-  <p class="hint">已回测 {len(symbols)} 个代码，成功 {len(rows)} 个，失败 {len(errors)} 个。区间：{html.escape(start)} 到 {html.escape(end)}。</p>
+  <p class="hint">组合资金池回测：已处理 {len(symbols)} 个代码，成功 {len(symbol_data)} 个，失败 {len(errors)} 个。区间：{html.escape(start)} 到 {html.escape(end)}。每次买入金额：{position_cash:,.2f}。</p>
+  <section class="status-strip">
+    <div class="stat-card"><div class="stat-label">组合总资金</div><div class="stat-value">{initial_cash:,.2f}</div></div>
+    <div class="stat-card"><div class="stat-label">期末权益</div><div class="stat-value">{final_equity:,.2f}</div></div>
+    <div class="stat-card"><div class="stat-label">组合收益率</div><div class="stat-value">{return_pct:.2f}%</div></div>
+    <div class="stat-card"><div class="stat-label">最大回撤</div><div class="stat-value">{max_drawdown:.2f}%</div></div>
+    <div class="stat-card"><div class="stat-label">期末现金</div><div class="stat-value">{cash:,.2f}</div></div>
+    <div class="stat-card"><div class="stat-label">卖出胜率</div><div class="stat-value">{win_rate:.2f}%</div></div>
+  </section>
+  <h2>股票贡献</h2>
   <div class="table-wrap">
     <table class="resizable-table">
-      <thead><tr><th>Symbol</th><th>Return</th><th>Net Profit</th><th>Max DD</th><th>Trades</th><th>Win Rate</th><th>Profit Factor</th><th>Avg Trade DD</th><th>Avg MFE</th></tr></thead>
-      <tbody>{body_rows}</tbody>
+      <thead><tr><th>Symbol</th><th>已实现收益</th><th>买入次数</th><th>卖出次数</th><th>累计买入股数</th></tr></thead>
+      <tbody>{symbol_body}</tbody>
     </table>
   </div>
+  <h2>期末持仓</h2>
+  <div class="table-wrap">
+    <table class="resizable-table">
+      <thead><tr><th>Symbol</th><th>股数</th><th>持仓成本</th><th>最新收盘</th><th>浮动盈亏</th><th>最近阶段</th></tr></thead>
+      <tbody>{holding_body}</tbody>
+    </table>
+  </div>
+  <h2>组合交易流水</h2>
+  <div class="table-wrap">
+    <table class="resizable-table">
+      <thead><tr><th>日期</th><th>Symbol</th><th>动作</th><th>阶段</th><th>信号日</th><th>股数</th><th>成交价</th><th>成交金额</th><th>已实现盈亏</th><th>交易后现金</th><th>说明</th></tr></thead>
+      <tbody>{order_body}</tbody>
+    </table>
+  </div>
+  <p class="hint">说明：买入按固定金额执行；同一股票 B1/B2 可分别触发买入或加仓；卖出信号出现时该股票组合持仓全部卖出。若现金不足，会记录为跳过买入。</p>
   {render_failure_table(errors)}
 </section>
+{chart_viewer}
 """
 
 
@@ -3600,19 +4165,104 @@ def earnings_status_zh(value: str) -> str:
     return mapping.get(clean, clean or "未知")
 
 
-def us_company_summary_zh(company_name: str, sector: str, industry: str, asset_type: str, website: str) -> str:
-    if company_name == "-":
-        company_name = "该标的"
-    parts = [f"{company_name} 是一家美股{asset_type}标的"]
-    if sector != "-":
-        parts.append(f"所属板块为{sector}")
-    if industry != "-":
-        parts.append(f"细分行业为{industry}")
-    summary = "，".join(parts) + "。"
-    summary += "该信息用于快速判断公司属性和二轮筛选方向，具体催化剂仍建议结合财报、公告和新闻源确认。"
-    if website.startswith(("http://", "https://")):
-        summary += "页面已提供官网入口，可进一步核对主营业务。"
-    return summary
+def match_us_company_points(raw_text: str, sector: str, industry: str, raw_sector: str = "", raw_industry: str = "") -> tuple[list[str], list[str], list[str]]:
+    text = f"{raw_text} {sector} {industry} {raw_sector} {raw_industry}".lower()
+    rules = [
+        ("AI/数据中心", ("artificial intelligence", " ai ", "gpu", "accelerator", "data center", "datacenter", "server", "cloud infrastructure"), "重点核对AI订单、数据中心资本开支、云厂商需求和业绩指引。"),
+        ("半导体/芯片", ("semiconductor", "semiconductors", "chip", "processor", "memory", "dram", "nand", "wafer", "foundry", "半导体"), "重点核对芯片周期、库存变化、毛利率、客户拉货和行业价格趋势。"),
+        ("软件/SaaS", ("software", "saas", "subscription", "platform", "cloud", "enterprise software"), "重点核对收入增速、净留存率、订阅收入、利润率和大客户扩张。"),
+        ("网络安全", ("cybersecurity", "security", "endpoint", "threat", "identity"), "重点核对大客户签约、ARR增长、竞争格局和预算恢复。"),
+        ("消费电子/硬件", ("smartphone", "iphone", "ipad", "mac", "wearables", "consumer electronics", "消费电子"), "重点核对新品周期、出货量、渠道库存和供应链订单。"),
+        ("电动车/新能源车", ("electric vehicle", " ev ", "battery", "automotive", "新能源车"), "重点核对交付量、价格战、毛利率、产能利用率和政策补贴。"),
+        ("医药/生物科技", ("biotechnology", "clinical", "drug", "therapy", "pharmaceutical", "fda", "trial"), "重点核对临床数据、FDA节点、药品销售和研发管线风险。"),
+        ("医疗器械/诊断", ("medical device", "diagnostic", "surgical", "patient", "healthcare"), "重点核对装机量、耗材收入、医院采购和医保支付变化。"),
+        ("金融/银行", ("bank", "loan", "deposit", "credit", "asset management", "capital markets", "insurance"), "重点核对利率环境、净息差、坏账率、资本充足率和交易/投行业务。"),
+        ("能源/油气", ("oil", "gas", "lng", "drilling", "exploration", "pipeline", "energy"), "重点核对油气价格、产量、现金流、资本开支和分红回购。"),
+        ("矿业/金属", ("gold", "copper", "steel", "mining", "metal", "lithium", "uranium"), "重点核对商品价格、矿山产量、成本曲线和供需缺口。"),
+        ("工业/设备", ("machinery", "aerospace", "defense", "industrial automation", "factory automation", "工业"), "重点核对订单积压、交付节奏、政府/企业资本开支和利润率。"),
+        ("零售/消费", ("retail", "store", "restaurant", "consumer", "apparel", "e-commerce"), "重点核对同店销售、客单价、库存、促销压力和消费景气。"),
+        ("通信/互联网内容", ("advertising", "streaming", "social", "search", "content", "communication services"), "重点核对广告需求、用户增长、订阅变化和内容/算力投入。"),
+        ("房地产/REIT", ("reit", "real estate", "property", "lease", "tenant"), "重点核对出租率、租金增速、融资成本和资产估值。"),
+        ("公用事业", ("utility", "electric", "renewable", "regulated", "power"), "重点核对电价机制、利率变化、负债成本和新能源项目进度。"),
+    ]
+    themes: list[str] = []
+    focus: list[str] = []
+    for label, keywords, note in rules:
+        if any(keyword in text for keyword in keywords):
+            themes.append(label)
+            focus.append(note)
+    if not themes:
+        themes.append(industry if industry != "-" else sector if sector != "-" else "未识别题材")
+        focus.append("重点从财报、业绩指引、行业新闻和成交量配合度判断这次放量是否有真实催化。")
+
+    business_lines: list[str] = []
+    business_rules = [
+        ("硬件产品", ("hardware", "device", "smartphone", "computer", "equipment", "server")),
+        ("软件平台", ("software", "platform", "cloud", "subscription", "saas")),
+        ("芯片/零部件", ("semiconductor", "chip", "processor", "memory", "component")),
+        ("服务收入", ("service", "services", "support", "subscription")),
+        ("金融业务", ("loan", "deposit", "insurance", "asset management", "capital markets")),
+        ("能源/资源", ("oil", "gas", "mining", "metal", "energy")),
+        ("药品/治疗管线", ("drug", "therapy", "clinical", "pharmaceutical", "biotechnology")),
+        ("零售/渠道", ("retail", "store", "restaurant", "e-commerce")),
+    ]
+    for label, keywords in business_rules:
+        if any(keyword in text for keyword in keywords):
+            business_lines.append(label)
+    if not business_lines:
+        business_lines.append(industry if industry != "-" else "主营业务需进一步核对")
+    return business_lines[:4], themes[:3], focus[:3]
+
+
+def render_us_company_watch_points(
+    company_name: str,
+    sector: str,
+    industry: str,
+    asset_type: str,
+    website: str,
+    raw_summary: str,
+    raw_sector: str = "",
+    raw_industry: str = "",
+) -> str:
+    display_name = company_name if company_name != "-" else "该标的"
+    business_lines, themes, focus_items = match_us_company_points(raw_summary, sector, industry, raw_sector, raw_industry)
+    line_html = "".join(f"<li>{html.escape(item)}</li>" for item in business_lines)
+    theme_html = " ".join(f'<span class="condition-tag condition-primary">{html.escape(item)}</span>' for item in themes)
+    focus_html = "".join(f"<li>{html.escape(item)}</li>" for item in focus_items)
+    source_note = "官网可用于核对主营业务。" if website.startswith(("http://", "https://")) else "暂未获取官网，建议用Yahoo/雪球继续核对。"
+    return f"""
+  <section class="result" style="margin-top:12px;">
+    <div class="strategy-condition-head" style="padding-left:0;padding-right:0;border-bottom:0;background:transparent;">
+      <div>
+        <strong>公司看点</strong>
+        <p class="hint">{html.escape(display_name)}：用于判断这次放量是否有业务或题材支撑。</p>
+      </div>
+    </div>
+    <div class="condition-grid">
+      <div class="condition-card">
+        <h3>主营业务线</h3>
+        <ul class="condition-list">{line_html}</ul>
+      </div>
+      <div class="condition-card">
+        <h3>可能题材</h3>
+        <div class="condition-tags" style="justify-content:flex-start;">{theme_html}</div>
+        <p class="condition-note">题材由公司介绍、板块和行业关键词提取，只作为二次看图前的线索。</p>
+      </div>
+      <div class="condition-card">
+        <h3>二次确认重点</h3>
+        <ul class="condition-list">{focus_html}</ul>
+      </div>
+      <div class="condition-card">
+        <h3>使用方式</h3>
+        <ul class="condition-list">
+          <li><b>先看催化</b><span>财报/订单/指引/行业共振</span></li>
+          <li><b>再看图形</b><span>B点、量能、上方空间</span></li>
+          <li><b>信息源</b><span>{html.escape(source_note)}</span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+"""
 
 
 def candidate_from_latest_scan(symbol: str) -> dict[str, object]:
@@ -3680,8 +4330,10 @@ def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None
     merged.update({key: value for key, value in profile.items() if value not in ("", None, 0)})
 
     company_name = str(merged.get("company_name") or symbol)
-    sector = us_sector_zh(str(merged.get("sector") or ""))
-    industry = us_industry_zh(str(merged.get("industry") or ""))
+    raw_sector = str(merged.get("sector") or "")
+    raw_industry = str(merged.get("industry") or "")
+    sector = us_sector_zh(raw_sector)
+    industry = us_industry_zh(raw_industry)
     asset_type = us_asset_type_zh(str(merged.get("asset_type") or "Stock"))
     earnings_date = str(merged.get("next_earnings_date") or "")
     earnings_days = merged.get("earnings_days", "")
@@ -3694,7 +4346,8 @@ def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None
         earnings_text = "未知"
     website = str(merged.get("website") or "")
     website_html = f'<a href="{html.escape(website)}" target="_blank">官网</a>' if website.startswith(("http://", "https://")) else "-"
-    summary_html = html.escape(us_company_summary_zh(company_name, sector, industry, asset_type, website))
+    raw_summary = str(merged.get("business_summary") or "")
+    watch_points_html = render_us_company_watch_points(company_name, sector, industry, asset_type, website, raw_summary, raw_sector, raw_industry)
 
     return f"""
   <section class="status-strip">
@@ -3719,10 +4372,7 @@ def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None
       </tr></tbody>
     </table>
   </div>
-  <section class="result" style="margin-top:12px;">
-    <strong>业务简介</strong>
-    <p class="hint" style="margin-top:8px;line-height:1.7;">{summary_html}</p>
-  </section>
+  {watch_points_html}
 """
 
 
@@ -4187,6 +4837,7 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
 </section>
 {latest_html}
 {render_market_environment_bar()}
+{render_data_health_panel("us")}
 {render_us_strategy_condition_panel(params, "scanner")}
 <section class="status-strip">
   <div class="stat-card"><div class="stat-label">模式</div><div class="stat-value">盘后复盘</div></div>
@@ -4601,14 +5252,15 @@ def render_failure_table(failures: list[tuple[str, str]]) -> str:
     if not failures:
         return ""
     table_rows = "\n".join(
-        f"<tr><td>{html.escape(symbol)}</td><td>{html.escape(reason)}</td></tr>"
+        f"<tr><td>{html.escape(symbol)}</td><td>{html.escape(classify_scan_error(reason))}</td><td>{html.escape(reason)}</td></tr>"
         for symbol, reason in failures
     )
     return f"""
 <h2>失败原因</h2>
+{render_error_category_chips(failures)}
 <div class="table-wrap">
 <table class="resizable-table">
-  <thead><tr><th>Symbol</th><th>Reason</th></tr></thead>
+  <thead><tr><th>Symbol</th><th>分类</th><th>Reason</th></tr></thead>
   <tbody>{table_rows}</tbody>
 </table>
 </div>
@@ -5755,7 +6407,7 @@ def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
             current="",
         )
         min_market_cap = number_field(params, "min_market_cap", 50.0)
-        max_symbols = int(number_field(params, "max_symbols", 300))
+        max_symbols = int(number_field(params, "max_symbols", ASHARE_DEFAULT_MAX_SCAN_SYMBOLS))
         max_workers = max(1, min(12, int(number_field(params, "max_workers", 6))))
         j_threshold = number_field(params, "j_threshold", 14.0)
         min_avg_amount_20d = number_field(params, "min_avg_amount_20d_100m", 1.0) * 100_000_000
@@ -5768,9 +6420,9 @@ def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
         reentry_pct = number_field(params, "reentry_pct", 4.5) / 100
         strong_volume_score = number_field(params, "strong_volume_score", 4.0)
         medium_volume_score = number_field(params, "medium_volume_score", 2.5)
-        b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", True)
-        require_ma5_rising = checkbox_field(params, "require_ma5_rising", True)
-        require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", True)
+        b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", False)
+        require_ma5_rising = checkbox_field(params, "require_ma5_rising", False)
+        require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", False)
         selected_boards = normalize_ashare_boards(params.get("boards", []))
         board_label = ashare_board_filter_label(selected_boards)
 
@@ -6099,10 +6751,10 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         job_id = f"ashare-{uuid.uuid4().hex[:10]}"
-        set_job(job_id, status="queued", message="排队中", total=0, scanned=0, candidates=0, errors=0, current="", pause_requested=False, stop_requested=False)
+        set_job(job_id, market="cn", status="queued", message="排队中", total=0, scanned=0, candidates=0, errors=0, current="", pause_requested=False, stop_requested=False)
         worker = threading.Thread(target=execute_ashare_scan_job, args=(job_id, params), daemon=True)
         worker.start()
-        self.send_json({"status": "queued", "job_id": job_id})
+        self.send_json(normalize_job_payload(job_id, get_job(job_id) or {"status": "queued"}))
 
     def ashare_scan_job_status(self, params: dict[str, list[str]]) -> None:
         job_id = field(params, "job_id", "")
@@ -6110,26 +6762,13 @@ class Handler(BaseHTTPRequestHandler):
         if not job:
             self.send_json({"status": "error", "error": "找不到 A 股扫描任务"}, status=404)
             return
-        self.send_json(job)
+        self.send_json(normalize_job_payload(job_id, job))
 
     def ashare_scan_job_active(self) -> None:
-        latest_job_id = ""
-        latest_job: dict[str, object] | None = None
-        with SCAN_JOBS_LOCK:
-            for job_id, job in SCAN_JOBS.items():
-                if not str(job_id).startswith("ashare-"):
-                    continue
-                if job.get("status") in ACTIVE_SCAN_STATUSES:
-                    payload = dict(job)
-                    payload["job_id"] = job_id
-                    self.send_json(payload)
-                    return
-                if job.get("status") in ("done", "stopped", "error"):
-                    latest_job_id = job_id
-                    latest_job = dict(job)
+        latest_job = latest_job_for_market("cn", include_finished=True)
         if latest_job:
-            latest_job["job_id"] = latest_job_id
-            self.send_json(latest_job)
+            job_id, job = latest_job
+            self.send_json(normalize_job_payload(job_id, job))
             return
         self.send_json({"status": "idle", "job_id": ""})
 
@@ -6143,10 +6782,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"status": "error", "error": "不是 A 股扫描任务"}, status=400)
             return
         if job.get("status") in ("done", "error", "stopped"):
-            self.send_json(job)
+            self.send_json(normalize_job_payload(job_id, job))
             return
         set_job(job_id, stop_requested=True, pause_requested=False, status="stopping", stage="正在终止", message="正在终止，当前批次完成后保留结果")
-        self.send_json(get_job(job_id) or {"status": "stopping"})
+        self.send_json(normalize_job_payload(job_id, get_job(job_id) or {"status": "stopping"}))
 
     def delete_ashare_scan_result(self) -> None:
         deleted = delete_latest_ashare_scan()
@@ -6197,22 +6836,15 @@ class Handler(BaseHTTPRequestHandler):
         active = active_scan_job()
         if active:
             active_id, active_job = active
-            self.send_json(
-                {
-                    "status": "busy",
-                    "error": "已有扫描任务正在运行，请等待完成，或先暂停/终止当前任务。",
-                    "active_job_id": active_id,
-                    "active_status": active_job.get("status", ""),
-                    "active_message": active_job.get("message", ""),
-                },
-                status=409,
-            )
+            payload = normalize_job_payload(active_id, active_job)
+            payload.update({"status": "busy", "error": "已有扫描任务正在运行，请等待完成，或先暂停/终止当前任务。", "active_job_id": active_id})
+            self.send_json(payload, status=409)
             return
         job_id = uuid.uuid4().hex
-        set_job(job_id, status="queued", message="排队中", total=0, scanned=0, candidates=0, errors=0, current="", pause_requested=False, stop_requested=False)
+        set_job(job_id, market="us", status="queued", message="排队中", total=0, scanned=0, candidates=0, errors=0, current="", pause_requested=False, stop_requested=False)
         worker = threading.Thread(target=execute_scan_job, args=(job_id, params), daemon=True)
         worker.start()
-        self.send_json({"job_id": job_id})
+        self.send_json(normalize_job_payload(job_id, get_job(job_id) or {"status": "queued"}))
 
     def delete_scan_result(self) -> None:
         deleted = delete_latest_scan()
@@ -6227,10 +6859,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"status": "error", "error": "找不到扫描任务"}, status=404)
             return
         if job.get("status") in ("done", "error"):
-            self.send_json(job)
+            self.send_json(normalize_job_payload(job_id, job))
             return
         set_job(job_id, pause_requested=True, status="pausing", message="正在暂停，当前股票处理完后显示结果")
-        self.send_json(get_job(job_id) or {"status": "pausing"})
+        self.send_json(normalize_job_payload(job_id, get_job(job_id) or {"status": "pausing"}))
 
     def resume_scan_job(self, params: dict[str, list[str]]) -> None:
         job_id = field(params, "id", "")
@@ -6239,10 +6871,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"status": "error", "error": "找不到扫描任务"}, status=404)
             return
         if job.get("status") in ("done", "error"):
-            self.send_json(job)
+            self.send_json(normalize_job_payload(job_id, job))
             return
         set_job(job_id, pause_requested=False, status="running", message="继续扫描 B 点信号")
-        self.send_json(get_job(job_id) or {"status": "running"})
+        self.send_json(normalize_job_payload(job_id, get_job(job_id) or {"status": "running"}))
 
     def stop_scan_job(self, params: dict[str, list[str]]) -> None:
         job_id = field(params, "id", "")
@@ -6251,10 +6883,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"status": "error", "error": "找不到扫描任务"}, status=404)
             return
         if job.get("status") in ("done", "error", "stopped"):
-            self.send_json(job)
+            self.send_json(normalize_job_payload(job_id, job))
             return
         set_job(job_id, stop_requested=True, pause_requested=False, status="stopping", message="正在终止，当前股票处理完后保留结果")
-        self.send_json(get_job(job_id) or {"status": "stopping"})
+        self.send_json(normalize_job_payload(job_id, get_job(job_id) or {"status": "stopping"}))
 
     def scan_job_status(self, params: dict[str, list[str]]) -> None:
         job_id = field(params, "id", "")
@@ -6262,26 +6894,13 @@ class Handler(BaseHTTPRequestHandler):
         if not job:
             self.send_json({"status": "error", "error": "找不到扫描任务"}, status=404)
             return
-        self.send_json(job)
+        self.send_json(normalize_job_payload(job_id, job))
 
     def scan_job_active(self) -> None:
-        latest_job_id = ""
-        latest_job: dict[str, object] | None = None
-        with SCAN_JOBS_LOCK:
-            for job_id, job in SCAN_JOBS.items():
-                if str(job_id).startswith("ashare-"):
-                    continue
-                if job.get("status") in ACTIVE_SCAN_STATUSES:
-                    payload = dict(job)
-                    payload["job_id"] = job_id
-                    self.send_json(payload)
-                    return
-                if job.get("status") in ("done", "stopped", "error"):
-                    latest_job_id = job_id
-                    latest_job = dict(job)
+        latest_job = latest_job_for_market("us", include_finished=True)
         if latest_job:
-            latest_job["job_id"] = latest_job_id
-            self.send_json(latest_job)
+            job_id, job = latest_job
+            self.send_json(normalize_job_payload(job_id, job))
             return
         self.send_json({"status": "idle", "job_id": ""})
 
