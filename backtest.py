@@ -450,6 +450,7 @@ def build_ratchet_inputs(
     massive_min_count: int = 1,
     massive_max_count: int = 2,
     b1_require_20ma_gt_50ma: bool = False,
+    require_ma5_rising: bool = True,
     require_5ma_gt_20ma: bool = True,
     signal_volumes: list[float] | None = None,
 ) -> tuple[list[bool], list[bool], list[float | None], list[float | None], list[float], list[str]]:
@@ -493,8 +494,8 @@ def build_ratchet_inputs(
             price_above_ma
             and vol_days_high
             and has_massive_vol
-            and ma5_is_rising
-            and ma20_gt_50
+            and (ma5_is_rising or not require_ma5_rising)
+            and (ma20_gt_50 or not b1_require_20ma_gt_50ma)
             and (ma5_gt_20 or not require_5ma_gt_20ma)
         )
         if trend_confirm:
@@ -511,7 +512,7 @@ def build_ratchet_inputs(
             and price_above_ma
             and dist_to_ma <= reentry_pct
             and bar.close > bar.open
-            and ma5_is_rising
+            and (ma5_is_rising or not require_ma5_rising)
             and (ma5_gt_20 or not require_5ma_gt_20ma)
             and bull_quality_ok
             and upper_shadow_ok
@@ -554,6 +555,7 @@ def backtest(
     massive_min_count: int = 1,
     massive_max_count: int = 2,
     b1_require_20ma_gt_50ma: bool = False,
+    require_ma5_rising: bool = True,
     require_5ma_gt_20ma: bool = True,
     below_20ma_stop_days: int = 2,
     market: str = "us",
@@ -578,6 +580,7 @@ def backtest(
             massive_min_count,
             massive_max_count,
             b1_require_20ma_gt_50ma,
+            require_ma5_rising,
             require_5ma_gt_20ma,
             signal_volumes,
         )
@@ -1296,7 +1299,9 @@ def make_report(
     summary: dict[str, float | int],
     benchmark: dict[str, object] | None = None,
     strategy_settings: dict[str, object] | None = None,
+    report_mode: str = "backtest",
 ) -> None:
+    is_candidate_report = report_mode == "candidate"
     labels = {
         "net_profit": "\u51c0\u5229\u6da6",
         "return_pct": "\u6536\u76ca\u7387",
@@ -1365,6 +1370,7 @@ def make_report(
     ma_values = [None if row["ma"] == "" else float(row["ma"]) for row in equity_curve]
     ma20_values = [None if row.get("ma20", "") in ("", None) else float(row["ma20"]) for row in equity_curve]
     vol_ma_values = [None if row["vol_ma"] == "" else float(row["vol_ma"]) for row in equity_curve]
+    report_vol_multiplier = float((strategy_settings or {}).get("vol_multiplier", 1.45))
     dynamic_stop_values = [None if row.get("dynamic_stop", "") in ("", None) else float(row["dynamic_stop"]) for row in equity_curve]
     trend_stop_values = [None if row.get("trend_stop", "") in ("", None) else float(row["trend_stop"]) for row in equity_curve]
     k_values, d_values, j_values = calculate_kdj(bars)
@@ -1432,8 +1438,8 @@ def make_report(
         "ma": [{"time": dates[i], "value": value} for i, value in enumerate(ma_values) if value is not None],
         "ma20": [{"time": dates[i], "value": value} for i, value in enumerate(ma20_values) if value is not None],
         "volMa": [{"time": dates[i], "value": value} for i, value in enumerate(vol_ma_values) if value is not None],
-        "volThreshold": [{"time": dates[i], "value": value * vol_multiplier} for i, value in enumerate(vol_ma_values) if value is not None],
-        "volMultiplier": vol_multiplier,
+        "volThreshold": [{"time": dates[i], "value": value * report_vol_multiplier} for i, value in enumerate(vol_ma_values) if value is not None],
+        "volMultiplier": report_vol_multiplier,
         "kdjK": [{"time": dates[i], "value": value} for i, value in enumerate(k_values) if value is not None],
         "kdjD": [{"time": dates[i], "value": value} for i, value in enumerate(d_values) if value is not None],
         "kdjJ": [{"time": dates[i], "value": value} for i, value in enumerate(j_values) if value is not None],
@@ -1452,7 +1458,7 @@ def make_report(
                 "ma": ma_values[i],
                 "ma20": ma20_values[i],
                 "volMa": vol_ma_values[i],
-                "volThreshold": vol_ma_values[i] * vol_multiplier if vol_ma_values[i] is not None else None,
+                "volThreshold": vol_ma_values[i] * report_vol_multiplier if vol_ma_values[i] is not None else None,
                 "kdjK": k_values[i],
                 "kdjD": d_values[i],
                 "kdjJ": j_values[i],
@@ -1536,14 +1542,35 @@ def make_report(
     ]
     stat_tables = "".join(f"<tr><td>{html.escape(label)}</td><td>{value}</td></tr>" for label, value in overview_rows)
     analysis_tables = "".join(f"<tr><td>{html.escape(label)}</td><td>{value}</td></tr>" for label, value in analysis_rows)
+    summary_html = (
+        ""
+        if is_candidate_report
+        else f"""
+<div class="metrics">{card_html}</div>
+<section class="tester">
+<table><caption>{labels['overview']}</caption><tbody>{stat_tables}</tbody></table>
+<table><caption>{labels['trade_analysis']}</caption><tbody>{analysis_tables}</tbody></table>
+</section>
+"""
+    )
     settings = strategy_settings or {}
     vol_high_days_label = int(settings.get("vol_high_days", 3))
     vol_high_multiplier_label = float(settings.get("vol_high_multiplier", 1.0))
     massive_window_label = int(settings.get("massive_window", 7))
     massive_min_label = int(settings.get("massive_min_count", 1))
+    require_ma5_rising_label = bool(settings.get("require_ma5_rising", True))
+    b1_require_20ma_gt_50ma_label = bool(settings.get("b1_require_20ma_gt_50ma", True))
+    ma5_rising_label = " + 5MA向上" if require_ma5_rising_label else ""
+    ma20_gt_50_label = " + 20MA&gt;50MA" if b1_require_20ma_gt_50ma_label else ""
     require_5ma_gt_20ma_label = bool(settings.get("require_5ma_gt_20ma", True))
     ma5_gt_20_b1_label = " + 5MA&gt;20MA" if require_5ma_gt_20ma_label else ""
     ma5_gt_20_b2_label = "5MA&gt;20MA + " if require_5ma_gt_20ma_label else ""
+    b2_requirements = []
+    if require_ma5_rising_label:
+        b2_requirements.append("5MA向上")
+    if require_5ma_gt_20ma_label:
+        b2_requirements.append("5MA&gt;20MA")
+    b2_requirements_label = (" + ".join(b2_requirements) + " + ") if b2_requirements else ""
     reentry_label = float(settings.get("reentry_pct", 4.5))
     stop_5ma_label = float(settings.get("stop_5ma_pct", 7.5))
     hard_stop_label = float(settings.get("hard_stop_pct", 20))
@@ -1717,16 +1744,12 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
 <body>
 <main>
 <h1>{html.escape(title)}</h1>
-<div class="metrics">{card_html}</div>
-<section class="tester">
-<table><caption>{labels['overview']}</caption><tbody>{stat_tables}</tbody></table>
-<table><caption>{labels['trade_analysis']}</caption><tbody>{analysis_tables}</tbody></table>
-</section>
+{summary_html}
 {benchmark_html}
 <h2>{labels['main_chart']}</h2>
 <div class="rule-strip">
-  <span class="rule-pill">B1：站上5MA{ma5_gt_20_b1_label} + 20MA&gt;50MA + 连续{vol_high_days_label}日成交量 &gt; 均量×{vol_high_multiplier_label:g} + {massive_window_label}日内至少{massive_min_label}次巨量 + 5MA向上</span>
-  <span class="rule-pill">B2：已有B1趋势后，{ma5_gt_20_b2_label}巨量阳线回踩5MA {reentry_label:g}% 内</span>
+  <span class="rule-pill">B1：站上5MA{ma5_rising_label}{ma20_gt_50_label}{ma5_gt_20_b1_label} + 连续{vol_high_days_label}日成交量 &gt; 均量×{vol_high_multiplier_label:g} + {massive_window_label}日内至少{massive_min_label}次巨量</span>
+  <span class="rule-pill">B2：已有B1趋势后，{b2_requirements_label}巨量阳线回踩5MA {reentry_label:g}% 内</span>
   <span class="rule-pill">买入：B1 到 50%；B2 到 100%；信号后下一交易日开盘执行</span>
   <span class="rule-pill">卖出：5MA 下 {stop_5ma_label:g}% / 连续 {below20_label} 日跌破 20MA / 跌破成本 {hard_stop_label:g}%</span>
 </div>

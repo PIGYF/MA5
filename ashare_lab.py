@@ -142,7 +142,13 @@ def ashare_indicator_series(bars: list[AShareBar], j_threshold: float = 14.0) ->
     return points
 
 
-def ashare_chart_payload(symbol: str, j_threshold: float = 14.0) -> dict[str, object]:
+def ashare_chart_payload(
+    symbol: str,
+    j_threshold: float = 14.0,
+    b1_require_20ma_gt_50ma: bool = True,
+    require_ma5_rising: bool = True,
+    require_5ma_gt_20ma: bool = True,
+) -> dict[str, object]:
     clean = normalize_ashare_symbol(symbol)
     bars, source = fetch_ashare_bars(clean)
     from backtest import adjust_limit_volumes, build_ratchet_inputs, calculate_kdj, rolling_sma
@@ -169,7 +175,9 @@ def ashare_chart_payload(symbol: str, j_threshold: float = 14.0) -> dict[str, ob
         massive_window=7,
         massive_min_count=1,
         massive_max_count=2,
-        b1_require_20ma_gt_50ma=False,
+        b1_require_20ma_gt_50ma=b1_require_20ma_gt_50ma,
+        require_ma5_rising=require_ma5_rising,
+        require_5ma_gt_20ma=require_5ma_gt_20ma,
         signal_volumes=adjusted_volumes,
     )
     name, sector = fetch_ashare_profile(clean)
@@ -195,6 +203,7 @@ def ashare_chart_payload(symbol: str, j_threshold: float = 14.0) -> dict[str, ob
         "ma5": [{"x": bars[i].date, "y": value} for i, value in enumerate(ma5) if value is not None],
         "ma20": [{"x": bars[i].date, "y": value} for i, value in enumerate(ma20) if value is not None],
         "amount20": [{"x": bars[i].date, "y": value / 100_000_000} for i, value in enumerate(amount20) if value is not None],
+        "volume_ma20": [{"x": bars[i].date, "y": value} for i, value in enumerate(volume_ma20) if value is not None],
         "volume_ratio": [{"x": bars[i].date, "y": value} for i, value in enumerate(volume_ratio) if value is not None],
         "k": [{"x": bars[i].date, "y": value} for i, value in enumerate(k_values) if value is not None],
         "d": [{"x": bars[i].date, "y": value} for i, value in enumerate(d_values) if value is not None],
@@ -1299,6 +1308,8 @@ def latest_ashare_signal(
     reentry_pct: float = 0.045,
     strong_volume_score: float = 4.0,
     medium_volume_score: float = 2.5,
+    b1_require_20ma_gt_50ma: bool = True,
+    require_ma5_rising: bool = True,
     require_5ma_gt_20ma: bool = True,
 ) -> AShareSignalSnapshot:
     clean = normalize_ashare_symbol(symbol)
@@ -1329,7 +1340,8 @@ def latest_ashare_signal(
         massive_window=max(1, int(massive_window)),
         massive_min_count=max(1, int(massive_min_count)),
         massive_max_count=2,
-        b1_require_20ma_gt_50ma=False,
+        b1_require_20ma_gt_50ma=b1_require_20ma_gt_50ma,
+        require_ma5_rising=require_ma5_rising,
         require_5ma_gt_20ma=require_5ma_gt_20ma,
         signal_volumes=adjusted_volumes,
     )
@@ -1345,7 +1357,17 @@ def latest_ashare_signal(
     ma5 = float(ma5_series[i] or 0.0)
     ma20 = float(ma20_series[i] or 0.0)
     volume_ratio = adjusted_volumes[i] / float(vol_ma20[i] or 0.0) if vol_ma20[i] else 0.0
-    trend_ok = bool(ma5 and ma20 and latest.close > ma5 and ma5 > ma20 and i > 0 and ma5_series[i - 1] and ma5 > float(ma5_series[i - 1]))
+    ma5_rising_ok = i > 0 and ma5_series[i - 1] and ma5 > float(ma5_series[i - 1])
+    ma5_gt_20_ok = bool(ma5 and ma20 and ma5 > ma20)
+    ma50_series = rolling_sma(closes, 50)
+    ma20_gt_50_ok = bool(ma20_series[i] is not None and ma50_series[i] is not None and float(ma20_series[i]) > float(ma50_series[i]))
+    trend_ok = bool(
+        ma5
+        and latest.close > ma5
+        and (ma5_gt_20_ok or not require_5ma_gt_20ma)
+        and (ma5_rising_ok or not require_ma5_rising)
+        and (ma20_gt_50_ok or not b1_require_20ma_gt_50ma)
+    )
     signal_type = str(buy_stage[i] or "")
     hard_candidate = bool(buy_signal[i] and amount_ok)
 
@@ -1464,6 +1486,8 @@ def scan_ashare_candidates(
     reentry_pct: float = 0.045,
     strong_volume_score: float = 4.0,
     medium_volume_score: float = 2.5,
+    b1_require_20ma_gt_50ma: bool = True,
+    require_ma5_rising: bool = True,
     require_5ma_gt_20ma: bool = True,
 ) -> AShareScanResult:
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1491,6 +1515,8 @@ def scan_ashare_candidates(
             reentry_pct=reentry_pct,
             strong_volume_score=strong_volume_score,
             medium_volume_score=medium_volume_score,
+            b1_require_20ma_gt_50ma=b1_require_20ma_gt_50ma,
+            require_ma5_rising=require_ma5_rising,
             require_5ma_gt_20ma=require_5ma_gt_20ma,
         )
         snapshot.name = item.name

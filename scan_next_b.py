@@ -129,6 +129,7 @@ def latest_b_signal(
     massive_min_count: int = 1,
     massive_max_count: int = 2,
     b1_require_20ma_gt_50ma: bool = False,
+    require_ma5_rising: bool = True,
     require_5ma_gt_20ma: bool = True,
 ) -> SignalResult | None:
     result, _ = latest_b_signal_with_reason(
@@ -146,6 +147,7 @@ def latest_b_signal(
         massive_min_count,
         massive_max_count,
         b1_require_20ma_gt_50ma,
+        require_ma5_rising,
         require_5ma_gt_20ma,
     )
     return result
@@ -166,6 +168,7 @@ def latest_b_signal_with_reason(
     massive_min_count: int = 1,
     massive_max_count: int = 2,
     b1_require_20ma_gt_50ma: bool = False,
+    require_ma5_rising: bool = True,
     require_5ma_gt_20ma: bool = True,
 ) -> tuple[SignalResult | None, str]:
     if len(bars) < max(ma_length, vol_length) + 10:
@@ -226,8 +229,8 @@ def latest_b_signal_with_reason(
             j_price_above_ma
             and j_vol_days_high
             and j_has_massive_vol
-            and j_ma_rising
-            and j_ma20_gt_50
+            and (j_ma_rising or not require_ma5_rising)
+            and (j_ma20_gt_50 or not b1_require_20ma_gt_50ma)
             and (j_ma5_gt_20 or not require_5ma_gt_20ma)
         )
         if j_initial_buy:
@@ -240,8 +243,8 @@ def latest_b_signal_with_reason(
         price_above_ma
         and vol_days_high
         and has_massive_vol
-        and ma_is_rising
-        and ma20_gt_50
+        and (ma_is_rising or not require_ma5_rising)
+        and (ma20_gt_50 or not b1_require_20ma_gt_50ma)
         and (ma5_gt_20 or not require_5ma_gt_20ma)
     )
     full_range = bar.high - bar.low
@@ -255,7 +258,7 @@ def latest_b_signal_with_reason(
         and price_above_ma
         and dist_to_ma <= reentry_pct / 100
         and bar.close > bar.open
-        and ma_is_rising
+        and (ma_is_rising or not require_ma5_rising)
         and (ma5_gt_20 or not require_5ma_gt_20ma)
         and bull_quality_ok
         and upper_shadow_ok
@@ -264,7 +267,7 @@ def latest_b_signal_with_reason(
         failed = []
         if not price_above_ma:
             failed.append("收盘价未站上MA")
-        if not ma_is_rising:
+        if require_ma5_rising and not ma_is_rising:
             failed.append("MA未向上")
         if not vol_days_high:
             failed.append("未连续3天放量")
@@ -274,8 +277,6 @@ def latest_b_signal_with_reason(
             failed.append("B1 20MA>50MA 趋势过滤未通过")
         if require_5ma_gt_20ma and not ma5_gt_20:
             failed.append("5MA 未大于 20MA")
-        if not ma20_gt_50:
-            failed.append("20MA 未大于 50MA")
         if not is_massive_vol[i]:
             failed.append("当日不是巨量")
         if dist_to_ma > reentry_pct / 100:
