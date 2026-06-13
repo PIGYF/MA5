@@ -68,6 +68,10 @@ def safe_name(value: str) -> str:
 
 
 def start_for_preset(preset: str, end: date) -> date:
+    if preset == "1m":
+        return end - timedelta(days=31)
+    if preset == "3m":
+        return end - timedelta(days=92)
     if preset == "6m":
         return end - timedelta(days=183)
     if preset == "1y":
