@@ -49,6 +49,7 @@ class Trade:
     max_favorable_pct: float
     max_drawdown_pct: float
     exit_reason: str
+    entry_structure: str = ""
 
 
 def normalize_key(key: str) -> str:
@@ -565,6 +566,11 @@ def backtest(
     max_buy_gap_pct: float = 0.0,
     stamp_duty_pct: float = 0.0,
     time_stop_days: int = 0,
+    weak_trend_exit_mode: str = "off",
+    weak_ma5_reclaim_days: int = 5,
+    weak_ma20_reclaim_days: int = 10,
+    weak_volume_down_multiplier: float = 1.5,
+    weak_event_low_lookback: int = 27,
 ) -> tuple[list[Trade], list[dict[str, float | str]]]:
     if strategy_name == "ratchet":
         signal_volumes = adjust_limit_volumes(bars, limit_pct, buy_limit_tolerance_pct) if market == "cn" else None
@@ -602,9 +608,15 @@ def backtest(
     entry_signal_date = ""
     entry_signal_close = 0.0
     entry_index = 0
+    entry_structure = ""
+    entry_event_low = 0.0
+    weak_repair_active = False
+    weak_reclaimed_ma5 = False
+    weak_reclaimed_ma20 = False
     pending_action = None
     pending_signal_date = ""
     pending_signal_close = 0.0
+    pending_signal_index = 0
     pending_exit_reason = ""
     pending_target_pct = 0.0
     pending_stage = ""
@@ -625,6 +637,7 @@ def backtest(
         carry_pending_action = None
         carry_pending_signal_date = ""
         carry_pending_signal_close = 0.0
+        carry_pending_signal_index = 0
         carry_pending_exit_reason = ""
         if pending_action == "buy":
             gap_pct = price_change_pct(bar.open, previous_close)
@@ -665,6 +678,15 @@ def backtest(
                         entry_signal_date = pending_signal_date
                         entry_signal_close = pending_signal_close
                         entry_index = i
+                        signal_ma = ma[pending_signal_index] if 0 <= pending_signal_index < len(ma) else None
+                        signal_ma20 = ma20[pending_signal_index] if 0 <= pending_signal_index < len(ma20) else None
+                        entry_structure = "weak_repair" if signal_ma is not None and signal_ma20 is not None and signal_ma < signal_ma20 else "trend"
+                        weak_repair_active = entry_structure == "weak_repair" and weak_trend_exit_mode in ("hybrid", "weak")
+                        weak_reclaimed_ma5 = False
+                        weak_reclaimed_ma20 = False
+                        event_start = max(0, pending_signal_index - max(1, int(weak_event_low_lookback)) + 1)
+                        event_window = bars[event_start : pending_signal_index + 1] if pending_signal_index >= 0 else []
+                        entry_event_low = min((item.low for item in event_window), default=bar.low)
                         max_high_since_entry = bar.high
                         min_low_since_entry = bar.low
                         highest_close_since_entry = bar.close
@@ -676,6 +698,7 @@ def backtest(
                 carry_pending_action = "sell"
                 carry_pending_signal_date = pending_signal_date
                 carry_pending_signal_close = pending_signal_close
+                carry_pending_signal_index = pending_signal_index
                 carry_pending_exit_reason = (pending_exit_reason or "Signal exit") + " / 跌停顺延"
             else:
                 fill_price = apply_sell_price(bar.open, slippage_pct)
@@ -705,6 +728,7 @@ def backtest(
                         max_favorable_pct=max_favorable_pct,
                         max_drawdown_pct=max_drawdown_pct,
                         exit_reason=pending_exit_reason or "Signal exit",
+                        entry_structure=entry_structure,
                     )
                 )
                 sell_action = "卖出"
@@ -713,6 +737,11 @@ def backtest(
                 entry_date = ""
                 entry_signal_date = ""
                 entry_signal_close = 0.0
+                entry_structure = ""
+                entry_event_low = 0.0
+                weak_repair_active = False
+                weak_reclaimed_ma5 = False
+                weak_reclaimed_ma20 = False
                 max_high_since_entry = 0.0
                 min_low_since_entry = 0.0
                 highest_close_since_entry = 0.0
@@ -721,6 +750,7 @@ def backtest(
         pending_action = None
         pending_signal_date = ""
         pending_signal_close = 0.0
+        pending_signal_index = 0
         pending_exit_reason = ""
         pending_target_pct = 0.0
         pending_stage = ""
@@ -728,6 +758,7 @@ def backtest(
             pending_action = carry_pending_action
             pending_signal_date = carry_pending_signal_date
             pending_signal_close = carry_pending_signal_close
+            pending_signal_index = carry_pending_signal_index
             pending_exit_reason = carry_pending_exit_reason
 
 
@@ -742,6 +773,18 @@ def backtest(
             highest_close_since_entry = max(highest_close_since_entry, bar.close)
             dynamic_stop = entry_price * (1 - hard_stop_pct / 100) if entry_price else ""
             trend_stop_line = "" if ma20[i] is None else ma20[i]
+            if ma[i] is not None and bar.close > ma[i]:
+                weak_reclaimed_ma5 = True
+            if ma20[i] is not None and bar.close > ma20[i]:
+                weak_reclaimed_ma20 = True
+            if (
+                weak_repair_active
+                and ma[i] is not None
+                and ma20[i] is not None
+                and ma[i] > ma20[i]
+                and bar.close > ma20[i]
+            ):
+                weak_repair_active = False
             defense_warning = ma[i] is not None and bar.close < ma[i] * (1 - stop_5ma_pct / 100)
             if ma20[i] is not None and bar.close < ma20[i]:
                 below_20ma_days += 1
@@ -751,10 +794,29 @@ def backtest(
             cost_stop = entry_price > 0 and bar.close < entry_price * (1 - hard_stop_pct / 100)
 
             stop_reasons = []
-            if defense_warning:
-                stop_reasons.append(f"5MA {stop_5ma_pct:g}% stop")
-            if trend_stop:
-                stop_reasons.append(f"{below_20ma_stop_days}-day 20MA break")
+            weak_stop_active = weak_repair_active and weak_trend_exit_mode in ("hybrid", "weak")
+            if weak_stop_active:
+                bars_since_entry = i - entry_index
+                if entry_event_low > 0 and bar.close < entry_event_low:
+                    stop_reasons.append("Weak repair event-low break")
+                if weak_ma5_reclaim_days > 0 and bars_since_entry >= weak_ma5_reclaim_days and not weak_reclaimed_ma5:
+                    stop_reasons.append(f"Weak repair no 5MA reclaim {weak_ma5_reclaim_days}d")
+                if weak_ma20_reclaim_days > 0 and bars_since_entry >= weak_ma20_reclaim_days and not weak_reclaimed_ma20:
+                    stop_reasons.append(f"Weak repair no 20MA reclaim {weak_ma20_reclaim_days}d")
+                vol_ma_value = vol_ma[i] if i < len(vol_ma) else None
+                weak_volume_down = (
+                    vol_ma_value is not None
+                    and bar.close < bar.open
+                    and bar.volume >= vol_ma_value * weak_volume_down_multiplier
+                    and (ma[i] is None or bar.close < ma[i])
+                )
+                if weak_volume_down:
+                    stop_reasons.append(f"Weak repair volume-down {weak_volume_down_multiplier:g}x")
+            else:
+                if defense_warning:
+                    stop_reasons.append(f"5MA {stop_5ma_pct:g}% stop")
+                if trend_stop:
+                    stop_reasons.append(f"{below_20ma_stop_days}-day 20MA break")
             if cost_stop:
                 stop_reasons.append(f"Cost {hard_stop_pct:g}% forced stop")
             if time_stop_days > 0 and i - entry_index >= time_stop_days and highest_close_since_entry <= entry_signal_close:
@@ -793,6 +855,11 @@ def backtest(
                 "entry_signal_date": entry_signal_date,
                 "entry_signal_close": entry_signal_close,
                 "entry_index": entry_index if shares > 0 else "",
+                "entry_structure": entry_structure if shares > 0 else "",
+                "entry_event_low": entry_event_low if shares > 0 and entry_event_low else "",
+                "weak_repair_active": int(weak_repair_active) if shares > 0 else "",
+                "weak_reclaimed_ma5": int(weak_reclaimed_ma5) if shares > 0 else "",
+                "weak_reclaimed_ma20": int(weak_reclaimed_ma20) if shares > 0 else "",
                 "max_high_since_entry": max_high_since_entry if shares > 0 else "",
                 "min_low_since_entry": min_low_since_entry if shares > 0 else "",
                 "highest_close_since_entry": highest_close_since_entry if shares > 0 else "",
@@ -812,6 +879,7 @@ def backtest(
                 pending_action = "buy"
                 pending_signal_date = bar.date
                 pending_signal_close = bar.close
+                pending_signal_index = i
                 pending_target_pct = target_pct_today
                 pending_stage = buy_stage[i]
             elif shares > 0:
@@ -820,11 +888,13 @@ def backtest(
                         pending_action = "sell"
                         pending_signal_date = bar.date
                         pending_signal_close = bar.close
+                        pending_signal_index = i
                         pending_exit_reason = exit_reason_today
                 elif sell_signal[i]:
                     pending_action = "sell"
                     pending_signal_date = bar.date
                     pending_signal_close = bar.close
+                    pending_signal_index = i
                     pending_exit_reason = "MA crossunder"
 
     return trades, equity_curve
@@ -893,6 +963,7 @@ def write_trades(path: Path, trades: list[Trade]) -> None:
                 "entry_signal_close",
                 "entry_price",
                 "entry_gap_pct",
+                "entry_structure",
                 "shares",
                 "exit_signal_date",
                 "exit_date",
@@ -919,6 +990,15 @@ def write_equity(path: Path, equity_curve: list[dict[str, float | str]]) -> None
         writer.writerows(equity_curve)
 
 
+def trade_structure_label(value: object) -> str:
+    text = str(value or "")
+    return {
+        "trend": "趋势买入",
+        "weak_repair": "弱趋势修复",
+        "divergence": "分歧买入",
+    }.get(text, text or "-")
+
+
 def open_position_snapshot(equity_curve: list[dict[str, float | str]]) -> dict[str, float | int | str] | None:
     if not equity_curve:
         return None
@@ -940,6 +1020,7 @@ def open_position_snapshot(equity_curve: list[dict[str, float | str]]) -> dict[s
         "entry_signal_close": float(row.get("entry_signal_close", 0) or 0),
         "entry_price": entry_price,
         "entry_gap_pct": (entry_price / float(row.get("entry_signal_close", 0) or 0) - 1) * 100 if float(row.get("entry_signal_close", 0) or 0) else 0.0,
+        "entry_structure": str(row.get("entry_structure", "")),
         "shares": shares,
         "mark_date": str(row.get("date", "")),
         "mark_price": close,
@@ -1338,6 +1419,7 @@ def make_report(
         "buy_signal_close": "\u4e70\u5165\u4fe1\u53f7\u6536\u76d8",
         "buy_fill": "\u4e70\u5165\u6210\u4ea4",
         "buy_gap": "\u4e70\u5165\u8df3\u7a7a",
+        "entry_structure": "Entry Structure",
         "sell_signal_date": "\u5356\u51fa\u4fe1\u53f7\u65e5",
         "sell_action_date": "\u5356\u51fa\u64cd\u4f5c\u65e5",
         "sell_signal_close": "\u5356\u51fa\u4fe1\u53f7\u6536\u76d8",
@@ -1591,6 +1673,7 @@ def make_report(
         f"<td>{trade.entry_signal_close:.2f}</td>"
         f"<td>{trade.entry_price:.2f}</td>"
         f"<td>{trade.entry_gap_pct:.2f}%</td>"
+        f"<td>{html.escape(trade_structure_label(trade.entry_structure))}</td>"
         f"<td>{html.escape(trade.exit_signal_date)}</td>"
         f"<td>{html.escape(trade.exit_date)}</td>"
         f"<td>{trade.exit_signal_close:.2f}</td>"
@@ -1619,6 +1702,7 @@ def make_report(
             f"<td>{float(open_position['entry_signal_close']):.2f}</td>"
             f"<td>{float(open_position['entry_price']):.2f}</td>"
             f"<td>{float(open_position['entry_gap_pct']):.2f}%</td>"
+            f"<td>{html.escape(trade_structure_label(open_position.get('entry_structure', '')))}</td>"
             "<td>未触发</td>"
             f"<td>未平仓</td>"
             f"<td>{float(open_position['mark_price']):.2f}</td>"
@@ -1636,7 +1720,7 @@ def make_report(
             "</tr>"
         )
     if not trade_rows:
-        trade_rows = f'<tr><td colspan="20" class="empty">{labels["empty_trades"]}</td></tr>'
+        trade_rows = f'<tr><td colspan="21" class="empty">{labels["empty_trades"]}</td></tr>'
 
     def fmt_pct(value: float | int | str) -> str:
         if value == "" or value is None:
@@ -1753,6 +1837,37 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
 <h1>{html.escape(title)}</h1>
 {summary_html}
 {benchmark_html}
+<h2>{labels['trade_detail']}</h2>
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>{labels['trade_no']}</th>
+        <th>{labels['buy_signal_date']}</th>
+        <th>{labels['buy_action_date']}</th>
+        <th>{labels['buy_signal_close']}</th>
+        <th>{labels['buy_fill']}</th>
+        <th>{labels['buy_gap']}</th>
+        <th>{labels['entry_structure']}</th>
+        <th>{labels['sell_signal_date']}</th>
+        <th>{labels['sell_action_date']}</th>
+        <th>{labels['sell_signal_close']}</th>
+        <th>{labels['sell_fill']}</th>
+        <th>{labels['sell_gap']}</th>
+        <th>{labels['bars_held']}</th>
+        <th>{labels['shares']}</th>
+        <th>{labels['entry_value']}</th>
+        <th>{labels['exit_value']}</th>
+        <th>{labels['pnl_amount']}</th>
+        <th>{labels['return_pct']}</th>
+        <th>{labels['max_favorable']}</th>
+        <th>{labels['avg_dd']}</th>
+        <th>{labels['exit_reason']}</th>
+      </tr>
+    </thead>
+    <tbody>{trade_rows}</tbody>
+  </table>
+</div>
 <h2>{labels['main_chart']}</h2>
 <div class="rule-strip">
   <span class="rule-pill">B1：站上5MA{ma5_rising_label}{ma20_gt_50_label}{ma5_gt_20_b1_label} + 连续{vol_high_days_label}日成交量 &gt; 均量×{vol_high_multiplier_label:g} + {massive_window_label}日内至少{massive_min_label}次巨量</span>

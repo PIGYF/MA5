@@ -31,6 +31,7 @@ from backtest import (
     build_ratchet_inputs,
     rolling_sma,
     summarize,
+    trade_structure_label,
     write_equity,
     write_trades,
 )
@@ -345,20 +346,26 @@ def render_data_health_panel(market: str) -> str:
 """
 
     return f"""
-<section class="result strategy-condition-panel">
+<section class="result strategy-condition-panel" data-condition-panel data-panel-key="{html.escape(market)}-data-health">
   <div class="strategy-condition-head">
     <div>
       <strong>{title}</strong>
       <p class="hint">{note}</p>
     </div>
-    <span class="condition-tag condition-primary">Health</span>
+    <div class="condition-head-actions">
+      <span class="condition-tag condition-primary">Health</span>
+      <button type="button" class="condition-panel-toggle" data-condition-collapse aria-label="折叠或展开{html.escape(title)}">折叠</button>
+      <button type="button" class="condition-panel-toggle" data-condition-pin aria-label="固定或取消固定{html.escape(title)}">固定</button>
+    </div>
   </div>
-  <div class="scan-facts">
-    {''.join(source_tags)}
-    {''.join(cache_tags)}
-    {''.join(job_tags)}
+  <div class="condition-panel-body">
+    <div class="scan-facts">
+      {''.join(source_tags)}
+      {''.join(cache_tags)}
+      {''.join(job_tags)}
+    </div>
+    {error_html}
   </div>
-  {error_html}
 </section>
 """
 
@@ -1210,10 +1217,18 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .cache-actions form {{ margin: 0; }}
 .cache-actions button {{ min-height: 30px; padding: 6px 10px; font-size: 12px; }}
 .notice {{ background: #eefbf7; border: 1px solid #9fd8cc; color: #067a6b; padding: 10px 12px; border-radius: 6px; margin: 0 0 12px; font-weight: 800; }}
+.scan-result-alert {{ border-left: 4px solid #2962ff; background: #f8fbff; box-shadow: 0 8px 20px rgba(41,98,255,.08); }}
+.scan-result-alert .toolbar {{ margin-bottom: 0; }}
+.scan-result-alert strong, .scan-result-alert h2 {{ color: #1e53e5; }}
 .strategy-condition-panel {{ padding: 0; overflow: hidden; }}
+.strategy-condition-panel.is-pinned {{ position: sticky; top: 12px; z-index: 30; box-shadow: 0 10px 24px rgba(15,23,42,.14); }}
+.strategy-condition-panel.is-collapsed .condition-panel-body {{ display: none; }}
 .strategy-condition-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; padding: 12px 14px; border-bottom: 1px solid #e3e7ee; background: #fbfcfe; }}
 .strategy-condition-head strong {{ display: block; font-size: 15px; }}
 .strategy-condition-head .hint {{ margin: 3px 0 0; }}
+.condition-head-actions {{ display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }}
+.condition-panel-toggle {{ min-height: 26px; padding: 4px 8px; border-color: #c7ccd5; background: #fff; color: #334155; font-size: 12px; }}
+.condition-panel-toggle.is-active {{ border-color: #2962ff; background: rgba(41,98,255,.08); color: #1e53e5; }}
 .condition-grid {{ display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 0; }}
 .condition-card {{ min-height: 150px; padding: 13px 14px; border-right: 1px solid #e3e7ee; }}
 .condition-card:last-child {{ border-right: 0; }}
@@ -1227,6 +1242,8 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .condition-off {{ border-color: #e3e7ee; background: #f1f5f9; color: #94a3b8; }}
 .condition-primary {{ border-color: #bfdbfe; background: rgba(41,98,255,.09); color: #1e53e5; }}
 .condition-note {{ margin-top: 10px; color: #64748b; font-size: 12px; line-height: 1.5; }}
+.risk-note {{ display: flex; align-items: flex-start; gap: 8px; margin: 10px 14px 0; padding: 9px 10px; border: 1px solid #fed7aa; background: #fff7ed; color: #9a4f00; border-radius: 6px; font-size: 12px; line-height: 1.45; font-weight: 700; }}
+.risk-note strong {{ color: #7c3f00; }}
 .inline-actions {{ display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }}
 .delete-form {{ display: inline; margin: 0; }}
 .delete-link {{ display: inline-flex; align-items: center; justify-content: center; min-height: 26px; padding: 4px 8px; border: 1px solid #f3a6ad; border-radius: 4px; background: #fff; color: #d12030; font-size: 12px; font-weight: 800; cursor: pointer; text-decoration: none; }}
@@ -1371,6 +1388,47 @@ window.showToast = function(message, type = "success") {{
   }}, 2600);
 }};
 
+window.initializeConditionPanels = function(root = document) {{
+  root.querySelectorAll("[data-condition-panel]").forEach((panel, index) => {{
+    if (panel.dataset.conditionReady === "true") return;
+    panel.dataset.conditionReady = "true";
+    const key = panel.dataset.panelKey || `condition-panel-${{index}}`;
+    const collapseButton = panel.querySelector("[data-condition-collapse]");
+    const pinButton = panel.querySelector("[data-condition-pin]");
+    const collapsed = localStorage.getItem(`ma5:${{key}}:collapsed`) === "1";
+    const pinned = localStorage.getItem(`ma5:${{key}}:pinned`) === "1";
+    function applyState() {{
+      panel.classList.toggle("is-collapsed", panel.dataset.collapsed === "1");
+      panel.classList.toggle("is-pinned", panel.dataset.pinned === "1");
+      if (collapseButton) {{
+        const isCollapsed = panel.dataset.collapsed === "1";
+        collapseButton.textContent = isCollapsed ? "展开" : "折叠";
+        collapseButton.setAttribute("aria-expanded", String(!isCollapsed));
+      }}
+      if (pinButton) {{
+        const isPinned = panel.dataset.pinned === "1";
+        pinButton.textContent = isPinned ? "取消固定" : "固定";
+        pinButton.classList.toggle("is-active", isPinned);
+      }}
+    }}
+    panel.dataset.collapsed = collapsed ? "1" : "0";
+    panel.dataset.pinned = pinned ? "1" : "0";
+    collapseButton?.addEventListener("click", () => {{
+      panel.dataset.collapsed = panel.dataset.collapsed === "1" ? "0" : "1";
+      localStorage.setItem(`ma5:${{key}}:collapsed`, panel.dataset.collapsed);
+      applyState();
+    }});
+    pinButton?.addEventListener("click", () => {{
+      panel.dataset.pinned = panel.dataset.pinned === "1" ? "0" : "1";
+      localStorage.setItem(`ma5:${{key}}:pinned`, panel.dataset.pinned);
+      applyState();
+    }});
+    applyState();
+  }});
+}};
+
+window.initializeConditionPanels();
+
 document.addEventListener("submit", event => {{
   const form = event.target;
   if (!(form instanceof HTMLFormElement) || form.dataset.asyncSubmit === "true") return;
@@ -1424,51 +1482,62 @@ def render_us_strategy_condition_panel(params: dict[str, list[str]], context: st
         "backtest": "本页用同一套 B1/B2 和卖出规则回测单只股票。",
         "batch": "本页把同一套条件批量应用到多个股票，便于横向比较。",
     }
+    risk_note = ""
+    if not require_5ma_gt_20ma:
+        risk_note = '<div class="risk-note"><strong>防误买提醒</strong><span>当前关闭 5MA&gt;20MA，策略会允许 MA5 低于 MA20 的 B 点进入，买入后更容易很快触发 20MA 趋势止损。做防守型回测时建议打开。</span></div>'
+
     return f"""
-<section class="result strategy-condition-panel">
+<section class="result strategy-condition-panel" data-condition-panel data-panel-key="us-{html.escape(context)}-conditions">
   <div class="strategy-condition-head">
     <div>
       <strong>{title_map.get(context, "当前美股策略条件")}</strong>
       <p class="hint">{note_map.get(context, note_map["scanner"])}</p>
     </div>
-    <span class="condition-tag condition-primary">Daily Close</span>
+    <div class="condition-head-actions">
+      <span class="condition-tag condition-primary">Daily Close</span>
+      <button type="button" class="condition-panel-toggle" data-condition-collapse aria-label="折叠或展开美股条件">折叠</button>
+      <button type="button" class="condition-panel-toggle" data-condition-pin aria-label="固定或取消固定美股条件">固定</button>
+    </div>
   </div>
-  <div class="condition-grid">
-    <div class="condition-card">
-      <h3>B1 起爆</h3>
-      <ul class="condition-list">
-        <li><b>价格</b><span>收盘站上 {value("ma_length", "5")}MA</span></li>
-        <li><b>趋势过滤</b><span class="condition-tags">{b1_tags}</span></li>
-        <li><b>连续放量</b><span>{value("vol_high_days", "3")} 日 &gt; 均量×{value("vol_high_multiplier", "1.0")}</span></li>
-        <li><b>巨量窗口</b><span>{value("massive_window", "7")} 日内 ≥ {value("massive_min_count", "1")} 次 ×{value("vol_multiplier", "1.45")}</span></li>
-      </ul>
-    </div>
-    <div class="condition-card">
-      <h3>B2 回踩</h3>
-      <ul class="condition-list">
-        <li><b>前提</b><span>已有 B1 趋势</span></li>
-        <li><b>量价</b><span>巨量阳线</span></li>
-        <li><b>位置</b><span>距 {value("ma_length", "5")}MA ≤ {value("reentry_pct", "4.5")}%</span></li>
-        <li><b>过滤</b><span>{b2_filter_text}</span></li>
-      </ul>
-    </div>
-    <div class="condition-card">
-      <h3>执行</h3>
-      <ul class="condition-list">
-        <li><b>B1</b><span>目标仓位 50%</span></li>
-        <li><b>B2</b><span>目标仓位 100%</span></li>
-        <li><b>成交</b><span>下一交易日开盘</span></li>
-        <li><b>价格</b><span>不使用盘后/夜盘</span></li>
-      </ul>
-    </div>
-    <div class="condition-card">
-      <h3>风控</h3>
-      <ul class="condition-list">
-        <li><b>均线</b><span>{value("ma_length", "5")}MA 下 {value("stop_5ma_pct", "7.5")}%</span></li>
-        <li><b>趋势</b><span>连续 {value("below_20ma_stop_days", "2")} 日跌破 20MA</span></li>
-        <li><b>成本</b><span>跌破成本 {value("hard_stop_pct", "20")}%</span></li>
-        <li><b>交易成本</b><span>手续费 {value("commission_pct", "0.1")}% / 滑点 {value("slippage_pct", "0")}%</span></li>
-      </ul>
+  <div class="condition-panel-body">
+    {risk_note}
+    <div class="condition-grid">
+      <div class="condition-card">
+        <h3>B1 起爆</h3>
+        <ul class="condition-list">
+          <li><b>价格</b><span>收盘站上 {value("ma_length", "5")}MA</span></li>
+          <li><b>趋势过滤</b><span class="condition-tags">{b1_tags}</span></li>
+          <li><b>连续放量</b><span>{value("vol_high_days", "3")} 日 &gt; 均量×{value("vol_high_multiplier", "1.0")}</span></li>
+          <li><b>巨量窗口</b><span>{value("massive_window", "7")} 日内 ≥ {value("massive_min_count", "1")} 次 ×{value("vol_multiplier", "1.45")}</span></li>
+        </ul>
+      </div>
+      <div class="condition-card">
+        <h3>B2 回踩</h3>
+        <ul class="condition-list">
+          <li><b>前提</b><span>已有 B1 趋势</span></li>
+          <li><b>量价</b><span>巨量阳线</span></li>
+          <li><b>位置</b><span>距 {value("ma_length", "5")}MA ≤ {value("reentry_pct", "4.5")}%</span></li>
+          <li><b>过滤</b><span>{b2_filter_text}</span></li>
+        </ul>
+      </div>
+      <div class="condition-card">
+        <h3>执行</h3>
+        <ul class="condition-list">
+          <li><b>B1</b><span>目标仓位 50%</span></li>
+          <li><b>B2</b><span>目标仓位 100%</span></li>
+          <li><b>成交</b><span>下一交易日开盘</span></li>
+          <li><b>价格</b><span>不使用盘后/夜盘</span></li>
+        </ul>
+      </div>
+      <div class="condition-card">
+        <h3>风控</h3>
+        <ul class="condition-list">
+          <li><b>均线</b><span>{value("ma_length", "5")}MA 下 {value("stop_5ma_pct", "7.5")}%</span></li>
+          <li><b>趋势</b><span>连续 {value("below_20ma_stop_days", "2")} 日跌破 20MA</span></li>
+          <li><b>成本</b><span>跌破成本 {value("hard_stop_pct", "20")}%</span></li>
+          <li><b>弱趋势卖出</b><span>{value("weak_trend_exit_mode", "hybrid")} / MA5 {value("weak_ma5_reclaim_days", "5")}日 / MA20 {value("weak_ma20_reclaim_days", "10")}日</span></li>
+        </ul>
+      </div>
     </div>
   </div>
 </section>
@@ -1533,6 +1602,17 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
   <label>跌破均线止损 %<input name="stop_5ma_pct" value="{value("stop_5ma_pct", "7.5")}"></label>
   <label>连续跌破20MA天数<input name="below_20ma_stop_days" value="{value("below_20ma_stop_days", "2")}"></label>
   <label>成本强制止损 %<input name="hard_stop_pct" value="{value("hard_stop_pct", "20")}"></label>
+  <label>弱趋势卖出
+    <select name="weak_trend_exit_mode">
+      <option value="hybrid"{selected(field(params, "weak_trend_exit_mode", "hybrid"), "hybrid")}>混合模式：仅5MA&lt;20MA买入启用</option>
+      <option value="off"{selected(field(params, "weak_trend_exit_mode", "hybrid"), "off")}>关闭：全部使用标准止损</option>
+      <option value="weak"{selected(field(params, "weak_trend_exit_mode", "hybrid"), "weak")}>弱趋势持仓使用修复止损</option>
+    </select>
+  </label>
+  <label>站回5MA期限<input name="weak_ma5_reclaim_days" value="{value("weak_ma5_reclaim_days", "5")}"></label>
+  <label>站回20MA期限<input name="weak_ma20_reclaim_days" value="{value("weak_ma20_reclaim_days", "10")}"></label>
+  <label>放量下跌倍数<input name="weak_volume_down_multiplier" value="{value("weak_volume_down_multiplier", "1.5")}"></label>
+  <label>事件低点窗口<input name="weak_event_low_lookback" value="{value("weak_event_low_lookback", "27")}"></label>
   <div class="form-options">
     <span>可选买入条件</span>
     <input type="hidden" name="require_ma5_rising" value="0">
@@ -1911,7 +1991,12 @@ def ashare_backtest_defaults(params: dict[str, list[str]]) -> dict[str, float | 
         "stop_5ma_pct": number_field(params, "stop_5ma_pct", 7.5),
         "below_20ma_stop_days": int(number_field(params, "below_20ma_stop_days", 2)),
         "time_stop_days": 0,
-        "vol_multiplier": number_field(params, "vol_multiplier", 1.8),
+        "vol_multiplier": number_field(params, "vol_multiplier", 1.45),
+        "weak_trend_exit_mode": field(params, "weak_trend_exit_mode", "hybrid"),
+        "weak_ma5_reclaim_days": int(number_field(params, "weak_ma5_reclaim_days", 5)),
+        "weak_ma20_reclaim_days": int(number_field(params, "weak_ma20_reclaim_days", 10)),
+        "weak_volume_down_multiplier": number_field(params, "weak_volume_down_multiplier", 1.5),
+        "weak_event_low_lookback": int(number_field(params, "weak_event_low_lookback", 27)),
         "b1_require_20ma_gt_50ma": checkbox_field(params, "b1_require_20ma_gt_50ma", True),
         "require_ma5_rising": checkbox_field(params, "require_ma5_rising", True),
         "require_5ma_gt_20ma": checkbox_field(params, "require_5ma_gt_20ma", True),
@@ -1981,6 +2066,7 @@ def render_ashare_backtest_form(params: dict[str, list[str]] | None = None) -> s
   </div>
   <div class="mode-pill">A Share | MA5/B</div>
 </section>
+{render_ashare_condition_panel({key: [str(value)] for key, value in defaults.items()}, "backtest")}
 <form class="form" action="/cn/run" method="get" id="ashare-backtest-form">
   <label>股票代码/名称<input name="symbol" value="{value("symbol", defaults["symbol"])}" placeholder="600487 或 亨通光电" list="ashare-symbol-suggestions" data-ashare-symbol-input></label>
   <label>回测周期
@@ -2003,6 +2089,17 @@ def render_ashare_backtest_form(params: dict[str, list[str]] | None = None) -> s
   <label>跌破MA5止损 %<input name="stop_5ma_pct" value="{value("stop_5ma_pct", defaults["stop_5ma_pct"])}"></label>
   <label>连续跌破20MA天数<input name="below_20ma_stop_days" value="{value("below_20ma_stop_days", defaults["below_20ma_stop_days"])}"></label>
   <label>硬止损 %<input name="hard_stop_pct" value="{html.escape(str(defaults["hard_stop_pct"]))}"></label>
+  <label>弱趋势卖出
+    <select name="weak_trend_exit_mode">
+      <option value="hybrid"{selected(str(defaults["weak_trend_exit_mode"]), "hybrid")}>混合模式：仅MA5&lt;MA20买入启用</option>
+      <option value="off"{selected(str(defaults["weak_trend_exit_mode"]), "off")}>关闭：全部使用标准止损</option>
+      <option value="weak"{selected(str(defaults["weak_trend_exit_mode"]), "weak")}>弱趋势持仓使用修复止损</option>
+    </select>
+  </label>
+  <label>站回MA5期限<input name="weak_ma5_reclaim_days" value="{value("weak_ma5_reclaim_days", defaults["weak_ma5_reclaim_days"])}"></label>
+  <label>站回MA20期限<input name="weak_ma20_reclaim_days" value="{value("weak_ma20_reclaim_days", defaults["weak_ma20_reclaim_days"])}"></label>
+  <label>放量下跌倍数<input name="weak_volume_down_multiplier" value="{value("weak_volume_down_multiplier", defaults["weak_volume_down_multiplier"])}"></label>
+  <label>事件低点窗口<input name="weak_event_low_lookback" value="{value("weak_event_low_lookback", defaults["weak_event_low_lookback"])}"></label>
   <div class="form-options">
     <span>可选买入条件</span>
     <input type="hidden" name="require_ma5_rising" value="0">
@@ -2079,6 +2176,11 @@ def run_ashare_strategy(params: dict[str, list[str]]) -> str:
         max_buy_gap_pct=float(defaults["max_buy_gap_pct"]),
         stamp_duty_pct=float(defaults["stamp_duty_pct"]),
         time_stop_days=0,
+        weak_trend_exit_mode=str(defaults["weak_trend_exit_mode"]),
+        weak_ma5_reclaim_days=int(defaults["weak_ma5_reclaim_days"]),
+        weak_ma20_reclaim_days=int(defaults["weak_ma20_reclaim_days"]),
+        weak_volume_down_multiplier=float(defaults["weak_volume_down_multiplier"]),
+        weak_event_low_lookback=int(defaults["weak_event_low_lookback"]),
     )
     summary = summarize(trades, equity_curve, initial_cash)
     buy_hold = build_buy_hold(symbol, bars, initial_cash)
@@ -2107,6 +2209,11 @@ def run_ashare_strategy(params: dict[str, list[str]]) -> str:
         "require_ma5_rising": defaults["require_ma5_rising"],
         "require_5ma_gt_20ma": defaults["require_5ma_gt_20ma"],
         "hard_stop_pct": defaults["hard_stop_pct"],
+        "weak_trend_exit_mode": defaults["weak_trend_exit_mode"],
+        "weak_ma5_reclaim_days": defaults["weak_ma5_reclaim_days"],
+        "weak_ma20_reclaim_days": defaults["weak_ma20_reclaim_days"],
+        "weak_volume_down_multiplier": defaults["weak_volume_down_multiplier"],
+        "weak_event_low_lookback": defaults["weak_event_low_lookback"],
     }
     make_report(report_path, f"{symbol} A股 MA5/B 回测 {start} to {end}", bars, trades, equity_curve, summary, benchmark=benchmark, strategy_settings=strategy_settings)
     write_trades(trades_path, trades)
@@ -2212,7 +2319,7 @@ def render_ashare_latest_banner() -> str:
     scanned = int(summary.get("scanned", 0) or 0)
     failed = int(summary.get("failed", 0) or 0)
     return f"""
-<section class="result">
+<section class="result latest-scan-card scan-result-alert">
   <div class="toolbar">
     <div>
       <h2>当前信号日已有 A 股扫描结果</h2>
@@ -2273,7 +2380,7 @@ def latest_ashare_scan_to_html() -> str:
 """
 
 
-def render_ashare_condition_panel(params: dict[str, list[str]]) -> str:
+def render_ashare_condition_panel(params: dict[str, list[str]], context: str = "scanner") -> str:
     def value(name: str, default: str) -> str:
         return html.escape(field(params, name, default))
 
@@ -2300,51 +2407,64 @@ def render_ashare_condition_panel(params: dict[str, list[str]]) -> str:
     if require_5ma_gt_20ma:
         b2_requirements.append("MA5&gt;MA20")
     b2_filter_text = " + ".join(b2_requirements) if b2_requirements else "无额外均线过滤"
+    risk_note = ""
+    if not require_5ma_gt_20ma:
+        risk_note = '<div class="risk-note"><strong>防误买提醒</strong><span>当前关闭 MA5&gt;MA20，选股器会允许 MA5 低于 MA20 的候选进入。要避免买入后马上触发 20MA 趋势止损，把“买入要求MA5&gt;MA20”打开；回测里同名条件默认已打开，适合做对照。</span></div>'
+    title = "当前 A股回测条件" if context == "backtest" else "当前 A股选股条件"
+    note = "本页用同一套 MA5/B 点买入条件和 A股执行/止损规则回测单只股票。" if context == "backtest" else "扫描最后一根已完成日 K；结果用于盘后复盘和二次看图确认。"
+    panel_key = f"cn-{context}-conditions"
     return f"""
-<section class="result strategy-condition-panel">
+<section class="result strategy-condition-panel" data-condition-panel data-panel-key="{html.escape(panel_key)}">
   <div class="strategy-condition-head">
     <div>
-      <strong>当前 A股选股条件</strong>
-      <p class="hint">扫描最后一根已完成日 K；结果用于盘后复盘和二次看图确认。</p>
+      <strong>{html.escape(title)}</strong>
+      <p class="hint">{html.escape(note)}</p>
     </div>
-    <span class="condition-tag condition-primary">A Share | Daily Close</span>
+    <div class="condition-head-actions">
+      <span class="condition-tag condition-primary">A Share | Daily Close</span>
+      <button type="button" class="condition-panel-toggle" data-condition-collapse aria-label="折叠或展开A股条件">折叠</button>
+      <button type="button" class="condition-panel-toggle" data-condition-pin aria-label="固定或取消固定A股条件">固定</button>
+    </div>
   </div>
-  <div class="condition-grid">
-    <div class="condition-card">
-      <h3>B点趋势</h3>
-      <ul class="condition-list">
-        <li><b>B1</b><span>收盘站上 MA5</span></li>
-        <li><b>B2</b><span>已有 B1 趋势后回踩 MA5 ≤ {value("reentry_pct", "4.5")}%</span></li>
-        <li><b>趋势过滤</b><span class="condition-tags">{trend_tags}</span></li>
-        <li><b>B2过滤</b><span>{b2_filter_text}</span></li>
-      </ul>
-    </div>
-    <div class="condition-card">
-      <h3>量能结构</h3>
-      <ul class="condition-list">
-        <li><b>连续放量</b><span>{value("vol_high_days", "2")} 日 &gt; 均量×{value("vol_high_multiplier", "1.0")}</span></li>
-        <li><b>巨量窗口</b><span>{value("massive_window", "7")} 日内 ≥ {value("massive_min_count", "1")} 次 ×{value("vol_multiplier", "1.8")}</span></li>
-        <li><b>红长绿短</b><span>峰值/基准 + 红均/绿均 + Top5红柱</span></li>
-        <li><b>评级阈值</b><span>Strong ≥ {value("strong_volume_score", "4.0")} / Medium ≥ {value("medium_volume_score", "2.5")}</span></li>
-      </ul>
-    </div>
-    <div class="condition-card">
-      <h3>股票池过滤</h3>
-      <ul class="condition-list">
-        <li><b>板块范围</b><span>{html.escape(ashare_board_filter_label(selected_boards))}</span></li>
-        <li><b>最低市值</b><span>{value("min_market_cap", "50")} 亿元</span></li>
-        <li><b>最多扫描</b><span>{value("max_symbols", str(ASHARE_DEFAULT_MAX_SCAN_SYMBOLS))} 只</span></li>
-        <li><b>基础排除</b><span>剔除 ST / 退市 / 停牌不可用标的</span></li>
-      </ul>
-    </div>
-    <div class="condition-card">
-      <h3>执行与流动性</h3>
-      <ul class="condition-list">
-        <li><b>成交额</b><span>20日均成交额 ≥ {value("min_avg_amount_20d_100m", "1.0")} 亿元</span></li>
-        <li><b>低流动性提示</b><span>&lt; {value("min_control_amount_20d_100m", "2.0")} 亿元降权看待</span></li>
-        <li><b>涨跌停</b><span>一字板剔除量能；普通涨跌停量能半权重</span></li>
-        <li><b>图表确认</b><span>K线 + MA5/MA20 + 成交量 + KDJ</span></li>
-      </ul>
+  <div class="condition-panel-body">
+    {risk_note}
+    <div class="condition-grid">
+      <div class="condition-card">
+        <h3>B点趋势</h3>
+        <ul class="condition-list">
+          <li><b>B1</b><span>收盘站上 MA5</span></li>
+          <li><b>B2</b><span>已有 B1 趋势后回踩 MA5 ≤ {value("reentry_pct", "4.5")}%</span></li>
+          <li><b>趋势过滤</b><span class="condition-tags">{trend_tags}</span></li>
+          <li><b>B2过滤</b><span>{b2_filter_text}</span></li>
+        </ul>
+      </div>
+      <div class="condition-card">
+        <h3>量能结构</h3>
+        <ul class="condition-list">
+          <li><b>连续放量</b><span>{value("vol_high_days", "2")} 日 &gt; 均量×{value("vol_high_multiplier", "1.0")}</span></li>
+          <li><b>巨量窗口</b><span>{value("massive_window", "7")} 日内 ≥ {value("massive_min_count", "1")} 次 ×{value("vol_multiplier", "1.45")}</span></li>
+          <li><b>红长绿短</b><span>峰值/基准 + 红均/绿均 + Top5红柱</span></li>
+          <li><b>评级阈值</b><span>Strong ≥ {value("strong_volume_score", "4.0")} / Medium ≥ {value("medium_volume_score", "2.5")}</span></li>
+        </ul>
+      </div>
+      <div class="condition-card">
+        <h3>股票池过滤</h3>
+        <ul class="condition-list">
+          <li><b>板块范围</b><span>{html.escape(ashare_board_filter_label(selected_boards))}</span></li>
+          <li><b>最低市值</b><span>{value("min_market_cap", "50")} 亿元</span></li>
+          <li><b>最多扫描</b><span>{value("max_symbols", str(ASHARE_DEFAULT_MAX_SCAN_SYMBOLS))} 只</span></li>
+          <li><b>基础排除</b><span>剔除 ST / 退市 / 停牌不可用标的</span></li>
+        </ul>
+      </div>
+      <div class="condition-card">
+        <h3>执行与风控</h3>
+        <ul class="condition-list">
+          <li><b>成交额</b><span>20日均成交额 ≥ {value("min_avg_amount_20d_100m", "1.0")} 亿元</span></li>
+          <li><b>低流动性提示</b><span>&lt; {value("min_control_amount_20d_100m", "2.0")} 亿元降权看待</span></li>
+          <li><b>涨跌停</b><span>一字板剔除量能；普通涨跌停量能半权重</span></li>
+          <li><b>弱趋势卖出</b><span>{value("weak_trend_exit_mode", "hybrid")} / MA5 {value("weak_ma5_reclaim_days", "5")}日 / MA20 {value("weak_ma20_reclaim_days", "10")}日</span></li>
+        </ul>
+      </div>
     </div>
   </div>
 </section>
@@ -2361,7 +2481,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     min_control_amount_20d_100m = number_field(params, "min_control_amount_20d_100m", 2.0)
     vol_high_days = int(number_field(params, "vol_high_days", 2))
     vol_high_multiplier = number_field(params, "vol_high_multiplier", 1.0)
-    vol_multiplier = number_field(params, "vol_multiplier", 1.8)
+    vol_multiplier = number_field(params, "vol_multiplier", 1.45)
     massive_window = int(number_field(params, "massive_window", 7))
     massive_min_count = int(number_field(params, "massive_min_count", 1))
     reentry_pct = number_field(params, "reentry_pct", 4.5)
@@ -3097,6 +3217,7 @@ def render_backtest_trade_table(trades, equity_curve) -> str:
             f"<td>{i}</td>"
             f"<td>{html.escape(trade.entry_signal_date)}</td>"
             f"<td>{html.escape(trade.entry_date)}</td>"
+            f"<td>{html.escape(trade_structure_label(getattr(trade, 'entry_structure', '')))}</td>"
             f"<td>{html.escape(trade.exit_signal_date)}</td>"
             f"<td>{html.escape(trade.exit_date)}</td>"
             f"<td>{trade.entry_price:.2f}</td>"
@@ -3116,6 +3237,7 @@ def render_backtest_trade_table(trades, equity_curve) -> str:
             f"<td>{len(rows) + 1}</td>"
             f"<td>{html.escape(str(open_position['entry_signal_date']))}</td>"
             f"<td>{html.escape(str(open_position['entry_date']))}</td>"
+            f"<td>{html.escape(trade_structure_label(open_position.get('entry_structure', '')))}</td>"
             "<td>未触发</td>"
             "<td>未平仓</td>"
             f"<td>{float(open_position['entry_price']):.2f}</td>"
@@ -3128,12 +3250,12 @@ def render_backtest_trade_table(trades, equity_curve) -> str:
             "</tr>"
         )
     if not rows:
-        rows.append('<tr><td colspan="12" class="empty">这个区间没有完成交易。</td></tr>')
+        rows.append('<tr><td colspan="13" class="empty">这个区间没有完成交易。</td></tr>')
     return f"""
   <h2>交易明细</h2>
   <div class="table-wrap">
     <table class="resizable-table">
-      <thead><tr><th>#</th><th>买入信号日</th><th>买入操作日</th><th>卖出信号日</th><th>卖出操作日</th><th>买入价</th><th>卖出价</th><th>股数</th><th>持仓K线</th><th>收益金额</th><th>收益率</th><th>卖出原因</th></tr></thead>
+      <thead><tr><th>#</th><th>买入信号日</th><th>买入操作日</th><th>买入结构</th><th>卖出信号日</th><th>卖出操作日</th><th>买入价</th><th>卖出价</th><th>股数</th><th>持仓K线</th><th>收益金额</th><th>收益率</th><th>卖出原因</th></tr></thead>
       <tbody>{"".join(rows)}</tbody>
     </table>
   </div>
@@ -3338,6 +3460,11 @@ def run_strategy(params: dict[str, list[str]]) -> str:
         require_ma5_rising=checkbox_field(params, "require_ma5_rising", True),
         require_5ma_gt_20ma=checkbox_field(params, "require_5ma_gt_20ma", True),
         below_20ma_stop_days=int(number_field(params, "below_20ma_stop_days", 2)),
+        weak_trend_exit_mode=field(params, "weak_trend_exit_mode", "hybrid"),
+        weak_ma5_reclaim_days=int(number_field(params, "weak_ma5_reclaim_days", 5)),
+        weak_ma20_reclaim_days=int(number_field(params, "weak_ma20_reclaim_days", 10)),
+        weak_volume_down_multiplier=number_field(params, "weak_volume_down_multiplier", 1.5),
+        weak_event_low_lookback=int(number_field(params, "weak_event_low_lookback", 27)),
     )
     summary = summarize(trades, equity_curve, initial_cash)
     benchmark = build_benchmark(benchmark_symbol, start, end, initial_cash)
@@ -3451,6 +3578,17 @@ def render_batch_form(params: dict[str, list[str]] | None = None) -> str:
   <label>跌破均线止损 %<input name="stop_5ma_pct" value="{value("stop_5ma_pct", "7.5")}"></label>
   <label>连续跌破20MA天数<input name="below_20ma_stop_days" value="{value("below_20ma_stop_days", "2")}"></label>
   <label>成本强制止损 %<input name="hard_stop_pct" value="{value("hard_stop_pct", "20")}"></label>
+  <label>弱趋势卖出
+    <select name="weak_trend_exit_mode">
+      <option value="hybrid"{selected(field(params, "weak_trend_exit_mode", "hybrid"), "hybrid")}>混合模式：仅5MA&lt;20MA买入启用</option>
+      <option value="off"{selected(field(params, "weak_trend_exit_mode", "hybrid"), "off")}>关闭：全部使用标准止损</option>
+      <option value="weak"{selected(field(params, "weak_trend_exit_mode", "hybrid"), "weak")}>弱趋势持仓使用修复止损</option>
+    </select>
+  </label>
+  <label>站回5MA期限<input name="weak_ma5_reclaim_days" value="{value("weak_ma5_reclaim_days", "5")}"></label>
+  <label>站回20MA期限<input name="weak_ma20_reclaim_days" value="{value("weak_ma20_reclaim_days", "10")}"></label>
+  <label>放量下跌倍数<input name="weak_volume_down_multiplier" value="{value("weak_volume_down_multiplier", "1.5")}"></label>
+  <label>事件低点窗口<input name="weak_event_low_lookback" value="{value("weak_event_low_lookback", "27")}"></label>
   <label>反抽距离 %<input name="reentry_pct" value="{value("reentry_pct", "4.5")}"></label>
   <button type="submit">运行批量回测</button>
 </form>
@@ -3520,6 +3658,11 @@ def run_batch_backtest(params: dict[str, list[str]]) -> str:
         "stop_5ma_pct": number_field(params, "stop_5ma_pct", 7.5),
         "hard_stop_pct": number_field(params, "hard_stop_pct", 20),
         "below_20ma_stop_days": int(number_field(params, "below_20ma_stop_days", 2)),
+        "weak_trend_exit_mode": field(params, "weak_trend_exit_mode", "hybrid"),
+        "weak_ma5_reclaim_days": int(number_field(params, "weak_ma5_reclaim_days", 5)),
+        "weak_ma20_reclaim_days": int(number_field(params, "weak_ma20_reclaim_days", 10)),
+        "weak_volume_down_multiplier": number_field(params, "weak_volume_down_multiplier", 1.5),
+        "weak_event_low_lookback": int(number_field(params, "weak_event_low_lookback", 27)),
     }
     symbol_data: dict[str, dict[str, object]] = {}
     errors: list[tuple[str, str]] = []
@@ -3547,6 +3690,11 @@ def run_batch_backtest(params: dict[str, list[str]]) -> str:
                 require_ma5_rising=checkbox_field(params, "require_ma5_rising", True),
                 require_5ma_gt_20ma=checkbox_field(params, "require_5ma_gt_20ma", True),
                 below_20ma_stop_days=int(number_field(params, "below_20ma_stop_days", 2)),
+                weak_trend_exit_mode=field(params, "weak_trend_exit_mode", "hybrid"),
+                weak_ma5_reclaim_days=int(number_field(params, "weak_ma5_reclaim_days", 5)),
+                weak_ma20_reclaim_days=int(number_field(params, "weak_ma20_reclaim_days", 10)),
+                weak_volume_down_multiplier=number_field(params, "weak_volume_down_multiplier", 1.5),
+                weak_event_low_lookback=int(number_field(params, "weak_event_low_lookback", 27)),
             )
             chart_summary = summarize(chart_trades, signal_curve, initial_cash)
             chart_path = REPORT_DIR / f"{safe_name(f'batch_{symbol}_{start}_{end}_{int(time.time())}')}.html"
@@ -4896,7 +5044,7 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
     if latest_scan and field(params, "_skip_latest_banner", "0") != "1":
         summary = latest_scan.get("summary", {})
         latest_html = f"""
-<section class="result latest-scan-card">
+<section class="result latest-scan-card scan-result-alert">
   <div class="toolbar">
     <div>
       <strong>当前信号日期已有扫描结果</strong>
@@ -6522,7 +6670,7 @@ def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
         min_control_amount_20d = number_field(params, "min_control_amount_20d_100m", 2.0) * 100_000_000
         vol_high_days = int(number_field(params, "vol_high_days", 2))
         vol_high_multiplier = number_field(params, "vol_high_multiplier", 1.0)
-        vol_multiplier = number_field(params, "vol_multiplier", 1.8)
+        vol_multiplier = number_field(params, "vol_multiplier", 1.45)
         massive_window = int(number_field(params, "massive_window", 7))
         massive_min_count = int(number_field(params, "massive_min_count", 1))
         reentry_pct = number_field(params, "reentry_pct", 4.5) / 100
