@@ -1514,6 +1514,23 @@ def make_report(
         for row in equity_curve
         if str(row.get("buy_action", ""))
     ]
+    holding_periods = [
+        {
+            "start": trade.entry_date,
+            "end": trade.exit_date,
+            "label": str(getattr(trade, "entry_structure", "") or "持仓"),
+        }
+        for trade in trades
+    ]
+    open_position = open_position_snapshot(equity_curve)
+    if open_position:
+        holding_periods.append(
+            {
+                "start": str(open_position["entry_date"]),
+                "end": str(open_position["mark_date"]),
+                "label": str(open_position.get("entry_structure", "") or "持仓中"),
+            }
+        )
 
     chart_payload = {
         "labels": labels,
@@ -1570,6 +1587,7 @@ def make_report(
         "exitText": exit_text,
         "holdBuyText": hold_buy_text if show_context_markers else [],
         "holdSellText": hold_sell_text if show_context_markers else [],
+        "holdingPeriods": holding_periods,
     }
 
     benchmark_html = ""
@@ -1804,7 +1822,10 @@ h2 {{ margin: 24px 0 10px; font-size: 17px; }}
 .chart-toolbar button {{ border: 1px solid #d6dbe3; background: rgba(255,255,255,0.92); color: #131722; border-radius: 4px; height: 28px; padding: 0 10px; font-weight: 700; cursor: pointer; }}
 .chart-toolbar span {{ color: #64748b; font-size: 12px; background: rgba(255,255,255,0.86); padding: 5px 8px; border-radius: 4px; }}
 .tv-chart {{ width: 100%; height: 100%; }}
-.price-chart-main {{ height: 640px; }}
+.price-chart-wrap {{ position: relative; height: 640px; }}
+.price-chart-main {{ position: relative; z-index: 1; height: 100%; }}
+.holding-bands {{ position: absolute; inset: 0; z-index: 2; pointer-events: none; }}
+.holding-band {{ position: absolute; top: 0; bottom: 0; border-radius: 0; background: rgba(8,153,129,0.08); border-left: 1px solid rgba(8,153,129,0.18); border-right: 1px solid rgba(8,153,129,0.18); }}
 .kdj-chart {{ height: 180px; margin-top: 12px; border-top: 1px solid #eef1f5; }}
 .chart-tooltip {{ position: absolute; z-index: 6; display: none; min-width: 220px; pointer-events: none; border: 1px solid #d6dbe3; background: rgba(255,255,255,0.96); border-radius: 6px; box-shadow: 0 8px 22px rgba(15,23,42,0.12); padding: 8px 10px; font-size: 12px; line-height: 1.6; }}
 .chart-tooltip strong {{ display: block; margin-bottom: 4px; font-size: 13px; }}
@@ -1829,7 +1850,7 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
 .pos {{ color: #089981; }}
 .neg {{ color: #f23645; }}
 .empty {{ text-align: center; color: #607080; }}
-@media (max-width: 900px) {{ main {{ padding: 12px; }} .metrics {{ grid-template-columns: repeat(2, 1fr); }} .tester {{ grid-template-columns: 1fr; }} .chart-shell {{ min-width: 0; height: 740px; }} .price-chart-main {{ height: 520px; }} .kdj-chart {{ height: 180px; }} .chart-toolbar span {{ display: none; }} }}
+@media (max-width: 900px) {{ main {{ padding: 12px; }} .metrics {{ grid-template-columns: repeat(2, 1fr); }} .tester {{ grid-template-columns: 1fr; }} .chart-shell {{ min-width: 0; height: 740px; }} .price-chart-wrap {{ height: 520px; }} .kdj-chart {{ height: 180px; }} .chart-toolbar span {{ display: none; }} }}
 </style>
 </head>
 <body>
@@ -1878,7 +1899,10 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
 <section class="panel">
   <div class="chart-shell">
     <div class="chart-toolbar"><button id="fit-chart">{labels['reset_view']}</button><span>{labels['chart_hint']}</span></div>
-    <div id="price-chart" class="tv-chart price-chart-main"></div>
+    <div class="price-chart-wrap">
+      <div id="price-chart" class="tv-chart price-chart-main"></div>
+      <div id="holding-bands" class="holding-bands"></div>
+    </div>
     <div id="kdj-chart" class="tv-chart kdj-chart"></div>
     <div id="price-tooltip" class="chart-tooltip"></div>
   </div>
@@ -1890,6 +1914,7 @@ const chartData = JSON.parse(document.getElementById('chart-data').textContent);
 const chartLabels = chartData.labels;
 const chartElement = document.getElementById('price-chart');
 const kdjElement = document.getElementById('kdj-chart');
+const holdingBands = document.getElementById('holding-bands');
 const tooltip = document.getElementById('price-tooltip');
 const priceChart = LightweightCharts.createChart(chartElement, {{
   layout: {{ background: {{ type: 'solid', color: '#ffffff' }}, textColor: '#131722', fontFamily: 'Inter, Microsoft YaHei UI, PingFang SC, Arial, sans-serif' }},
@@ -1948,6 +1973,25 @@ syncVisibleRange(kdjChart, priceChart);
 const markerData = [...chartData.entryMarkers, ...chartData.exitMarkers, ...chartData.holdBuyMarkers, ...chartData.holdSellMarkers].sort((a, b) => a.time.localeCompare(b.time));
 candleSeries.setMarkers(markerData);
 const rowByTime = new Map(chartData.rows.map(row => [row.time, row]));
+function renderHoldingBands() {{
+  if (!holdingBands) return;
+  holdingBands.innerHTML = '';
+  const periods = chartData.holdingPeriods || [];
+  const barSpacing = priceChart.timeScale().options().barSpacing || 8;
+  for (const period of periods) {{
+    const startX = priceChart.timeScale().timeToCoordinate(period.start);
+    const endX = priceChart.timeScale().timeToCoordinate(period.end);
+    if (startX === null || endX === null) continue;
+    const left = Math.min(startX, endX) - barSpacing * 0.5;
+    const width = Math.max(barSpacing, Math.abs(endX - startX) + barSpacing);
+    const band = document.createElement('div');
+    band.className = 'holding-band';
+    band.style.left = `${{Math.max(0, left)}}px`;
+    band.style.width = `${{width}}px`;
+    band.title = `${{period.label || '持仓'}}: ${{period.start}} -> ${{period.end}}`;
+    holdingBands.appendChild(band);
+  }}
+}}
 function formatNumber(value, digits = 2) {{ return value === null || value === undefined || Number.isNaN(value) ? '-' : Number(value).toLocaleString(undefined, {{ maximumFractionDigits: digits, minimumFractionDigits: digits }}); }}
 function formatVolume(value) {{ return value === null || value === undefined ? '-' : Number(value).toLocaleString(undefined, {{ maximumFractionDigits: 0 }}); }}
 priceChart.subscribeCrosshairMove(param => {{
@@ -1968,14 +2012,19 @@ priceChart.subscribeCrosshairMove(param => {{
 new ResizeObserver(entries => {{
   const rect = entries[0].contentRect;
   priceChart.applyOptions({{ width: Math.floor(rect.width), height: Math.floor(rect.height) }});
+  window.requestAnimationFrame(renderHoldingBands);
 }}).observe(chartElement);
 new ResizeObserver(entries => {{
   const rect = entries[0].contentRect;
   kdjChart.applyOptions({{ width: Math.floor(rect.width), height: Math.floor(rect.height) }});
 }}).observe(kdjElement);
-document.getElementById('fit-chart').addEventListener('click', () => {{ priceChart.timeScale().fitContent(); kdjChart.timeScale().fitContent(); }});
+priceChart.timeScale().subscribeVisibleLogicalRangeChange(() => {{
+  window.requestAnimationFrame(renderHoldingBands);
+}});
+document.getElementById('fit-chart').addEventListener('click', () => {{ priceChart.timeScale().fitContent(); kdjChart.timeScale().fitContent(); window.requestAnimationFrame(renderHoldingBands); }});
 priceChart.timeScale().fitContent();
 kdjChart.timeScale().fitContent();
+window.requestAnimationFrame(renderHoldingBands);
 
 const chartConfig = {{ responsive: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d', 'select2d'] }};
 

@@ -67,6 +67,12 @@ class AShareSignalSnapshot:
     limit_state: str = ""
     volume_context: str = ""
     execution_note: str = ""
+    ma5_rising: bool = False
+    ma5_gt_20: bool = False
+    ma20_gt_50: bool = False
+    big_red_b1: bool = False
+    above_ma5_3d: bool = False
+    secondary_tags: str = ""
 
 
 @dataclass
@@ -1369,6 +1375,29 @@ def latest_ashare_signal(
         and (ma20_gt_50_ok or not b1_require_20ma_gt_50ma)
     )
     signal_type = str(buy_stage[i] or "")
+    full_range = latest.high - latest.low
+    close_position = (latest.close - latest.low) / full_range if full_range > 0 else 0.5
+    body_pct = ((latest.open - latest.close) / previous_close * 100) if previous_close else 0.0
+    big_red_b1 = bool(
+        signal_type == "B1"
+        and latest.close < latest.open
+        and (body_pct >= 2.5 or (body_pct >= 1.8 and close_position <= 0.35))
+    )
+    above_ma5_3d = bool(
+        i >= 2
+        and all(
+            ma5_series[idx] is not None and bt_bars[idx].close > float(ma5_series[idx])
+            for idx in range(i - 2, i + 1)
+        )
+    )
+    secondary_tags = " / ".join(
+        tag
+        for tag, enabled in (
+            ("big_red_b1", big_red_b1),
+            ("above_ma5_3d", above_ma5_3d),
+        )
+        if enabled
+    )
     hard_candidate = bool(buy_signal[i] and amount_ok)
 
     base_start = max(0, i - 80)
@@ -1468,6 +1497,12 @@ def latest_ashare_signal(
         limit_state=limit_state,
         volume_context=volume_context,
         execution_note=execution_note,
+        ma5_rising=bool(ma5_rising_ok),
+        ma5_gt_20=bool(ma5_gt_20_ok),
+        ma20_gt_50=bool(ma20_gt_50_ok),
+        big_red_b1=big_red_b1,
+        above_ma5_3d=above_ma5_3d,
+        secondary_tags=secondary_tags,
     )
 
 def scan_ashare_candidates(

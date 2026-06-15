@@ -143,9 +143,13 @@ def get_job(job_id: str) -> dict[str, object] | None:
         return dict(job) if job else None
 
 
-def active_scan_job() -> tuple[str, dict[str, object]] | None:
+def active_scan_job(market: str | None = None) -> tuple[str, dict[str, object]] | None:
     with SCAN_JOBS_LOCK:
         for job_id, job in SCAN_JOBS.items():
+            if job.get("status") not in ACTIVE_SCAN_STATUSES:
+                continue
+            if market and job_market(job_id, job) != market:
+                continue
             if job.get("status") in ACTIVE_SCAN_STATUSES:
                 return job_id, dict(job)
     return None
@@ -1429,6 +1433,48 @@ window.initializeConditionPanels = function(root = document) {{
 
 window.initializeConditionPanels();
 
+window.initializeSecondaryFilters = function(root = document) {{
+  root.querySelectorAll("[data-secondary-filter-table]").forEach(table => {{
+    const wrap = table.closest(".table-wrap");
+    const panel = wrap?.previousElementSibling;
+    if (!panel || !panel.matches("[data-secondary-filter-panel]") || panel.dataset.secondaryReady === "1") return;
+    panel.dataset.secondaryReady = "1";
+    const rows = Array.from(table.querySelectorAll("[data-secondary-row]"));
+    const filters = Array.from(panel.querySelectorAll("[data-secondary-filter]"));
+    const totalEl = panel.querySelector("[data-secondary-total]");
+    const visibleEl = panel.querySelector("[data-secondary-visible]");
+    const countEls = Array.from(panel.querySelectorAll("[data-secondary-count]"));
+    const clearButton = panel.querySelector("[data-secondary-clear]");
+    function applyFilters() {{
+      const activeFilters = filters.filter(input => input.checked).map(input => input.getAttribute("data-secondary-filter") || "");
+      const counts = Object.fromEntries(countEls.map(el => [el.getAttribute("data-secondary-count") || "", 0]));
+      let visible = 0;
+      for (const row of rows) {{
+        for (const key of Object.keys(counts)) {{
+          if (row.getAttribute(`data-filter-${{key.replaceAll("_", "-")}}`) === "1") counts[key] += 1;
+        }}
+        const show = activeFilters.every(key => row.getAttribute(`data-filter-${{key.replaceAll("_", "-")}}`) === "1");
+        row.hidden = !show;
+        if (show) visible += 1;
+      }}
+      if (totalEl) totalEl.textContent = String(rows.length);
+      if (visibleEl) visibleEl.textContent = String(visible);
+      countEls.forEach(el => {{
+        const key = el.getAttribute("data-secondary-count") || "";
+        el.textContent = String(counts[key] || 0);
+      }});
+    }}
+    filters.forEach(input => input.addEventListener("change", applyFilters));
+    clearButton?.addEventListener("click", () => {{
+      filters.forEach(input => {{ input.checked = false; }});
+      applyFilters();
+    }});
+    applyFilters();
+  }});
+}};
+
+window.initializeSecondaryFilters();
+
 document.addEventListener("submit", event => {{
   const form = event.target;
   if (!(form instanceof HTMLFormElement) || form.dataset.asyncSubmit === "true") return;
@@ -1453,6 +1499,8 @@ def render_us_strategy_condition_panel(params: dict[str, list[str]], context: st
     require_ma5_rising = checkbox_field(params, "require_ma5_rising", True)
     b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", True)
     require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", True)
+    secondary_big_red_b1 = checkbox_field(params, "secondary_big_red_b1", False)
+    secondary_above_ma5_3d = checkbox_field(params, "secondary_above_ma5_3d", False)
 
     def toggle_tag(enabled: bool, label: str) -> str:
         cls = "condition-on" if enabled else "condition-off"
@@ -1464,6 +1512,8 @@ def render_us_strategy_condition_panel(params: dict[str, list[str]], context: st
             toggle_tag(require_ma5_rising, "5MA向上"),
             toggle_tag(b1_require_20ma_gt_50ma, "20MA&gt;50MA"),
             toggle_tag(require_5ma_gt_20ma, "5MA&gt;20MA"),
+            toggle_tag(secondary_big_red_b1, "大阴线B1"),
+            toggle_tag(secondary_above_ma5_3d, "连续三天&gt;MA5"),
         ]
     )
     b2_requirements = []
@@ -1557,6 +1607,8 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
     require_ma5_rising_checked = " checked" if checkbox_field(params, "require_ma5_rising", True) else ""
     b1_require_20ma_gt_50ma_checked = " checked" if checkbox_field(params, "b1_require_20ma_gt_50ma", True) else ""
     require_5ma_gt_20ma_checked = " checked" if checkbox_field(params, "require_5ma_gt_20ma", True) else ""
+    secondary_big_red_checked = " checked" if checkbox_field(params, "secondary_big_red_b1", False) else ""
+    secondary_above_ma5_checked = " checked" if checkbox_field(params, "secondary_above_ma5_3d", False) else ""
 
     def selected(current: str, expected: str) -> str:
         return " selected" if current == expected else ""
@@ -1621,6 +1673,10 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
     <label class="checkbox-label"><input type="checkbox" name="require_5ma_gt_20ma" value="1"{require_5ma_gt_20ma_checked}> MA5&gt;MA20</label>
     <input type="hidden" name="b1_require_20ma_gt_50ma" value="0">
     <label class="checkbox-label"><input type="checkbox" name="b1_require_20ma_gt_50ma" value="1"{b1_require_20ma_gt_50ma_checked}> 20MA&gt;50MA</label>
+    <input type="hidden" name="secondary_big_red_b1" value="0">
+    <label class="checkbox-label"><input type="checkbox" name="secondary_big_red_b1" value="1"{secondary_big_red_checked}> 大阴线B1</label>
+    <input type="hidden" name="secondary_above_ma5_3d" value="0">
+    <label class="checkbox-label"><input type="checkbox" name="secondary_above_ma5_3d" value="1"{secondary_above_ma5_checked}> 连续三天&gt;MA5</label>
   </div>
   <button type="submit">运行回测</button>
 </form>
@@ -2057,6 +2113,8 @@ def render_ashare_backtest_form(params: dict[str, list[str]] | None = None) -> s
     b1_require_20ma_gt_50ma_checked = " checked" if bool(defaults["b1_require_20ma_gt_50ma"]) else ""
     require_ma5_rising_checked = " checked" if bool(defaults["require_ma5_rising"]) else ""
     require_5ma_gt_20ma_checked = " checked" if bool(defaults["require_5ma_gt_20ma"]) else ""
+    secondary_big_red_checked = " checked" if checkbox_field(params, "secondary_big_red_b1", False) else ""
+    secondary_above_ma5_checked = " checked" if checkbox_field(params, "secondary_above_ma5_3d", False) else ""
 
     return f"""
 <section class="page-head">
@@ -2108,6 +2166,10 @@ def render_ashare_backtest_form(params: dict[str, list[str]] | None = None) -> s
     <label class="checkbox-label"><input type="checkbox" name="require_5ma_gt_20ma" value="1"{require_5ma_gt_20ma_checked}> MA5&gt;MA20</label>
     <input type="hidden" name="b1_require_20ma_gt_50ma" value="0">
     <label class="checkbox-label"><input type="checkbox" name="b1_require_20ma_gt_50ma" value="1"{b1_require_20ma_gt_50ma_checked}> 20MA&gt;50MA</label>
+    <input type="hidden" name="secondary_big_red_b1" value="0">
+    <label class="checkbox-label"><input type="checkbox" name="secondary_big_red_b1" value="1"{secondary_big_red_checked}> 大阴线B1</label>
+    <input type="hidden" name="secondary_above_ma5_3d" value="0">
+    <label class="checkbox-label"><input type="checkbox" name="secondary_above_ma5_3d" value="1"{secondary_above_ma5_checked}> 连续三天&gt;MA5</label>
   </div>
   <button type="submit">运行 A 股回测</button>
 </form>
@@ -2237,23 +2299,92 @@ def run_ashare_strategy(params: dict[str, list[str]]) -> str:
 """
 
 
+OPTIONAL_RESULT_FILTERS = [
+    ("require_ma5_rising", "MA5向上", "ma5_rising"),
+    ("require_5ma_gt_20ma", "MA5&gt;MA20", "ma5_gt_20"),
+    ("b1_require_20ma_gt_50ma", "20MA&gt;50MA", "ma20_gt_50"),
+    ("secondary_big_red_b1", "大阴线B1", "big_red_b1"),
+    ("secondary_above_ma5_3d", "连续三天&gt;MA5", "above_ma5_3d"),
+]
+
+
+def result_filter_attr(key: str) -> str:
+    return f"data-filter-{key.replace('_', '-')}"
+
+
+def result_filter_value(row: object, key: str) -> bool:
+    for filter_key, _, attr_name in OPTIONAL_RESULT_FILTERS:
+        if filter_key == key:
+            return bool(getattr(row, attr_name, False))
+    return False
+
+
+def render_optional_condition_tags(row: object) -> str:
+    tags = []
+    for key, label, _ in OPTIONAL_RESULT_FILTERS:
+        if result_filter_value(row, key):
+            cls = "condition-primary" if key == "secondary_big_red_b1" else "condition-on"
+            tags.append(f'<span class="condition-tag {cls}">{label}</span>')
+    return "".join(tags) if tags else '<span class="condition-tag condition-off">-</span>'
+
+
+def render_result_filter_panel(params: dict[str, list[str]], rows_count: int) -> str:
+    facts = "\n".join(
+        f'<span class="scan-fact"><span>{label}</span><b data-secondary-count="{html.escape(key)}">0</b></span>'
+        for key, label, _ in OPTIONAL_RESULT_FILTERS
+    )
+    controls = []
+    for key, label, _ in OPTIONAL_RESULT_FILTERS:
+        if checkbox_field(params, key, False):
+            controls.append(f'<span class="condition-tag condition-primary">{label} 已用于选股</span>')
+        else:
+            controls.append(f'<label class="check-inline"><input type="checkbox" data-secondary-filter="{html.escape(key)}"> {label}</label>')
+    return f"""
+<section class="result secondary-filter-panel" data-secondary-filter-panel>
+  <div class="toolbar">
+    <div>
+      <h2>结果内筛选</h2>
+      <p class="hint">只对当前选股结果继续过滤；已在开始选股时启用的条件会标为已用于选股，不再重复勾选。</p>
+    </div>
+    <div class="scan-facts">
+      <span class="scan-fact"><span>全部</span><b data-secondary-total>{rows_count}</b></span>
+      <span class="scan-fact"><span>当前</span><b data-secondary-visible>{rows_count}</b></span>
+      {facts}
+    </div>
+  </div>
+  <div class="checkbox-row">
+    {"".join(controls)}
+    <button type="button" class="secondary mini-action" data-secondary-clear>清空筛选</button>
+  </div>
+</section>
+"""
+
+
 def render_ashare_scan_result(
     candidates: list[AShareSignalSnapshot],
     errors: list[tuple[str, str]],
     scanned: int,
     universe_source: str,
     market_cap_filter_applied: bool,
+    params: dict[str, list[str]] | None = None,
 ) -> str:
+    params = params or {}
     rows = []
     rating_class = {"Strong": "score-Strong", "Medium": "score-Medium", "Watch": "score-Medium"}
+
     for row in candidates:
         cls = rating_class.get(row.candidate_rating, "score-Weak")
+        filter_attrs = " ".join(
+            f'{result_filter_attr(key)}="{1 if result_filter_value(row, key) else 0}"'
+            for key, _, _ in OPTIONAL_RESULT_FILTERS
+        )
         rows.append(
-            "<tr>"
+            f'<tr data-secondary-row {filter_attrs}>'
             f'<td><button type="button" class="symbol-button" data-ashare-candidate-symbol="{html.escape(row.symbol)}">{html.escape(row.symbol)}</button></td>'
             f"<td>{html.escape(row.name or '-')}</td>"
             f"<td><span class=\"score-badge {cls}\">{html.escape(row.candidate_rating)}</span></td>"
             f"<td>{html.escape(row.signal_type or '-')}</td>"
+            f'<td><span class="condition-tags">{render_optional_condition_tags(row)}</span></td>'
             f"<td>{row.volume_score:.1f}/5</td>"
             f"<td>{row.volume_ratio:.2f}</td>"
             f"<td>{row.avg_amount_20d / 100_000_000:.2f}亿</td>"
@@ -2269,8 +2400,8 @@ def render_ashare_scan_result(
     table_html = (
         """
   <div class="table-wrap">
-    <table class="sortable resizable-table">
-      <thead><tr><th>代码</th><th>名称</th><th>评级</th><th>B点</th><th>量能分</th><th>量比</th><th>20日均成交额</th><th>涨跌停</th><th>量能语境</th><th>收盘</th><th>交易日</th><th>峰值/基准</th><th>数据源</th><th>操作</th></tr></thead>
+    <table class="sortable resizable-table" data-secondary-filter-table>
+      <thead><tr><th>代码</th><th>名称</th><th>评级</th><th>B点</th><th>可选条件</th><th>量能分</th><th>量比</th><th>20日均成交额</th><th>涨跌停</th><th>量能语境</th><th>收盘</th><th>交易日</th><th>峰值/基准</th><th>数据源</th><th>操作</th></tr></thead>
       <tbody>
 """
         + "\n".join(rows)
@@ -2301,6 +2432,7 @@ def render_ashare_scan_result(
     <div class="stat-card"><div class="stat-label">市值过滤</div><div class="stat-value">{html.escape(cap_note)}</div></div>
     <div class="stat-card"><div class="stat-label">失败数量</div><div class="stat-value">{len(errors)}</div></div>
   </section>
+  {render_result_filter_panel(params, len(candidates))}
   {table_html}
   {error_note}
   <section id="ashare-candidate-detail" class="candidate-detail"></section>
@@ -2360,7 +2492,7 @@ def latest_ashare_scan_to_html() -> str:
     source = str(latest.get("source", "saved"))
     market_cap_filter_applied = bool(latest.get("market_cap_filter_applied", False))
     scanned = int((latest.get("summary", {}) or {}).get("scanned", len(candidates)))
-    result = render_ashare_scan_result(candidates, errors, scanned, source, market_cap_filter_applied)
+    result = render_ashare_scan_result(candidates, errors, scanned, source, market_cap_filter_applied, saved_params)
     return f"""
 {render_ashare_scanner(saved_params)}
 <section class="result">
@@ -2388,6 +2520,8 @@ def render_ashare_condition_panel(params: dict[str, list[str]], context: str = "
     require_ma5_rising = checkbox_field(params, "require_ma5_rising", False)
     require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", False)
     b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", False)
+    secondary_big_red_b1 = checkbox_field(params, "secondary_big_red_b1", False)
+    secondary_above_ma5_3d = checkbox_field(params, "secondary_above_ma5_3d", False)
 
     def toggle_tag(enabled: bool, label: str) -> str:
         cls = "condition-on" if enabled else "condition-off"
@@ -2399,6 +2533,8 @@ def render_ashare_condition_panel(params: dict[str, list[str]], context: str = "
             toggle_tag(require_ma5_rising, "MA5向上"),
             toggle_tag(require_5ma_gt_20ma, "MA5&gt;MA20"),
             toggle_tag(b1_require_20ma_gt_50ma, "20MA&gt;50MA"),
+            toggle_tag(secondary_big_red_b1, "大阴线B1"),
+            toggle_tag(secondary_above_ma5_3d, "连续三天&gt;MA5"),
         ]
     )
     b2_requirements = []
@@ -2490,6 +2626,8 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", False)
     require_ma5_rising = checkbox_field(params, "require_ma5_rising", False)
     require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", False)
+    secondary_big_red_b1 = checkbox_field(params, "secondary_big_red_b1", False)
+    secondary_above_ma5_3d = checkbox_field(params, "secondary_above_ma5_3d", False)
     selected_boards = normalize_ashare_boards(params.get("boards", []))
     embed = field(params, "embed", "0") == "1"
     show_latest_banner = field(params, "_skip_latest_banner", "0") != "1"
@@ -2522,6 +2660,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
                 scan.scanned,
                 scan.universe_source,
                 scan.market_cap_filter_applied,
+                params,
             )
         except Exception as exc:
             result_html = f'<div class="error">{html.escape(str(exc))}</div>'
@@ -2845,6 +2984,10 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
   <label class="checkbox-label"><input type="checkbox" name="require_5ma_gt_20ma" value="1"{" checked" if require_5ma_gt_20ma else ""}> 买入要求MA5&gt;MA20</label>
   <input type="hidden" name="b1_require_20ma_gt_50ma" value="0">
   <label class="checkbox-label"><input type="checkbox" name="b1_require_20ma_gt_50ma" value="1"{" checked" if b1_require_20ma_gt_50ma else ""}> B1要求20MA&gt;50MA</label>
+  <input type="hidden" name="secondary_big_red_b1" value="0">
+  <label class="checkbox-label"><input type="checkbox" name="secondary_big_red_b1" value="1"{" checked" if secondary_big_red_b1 else ""}> 大阴线B1</label>
+  <input type="hidden" name="secondary_above_ma5_3d" value="0">
+  <label class="checkbox-label"><input type="checkbox" name="secondary_above_ma5_3d" value="1"{" checked" if secondary_above_ma5_3d else ""}> 连续三天&gt;MA5</label>
   <label class="wide">板块范围<div class="checkbox-row">{board_controls}</div></label>
   <button type="submit">开始选股</button>
 </form>
@@ -2919,6 +3062,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
       result.innerHTML = job.result_html;
       if (window.initializeResizableTables) initializeResizableTables(result);
       if (window.initializeSortableTables) initializeSortableTables(result);
+      if (window.initializeSecondaryFilters) initializeSecondaryFilters(result);
     }}
     if (["done", "error", "stopped"].includes(job.status)) {{
       if (job.status === "error") result.innerHTML = `<div class="error">${{job.error || "扫描失败"}}</div>`;
@@ -2940,6 +3084,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
         result.innerHTML = job.result_html;
         if (window.initializeResizableTables) initializeResizableTables(result);
         if (window.initializeSortableTables) initializeSortableTables(result);
+        if (window.initializeSecondaryFilters) initializeSecondaryFilters(result);
       }}
       if (!["done", "error", "stopped"].includes(job.status)) poll();
     }} catch (error) {{}}
@@ -3222,7 +3367,6 @@ def render_backtest_trade_table(trades, equity_curve) -> str:
             f"<td>{html.escape(trade.exit_date)}</td>"
             f"<td>{trade.entry_price:.2f}</td>"
             f"<td>{trade.exit_price:.2f}</td>"
-            f"<td>{trade.shares}</td>"
             f"<td>{trade.bars_held}</td>"
             f"<td class=\"{pnl_class}\">{trade.pnl:.2f}</td>"
             f"<td class=\"{pct_class}\">{trade.pnl_pct:.2f}%</td>"
@@ -3242,7 +3386,6 @@ def render_backtest_trade_table(trades, equity_curve) -> str:
             "<td>未平仓</td>"
             f"<td>{float(open_position['entry_price']):.2f}</td>"
             f"<td>{float(open_position['mark_price']):.2f}</td>"
-            f"<td>{int(open_position['shares'])}</td>"
             f"<td>{int(open_position['bars_held'])}</td>"
             f"<td class=\"{pnl_class}\">{float(open_position['pnl']):.2f}</td>"
             f"<td class=\"{pnl_class}\">{float(open_position['pnl_pct']):.2f}%</td>"
@@ -3250,148 +3393,13 @@ def render_backtest_trade_table(trades, equity_curve) -> str:
             "</tr>"
         )
     if not rows:
-        rows.append('<tr><td colspan="13" class="empty">这个区间没有完成交易。</td></tr>')
+        rows.append('<tr><td colspan="12" class="empty">这个区间没有完成交易。</td></tr>')
     return f"""
   <h2>交易明细</h2>
   <div class="table-wrap">
     <table class="resizable-table">
-      <thead><tr><th>#</th><th>买入信号日</th><th>买入操作日</th><th>买入结构</th><th>卖出信号日</th><th>卖出操作日</th><th>买入价</th><th>卖出价</th><th>股数</th><th>持仓K线</th><th>收益金额</th><th>收益率</th><th>卖出原因</th></tr></thead>
+      <thead><tr><th>#</th><th>买入信号日</th><th>买入操作日</th><th>买入结构</th><th>卖出信号日</th><th>卖出操作日</th><th>买入价</th><th>卖出价</th><th>持仓K线</th><th>收益金额</th><th>收益率</th><th>卖出原因</th></tr></thead>
       <tbody>{"".join(rows)}</tbody>
-    </table>
-  </div>
-"""
-
-
-def render_backtest_signal_table(bars, trades, equity_curve) -> str:
-    def fmt_pct(value) -> str:
-        if value == "" or value is None:
-            return "-"
-        number = float(value)
-        cls = "pos" if number >= 0 else "neg"
-        return f'<span class="{cls}">{number:.2f}%</span>'
-
-    def fmt_num(value) -> str:
-        if value == "" or value is None:
-            return "-"
-        return f"{float(value):.2f}"
-
-    def score_badge(row) -> str:
-        rating = html.escape(str(row["signal_rating"]))
-        score = fmt_num(row["signal_score"])
-        return f'<span class="score-badge score-{rating}">{score}</span>'
-
-    def rating_badge(row) -> str:
-        rating = html.escape(str(row["signal_rating"]))
-        return f'<span class="rating rating-{rating}">{rating}</span>'
-
-    rows = []
-    for i, row in enumerate(build_signal_detail_rows(bars, trades, equity_curve), 1):
-        rows.append(
-            "<tr>"
-            f"<td>{i}</td>"
-            f"<td>{html.escape(str(row['date']))}</td>"
-            f"<td>{html.escape(str(row['signal_type']))}</td>"
-            f"<td>{html.escape(str(row['status']))}</td>"
-            f"<td>{'是' if int(row['executed']) else '否'}</td>"
-            f"<td>{html.escape(str(row.get('action', '-')))}</td>"
-            f"<td>{html.escape(str(row.get('action_reason', '-')))}</td>"
-            f"<td>{score_badge(row)}</td>"
-            f"<td>{rating_badge(row)}</td>"
-            f"<td>{fmt_num(row['volume_score'])}</td>"
-            f"<td>{fmt_num(row['trend_score'])}</td>"
-            f"<td>{fmt_num(row['candle_score'])}</td>"
-            f"<td>{fmt_num(row['space_score'])}</td>"
-            f"<td>{fmt_num(row['risk_score'])}</td>"
-            f"<td>{html.escape(str(row['score_notes']))}</td>"
-            f"<td>{fmt_num(row['close'])}</td>"
-            f"<td>{fmt_num(row['ma'])}</td>"
-            f"<td>{fmt_pct(row['dist_ma_pct'])}</td>"
-            f"<td>{fmt_num(row['volume_ratio'])}x</td>"
-            f"<td>{'是' if int(row['in_position']) else '否'}</td>"
-            f"<td>{fmt_pct(row['ret_1d'])}</td>"
-            f"<td>{fmt_pct(row['ret_3d'])}</td>"
-            f"<td>{fmt_pct(row['ret_5d'])}</td>"
-            f"<td>{fmt_pct(row['ret_10d'])}</td>"
-            f"<td>{fmt_pct(row['ret_20d'])}</td>"
-            f"<td>{fmt_pct(row['max_up_20d'])}</td>"
-            f"<td>{fmt_pct(row['max_down_20d'])}</td>"
-            f"<td>{html.escape(str(row['next_sell_signal'] or '-'))}</td>"
-            "</tr>"
-        )
-    if not rows:
-        rows.append('<tr><td colspan="26" class="empty">这个区间没有信号。</td></tr>')
-    return f"""
-  <h2>信号明细</h2>
-  <div class="table-wrap">
-    <table class="resizable-table">
-    <thead><tr><th>#</th><th>信号日</th><th>类型</th><th>状态</th><th>是否交易</th><th>执行动作</th><th>执行/跳过原因</th><th>技术分</th><th>评级</th><th>量能</th><th>趋势</th><th>K线</th><th>空间</th><th>风险</th><th>说明</th><th>收盘</th><th>MA</th><th>距MA</th><th>量比</th><th>持仓中</th><th>后1日</th><th>后3日</th><th>后5日</th><th>后10日</th><th>后20日</th><th>20日最大涨幅</th><th>20日最大回撤</th><th>20日内S点</th></tr></thead>
-      <tbody>{"".join(rows)}</tbody>
-    </table>
-  </div>
-"""
-
-
-def render_signal_rating_summary(bars, trades, equity_curve) -> str:
-    signal_rows = [
-        row for row in build_signal_detail_rows(bars, trades, equity_curve)
-        if str(row.get("signal_type", "")).startswith("B")
-    ]
-    groups: dict[str, list[dict[str, float | int | str]]] = {"Strong": [], "Medium": [], "Weak": []}
-    for row in signal_rows:
-        groups.setdefault(str(row.get("signal_rating", "Weak")), []).append(row)
-
-    def numeric(row: dict[str, float | int | str], key: str) -> float | None:
-        value = row.get(key, "")
-        if value == "" or value is None:
-            return None
-        return float(value)
-
-    def fmt_pct(value: float | None) -> str:
-        if value is None:
-            return "-"
-        cls = "pos" if value >= 0 else "neg"
-        return f'<span class="{cls}">{value:.2f}%</span>'
-
-    rows_html = []
-    for rating in ("Strong", "Medium", "Weak"):
-        rows = groups.get(rating, [])
-        if not rows:
-            rows_html.append(
-                f'<tr><td><span class="rating rating-{rating}">{rating}</span></td><td>0</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>'
-            )
-            continue
-        ret5 = [value for row in rows if (value := numeric(row, "ret_5d")) is not None]
-        ret10 = [value for row in rows if (value := numeric(row, "ret_10d")) is not None]
-        ret20 = [value for row in rows if (value := numeric(row, "ret_20d")) is not None]
-        max_up = [value for row in rows if (value := numeric(row, "max_up_20d")) is not None]
-        max_down = [value for row in rows if (value := numeric(row, "max_down_20d")) is not None]
-
-        def avg(values: list[float]) -> float | None:
-            return sum(values) / len(values) if values else None
-
-        win5 = sum(1 for value in ret5 if value > 0) / len(ret5) * 100 if ret5 else None
-        win10 = sum(1 for value in ret10 if value > 0) / len(ret10) * 100 if ret10 else None
-        win20 = sum(1 for value in ret20 if value > 0) / len(ret20) * 100 if ret20 else None
-        rows_html.append(
-            "<tr>"
-            f'<td><span class="rating rating-{rating}">{rating}</span></td>'
-            f"<td>{len(rows)}</td>"
-            f"<td>{fmt_pct(avg(ret5))}</td>"
-            f"<td>{fmt_pct(avg(ret10))}</td>"
-            f"<td>{fmt_pct(avg(ret20))}</td>"
-            f"<td>{fmt_pct(win5)}</td>"
-            f"<td>{fmt_pct(win10)}</td>"
-            f"<td>{fmt_pct(win20)}</td>"
-            f"<td>{fmt_pct(avg(max_up))} / {fmt_pct(avg(max_down))}</td>"
-            "</tr>"
-        )
-
-    return f"""
-  <h2>技术分后续表现</h2>
-  <div class="table-wrap compact-table">
-    <table class="resizable-table">
-      <thead><tr><th>评级</th><th>B点数</th><th>平均后5日</th><th>平均后10日</th><th>平均后20日</th><th>5日胜率</th><th>10日胜率</th><th>20日胜率</th><th>20日平均最大涨幅 / 回撤</th></tr></thead>
-      <tbody>{"".join(rows_html)}</tbody>
     </table>
   </div>
 """
@@ -3508,8 +3516,6 @@ def run_strategy(params: dict[str, list[str]]) -> str:
   </p>
   {render_strategy_compare(summary, buy_hold, benchmark)}
   {render_backtest_trade_table(trades, equity_curve)}
-  {render_signal_rating_summary(bars, trades, equity_curve)}
-  {render_backtest_signal_table(bars, trades, equity_curve)}
   <iframe src="{report_url}" title="Backtest report"></iframe>
 </section>
 """
@@ -5081,6 +5087,8 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
     require_ma5_rising_checked = " checked" if checkbox_field(params, "require_ma5_rising", True) else ""
     b1_require_20ma_gt_50ma_checked = " checked" if checkbox_field(params, "b1_require_20ma_gt_50ma", True) else ""
     require_5ma_gt_20ma_checked = " checked" if checkbox_field(params, "require_5ma_gt_20ma", True) else ""
+    secondary_big_red_checked = " checked" if checkbox_field(params, "secondary_big_red_b1", False) else ""
+    secondary_above_ma5_checked = " checked" if checkbox_field(params, "secondary_above_ma5_3d", False) else ""
     earnings_filter = field(params, "earnings_filter", "show")
     default_symbols = "ASTS,NVDA,TSLA,AAPL,MSFT,QQQ"
     return f"""
@@ -5155,6 +5163,10 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
     <label class="checkbox-label"><input type="checkbox" name="require_5ma_gt_20ma" value="1"{require_5ma_gt_20ma_checked}> MA5&gt;MA20</label>
     <input type="hidden" name="b1_require_20ma_gt_50ma" value="0">
     <label class="checkbox-label"><input type="checkbox" name="b1_require_20ma_gt_50ma" value="1"{b1_require_20ma_gt_50ma_checked}> 20MA&gt;50MA</label>
+    <input type="hidden" name="secondary_big_red_b1" value="0">
+    <label class="checkbox-label"><input type="checkbox" name="secondary_big_red_b1" value="1"{secondary_big_red_checked}> 大阴线B1</label>
+    <input type="hidden" name="secondary_above_ma5_3d" value="0">
+    <label class="checkbox-label"><input type="checkbox" name="secondary_above_ma5_3d" value="1"{secondary_above_ma5_checked}> 连续三天&gt;MA5</label>
   </div>
   <button type="submit">开始选股</button>
 </form>
@@ -5266,6 +5278,7 @@ async function pollScan(jobId) {{
       scanResult.innerHTML = job.result_html;
       initializeResizableTables(scanResult);
       initializeSortableTables(scanResult);
+      window.initializeSecondaryFilters?.(scanResult);
     }}
     if (job.status === "done" || job.status === "stopped") {{
       progressBar.style.width = "100%";
@@ -5296,6 +5309,7 @@ async function restoreActiveScan() {{
     if (scanResult.innerHTML) {{
       initializeResizableTables(scanResult);
       initializeSortableTables(scanResult);
+      window.initializeSecondaryFilters?.(scanResult);
     }}
     updateProgress(data);
     if (!["done", "error", "stopped"].includes(data.status)) {{
@@ -5424,11 +5438,14 @@ scannerForm.addEventListener("submit", async event => {{
 }});
 initializeResizableTables(document);
 initializeSortableTables(document);
+window.initializeSecondaryFilters?.(document);
 restoreActiveScan();
 </script>
 """
 
-def render_candidate_table(rows: list[SignalResult]) -> str:
+def render_candidate_table(rows: list[SignalResult], params: dict[str, list[str]] | None = None) -> str:
+    params = params or {}
+
     def catalyst_secondary_url(row: SignalResult) -> str:
         stored = row.catalyst_google_url or ""
         if stored and "google." not in stored:
@@ -5470,10 +5487,15 @@ def render_candidate_table(rows: list[SignalResult]) -> str:
     rendered_rows = []
     for r in rows:
         divergence = best_divergence_for_symbol(r.symbol, r.signal_date)
+        filter_attrs = " ".join(
+            f'{result_filter_attr(key)}="{1 if result_filter_value(r, key) else 0}"'
+            for key, _, _ in OPTIONAL_RESULT_FILTERS
+        )
         rendered_rows.append(
-            f'<tr><td><button type="button" class="symbol-button" data-candidate-symbol="{html.escape(r.symbol)}">{html.escape(r.symbol)}</button></td><td>{html.escape(r.company_name or "-")}</td>'
+            f'<tr data-secondary-row {filter_attrs}><td><button type="button" class="symbol-button" data-candidate-symbol="{html.escape(r.symbol)}">{html.escape(r.symbol)}</button></td><td>{html.escape(r.company_name or "-")}</td>'
             f"<td>{r.market_cap / 1_000_000_000:.2f}</td>"
             f"<td>{html.escape(candidate_summary(r))}</td>"
+            f'<td><span class="condition-tags">{render_optional_condition_tags(r)}</span></td>'
             f"<td>{render_divergence_chip(divergence)}</td>"
             f"<td>{(divergence or {}).get('score', 0)}/5</td>"
             f"<td>{html.escape(divergence_note(divergence))}</td>"
@@ -5493,11 +5515,12 @@ def render_candidate_table(rows: list[SignalResult]) -> str:
         )
     table_rows = "\n".join(rendered_rows)
     if not table_rows:
-        table_rows = '<tr><td colspan="26" class="empty">No visible candidates.</td></tr>'
+        table_rows = '<tr><td colspan="27" class="empty">No visible candidates.</td></tr>'
     return f"""
+{render_result_filter_panel(params, len(rows))}
 <div class="table-wrap">
-<table class="resizable-table">
-  <thead><tr><th>Symbol</th><th>Company</th><th>Mkt Cap $B</th><th>Summary</th><th>Divergence</th><th>D Score</th><th>D Event</th><th>Tech</th><th>Total</th><th>Rating</th><th>Watch</th><th>Next Earnings</th><th>Catalyst</th><th>Sector Score</th><th>Space</th><th>Candle</th><th>Sector</th><th>Industry</th><th>Signal Date</th><th>Signal</th><th>Close</th><th>MA</th><th>Dist</th><th>Vol Ratio</th><th>Massive 7D</th><th>20D $Vol</th></tr></thead>
+<table class="resizable-table" data-secondary-filter-table>
+  <thead><tr><th>Symbol</th><th>Company</th><th>Mkt Cap $B</th><th>Summary</th><th>可选条件</th><th>Divergence</th><th>D Score</th><th>D Event</th><th>Tech</th><th>Total</th><th>Rating</th><th>Watch</th><th>Next Earnings</th><th>Catalyst</th><th>Sector Score</th><th>Space</th><th>Candle</th><th>Sector</th><th>Industry</th><th>Signal Date</th><th>Signal</th><th>Close</th><th>MA</th><th>Dist</th><th>Vol Ratio</th><th>Massive 7D</th><th>20D $Vol</th></tr></thead>
   <tbody>{table_rows}</tbody>
 </table>
 </div>
@@ -5577,7 +5600,7 @@ def latest_scan_to_html() -> str:
     </div>
   </div>
   {render_scan_summary(source, int(summary.get("scanned", 0)), int(summary.get("technical_candidates", 0)), int(summary.get("visible_candidates", len(candidates))), int(summary.get("failed", len(errors))), end)}
-  {render_candidate_table(candidates)}
+  {render_candidate_table(candidates, saved_params)}
   {render_failure_table(errors)}
 </section>
 <script>
@@ -5704,7 +5727,7 @@ def run_scanner(params: dict[str, list[str]]) -> str:
   </div>
   {render_scan_summary(source, len(symbols), len(rows), len(display_rows), len(errors), end)}
   {error_note}
-  {render_candidate_table(display_rows)}
+  {render_candidate_table(display_rows, params)}
   {render_failure_table(errors)}
 </section>
 """
@@ -6503,7 +6526,7 @@ def finish_scan_result(
   </div>
   {render_scan_summary(source, len(symbols), len(rows), len(display_rows), len(errors), end)}
   {error_note}
-  {render_candidate_table(display_rows)}
+  {render_candidate_table(display_rows, params)}
   {render_failure_table(errors)}
 </section>
 """
@@ -6792,7 +6815,7 @@ def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
             rating_order = {"Strong": 0, "Medium": 1, "Watch": 2, "None": 3}
             candidates.sort(key=lambda row: (rating_order.get(row.candidate_rating, 9), -row.volume_score, row.j_value))
             save_latest_ashare_scan(candidates, errors, scanned, universe_source, market_cap_filter_applied, params)
-            result_html = render_ashare_scan_result(candidates, errors, scanned, universe_source, market_cap_filter_applied)
+            result_html = render_ashare_scan_result(candidates, errors, scanned, universe_source, market_cap_filter_applied, params)
             set_job(
                 job_id,
                 status="stopped",
@@ -6811,7 +6834,7 @@ def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
         rating_order = {"Strong": 0, "Medium": 1, "Watch": 2, "None": 3}
         candidates.sort(key=lambda row: (rating_order.get(row.candidate_rating, 9), -row.volume_score, row.j_value))
         save_latest_ashare_scan(candidates, errors, scanned, universe_source, market_cap_filter_applied, params)
-        result_html = render_ashare_scan_result(candidates, errors, scanned, universe_source, market_cap_filter_applied)
+        result_html = render_ashare_scan_result(candidates, errors, scanned, universe_source, market_cap_filter_applied, params)
         set_job(
             job_id,
             status="done",
@@ -7003,13 +7026,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_bytes(page_shell(render_watchlist_page({"symbol": [symbol]}), "watchlist", "us"))
 
     def start_ashare_scan_job(self, params: dict[str, list[str]]) -> None:
-        active = active_scan_job()
+        active = active_scan_job("cn")
         if active:
             job_id, _ = active
             self.send_json(
                 {
                     "status": "error",
-                    "error": f"已有扫描任务正在运行：{job_id}。请等待完成后再启动 A 股扫描。",
+                    "error": f"已有 A 股扫描任务正在运行：{job_id}。请等待完成，或先终止当前 A 股任务。",
                 },
                 status=409,
             )
@@ -7097,11 +7120,11 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self.send_json({"status": "error", "error": str(exc)}, status=400)
             return
-        active = active_scan_job()
+        active = active_scan_job("us")
         if active:
             active_id, active_job = active
             payload = normalize_job_payload(active_id, active_job)
-            payload.update({"status": "busy", "error": "已有扫描任务正在运行，请等待完成，或先暂停/终止当前任务。", "active_job_id": active_id})
+            payload.update({"status": "busy", "error": "已有美股扫描任务正在运行，请等待完成，或先暂停/终止当前美股任务。", "active_job_id": active_id})
             self.send_json(payload, status=409)
             return
         job_id = uuid.uuid4().hex

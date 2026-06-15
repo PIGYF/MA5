@@ -69,6 +69,12 @@ class SignalResult:
     next_earnings_date: str = ""
     earnings_days: int = 9999
     earnings_status: str = ""
+    ma5_rising: bool = False
+    ma5_gt_20: bool = False
+    ma20_gt_50: bool = False
+    big_red_b1: bool = False
+    above_ma5_3d: bool = False
+    secondary_tags: str = ""
 
 
 def unique_symbols(symbols: list[str]) -> list[str]:
@@ -292,6 +298,22 @@ def latest_b_signal_with_reason(
     else:
         signal_type = "B"
     strength = technical_strength_for_latest_signal(bars, ma, vol_ma, "B")
+    previous_close = bars[i - 1].close if i > 0 else bar.close
+    body_pct = (bar.open - bar.close) / previous_close * 100 if previous_close else 0.0
+    big_red_b1 = (
+        signal_type == "B1_trend_confirm"
+        and bar.close < bar.open
+        and (body_pct >= 2.5 or (body_pct >= 1.8 and close_position <= 0.35))
+    )
+    above_ma5_3d = i >= 2 and all(ma[j] is not None and bars[j].close > ma[j] for j in range(i - 2, i + 1))
+    secondary_tags = " / ".join(
+        tag
+        for tag, enabled in (
+            ("big_red_b1", big_red_b1),
+            ("above_ma5_3d", above_ma5_3d),
+        )
+        if enabled
+    )
 
     return SignalResult(
         symbol=symbol,
@@ -308,6 +330,12 @@ def latest_b_signal_with_reason(
         technical_score=float(strength["signal_score"]),
         technical_rating=str(strength["signal_rating"]),
         technical_notes=str(strength["score_notes"]),
+        ma5_rising=bool(ma_is_rising),
+        ma5_gt_20=bool(ma5_gt_20),
+        ma20_gt_50=bool(ma20_gt_50),
+        big_red_b1=big_red_b1,
+        above_ma5_3d=above_ma5_3d,
+        secondary_tags=secondary_tags,
     ), "符合B点"
 
 
