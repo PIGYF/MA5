@@ -30,6 +30,7 @@ from backtest import (
     read_price_cache,
     build_ratchet_inputs,
     rolling_sma,
+    slice_bars,
     summarize,
     trade_structure_label,
     write_equity,
