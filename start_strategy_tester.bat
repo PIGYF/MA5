@@ -2,7 +2,7 @@
 setlocal
 
 set "APP_DIR=%~dp0"
-set "PYTHON_EXE=C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
+set "PYTHON_EXE=C:\Users\Administrator\AppData\Local\Programs\Python\Python311\python.exe"
 
 cd /d "%APP_DIR%"
 
@@ -13,15 +13,16 @@ if not exist "%PYTHON_EXE%" (
   exit /b 1
 )
 
-"%PYTHON_EXE%" -c "import yfinance" >nul 2>nul
+echo Using Python runtime:
+echo %PYTHON_EXE%
+
+echo Checking required Python packages...
+"%PYTHON_EXE%" -c "import yfinance, efinance, pytdx" >nul 2>nul
 if errorlevel 1 (
-  echo Installing missing dependency: yfinance
-  "%PYTHON_EXE%" -m pip install yfinance -U
-  if errorlevel 1 (
-    echo Failed to install yfinance. Check your network/VPN and try again.
-    pause
-    exit /b 1
-  )
+  echo Missing dependency detected. Run:
+  echo %PYTHON_EXE% -m pip install yfinance efinance pytdx -U
+  pause
+  exit /b 1
 )
 
 echo Stopping any old server on port 8765...

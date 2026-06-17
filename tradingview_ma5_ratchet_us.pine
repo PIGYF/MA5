@@ -1,0 +1,122 @@
+//@version=6
+indicator("MA5 Ratchet US", overlay=true, max_labels_count=500)
+
+maLength = input.int(5, "MA length", minval=1)
+volLength = input.int(20, "Volume MA length", minval=1)
+volMultiplier = input.float(1.45, "Massive volume multiplier", minval=0.1, step=0.05)
+volHighDays = input.int(3, "Consecutive high-volume days", minval=1)
+volHighMultiplier = input.float(1.0, "High-volume multiplier", minval=0.1, step=0.05)
+massiveWindow = input.int(7, "Massive volume window", minval=1)
+massiveMinCount = input.int(1, "Minimum massive-volume count", minval=1)
+reentryPct = input.float(4.5, "B2 distance to MA5 %", minval=0.1, step=0.1)
+requireMa5Rising = input.bool(true, "Require MA5 rising")
+requireMa5Gt20 = input.bool(true, "Require MA5 > MA20")
+requireMa20Gt50 = input.bool(true, "B1 require MA20 > MA50")
+stopMa5Pct = input.float(7.5, "MA5 downside stop %", minval=0.1, step=0.1)
+below20StopDays = input.int(2, "Consecutive closes below MA20", minval=0)
+hardStopPct = input.float(20.0, "Cost stop %", minval=0.1, step=0.1)
+showHoldingBg = input.bool(true, "Show buy/sell holding background", group="Display")
+showSignalMarkers = input.bool(false, "Show B1/B2/S markers", group="Display")
+showIntervalLabels = input.bool(true, "Show interval % label", group="Display")
+showBarColor = input.bool(false, "Color signal candles", group="Display")
+showMa50 = input.bool(false, "Show MA50", group="Display")
+showStopLines = input.bool(false, "Show stop lines", group="Display")
+
+ma5 = ta.sma(close, maLength)
+ma20 = ta.sma(close, 20)
+ma50 = ta.sma(close, 50)
+volMa = ta.sma(volume, volLength)
+
+ma5Rising = not na(ma5[1]) and ma5 > ma5[1]
+priceAboveMa5 = not na(ma5) and close > ma5
+ma5Gt20 = not na(ma20) and ma5 > ma20
+ma20Gt50 = not na(ma50) and ma20 > ma50
+
+volHigh = not na(volMa) and volume > volMa * volHighMultiplier
+volHighCount = ta.sma(volHigh ? 1.0 : 0.0, volHighDays) * volHighDays
+volDaysHigh = volHighCount == volHighDays
+massiveVol = not na(volMa) and volume >= volMa * volMultiplier
+massiveCount = ta.sma(massiveVol ? 1.0 : 0.0, massiveWindow) * massiveWindow
+hasMassiveVol = massiveCount >= massiveMinCount
+
+recentHigh60 = ta.highest(close, 60)
+ma50Rising = not na(ma50[5]) and ma50 > ma50[5]
+aboveMa50 = not na(ma50) and close > ma50
+nearStageHigh = recentHigh60 > 0 and close >= recentHigh60 * 0.80
+bullQualityOk = aboveMa50 and ma50Rising and nearStageHigh
+
+fullRange = high - low
+body = math.abs(close - open)
+upperShadow = high - math.max(open, close)
+upperShadowOk = upperShadow <= math.max(body * 0.75, fullRange * 0.20)
+distToMa5 = not na(ma5) and ma5 != 0 ? math.abs(close - ma5) / ma5 : na
+
+b1 = priceAboveMa5 and volDaysHigh and hasMassiveVol and (ma5Rising or not requireMa5Rising) and (ma20Gt50 or not requireMa20Gt50) and (ma5Gt20 or not requireMa5Gt20)
+
+var bool trendConfirmed = false
+wasTrendConfirmed = trendConfirmed
+
+if b1
+    trendConfirmed := true
+
+b2 = wasTrendConfirmed and massiveVol and priceAboveMa5 and not na(distToMa5) and distToMa5 <= reentryPct / 100 and close > open and (ma5Rising or not requireMa5Rising) and (ma5Gt20 or not requireMa5Gt20) and bullQualityOk and upperShadowOk
+
+failedTrend = not na(ma5) and close < ma5 * 0.925
+if failedTrend
+    trendConfirmed := false
+
+buySignal = b1 or b2
+
+var bool inTrade = false
+var float entryPrice = na
+var int entryBar = na
+var string entryStage = ""
+
+entrySignal = buySignal and not inTrade
+if entrySignal
+    inTrade := true
+    entryPrice := close
+    entryBar := bar_index
+    entryStage := b2 ? "B2" : "B1"
+
+var int below20Days = 0
+
+if inTrade
+    below20Days := not na(ma20) and close < ma20 ? below20Days + 1 : 0
+else
+    below20Days := 0
+
+defenseStop = inTrade and not na(ma5) and close < ma5 * (1 - stopMa5Pct / 100)
+trendStop = inTrade and below20StopDays > 0 and below20Days >= below20StopDays
+costStop = inTrade and not na(entryPrice) and close < entryPrice * (1 - hardStopPct / 100)
+sellSignal = defenseStop or trendStop or costStop
+
+if sellSignal
+    intervalPct = not na(entryPrice) and entryPrice != 0 ? (close / entryPrice - 1) * 100 : na
+    if showIntervalLabels and not na(intervalPct)
+        labelColor = intervalPct >= 0 ? color.new(color.teal, 0) : color.new(color.red, 0)
+        labelText = entryStage + " -> S\n" + str.tostring(intervalPct, "#.##") + "%"
+        label.new(bar_index, high, labelText, style=label.style_label_down, color=labelColor, textcolor=color.white, size=size.small)
+    inTrade := false
+    entryPrice := na
+    entryBar := na
+    entryStage := ""
+
+bgColor = sellSignal ? color.new(color.red, 84) : inTrade ? color.new(color.teal, 90) : na
+bgcolor(showHoldingBg ? bgColor : na, title="Holding background")
+
+plot(ma5, "MA5", color=color.new(color.blue, 0), linewidth=2)
+plot(ma20, "MA20", color=color.new(color.orange, 0))
+plot(showMa50 ? ma50 : na, "MA50", color=color.new(color.gray, 20))
+plot(showStopLines and inTrade and not na(entryPrice) ? entryPrice * (1 - hardStopPct / 100) : na, "Cost stop", color=color.new(color.red, 0), style=plot.style_linebr)
+plot(showStopLines ? ma5 * (1 - stopMa5Pct / 100) : na, "MA5 stop line", color=color.new(color.red, 65))
+
+plotshape(showSignalMarkers and entrySignal and b1, title="B1", text="B1", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 0), textcolor=color.black, size=size.tiny)
+plotshape(showSignalMarkers and entrySignal and b2, title="B2", text="B2", style=shape.circle, location=location.belowbar, color=color.new(color.blue, 0), textcolor=color.white, size=size.tiny)
+plotshape(showSignalMarkers and sellSignal, title="Sell", text="S", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+
+barcolor(showBarColor ? (b1 ? color.new(color.lime, 70) : b2 ? color.new(color.blue, 70) : sellSignal ? color.new(color.red, 70) : na) : na)
+
+alertcondition(b1, "MA5 Ratchet B1", "B1 trend-confirm signal")
+alertcondition(b2, "MA5 Ratchet B2", "B2 reentry/add signal")
+alertcondition(sellSignal, "MA5 Ratchet Sell", "Sell/stop signal")
