@@ -1114,7 +1114,7 @@ def clear_cache_area(area: str) -> str:
     if area == "ashare":
         deleted = delete_files([DATA_DIR / "ashare" / "universe_cache.json", DATA_DIR / "ashare" / "sector_map.json"])
         deleted += delete_directory_files(ASHARE_PRICE_CACHE_DIR)
-        return f"已清理 A 股股票池/板块/K线缓存 {deleted} 个。"
+        return f"已清理 A 股股票池/行业/K线缓存 {deleted} 个。"
     if area == "latest":
         us_deleted = delete_latest_scan()
         cn_deleted = 1 if delete_latest_ashare_scan() else 0
@@ -1289,6 +1289,10 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .watchlist-chart {{ width: 100%; height: 100%; }}
 .watchlist-price-chart {{ height: 640px; }}
 .watchlist-kdj-chart {{ height: 200px; margin-top: 12px; border-top: 1px solid #eef1f5; }}
+.price-chart-wrap {{ position: relative; height: 560px; }}
+.price-chart-wrap .watchlist-chart {{ height: 100%; }}
+.holding-bands {{ position: absolute; inset: 0; z-index: 2; pointer-events: none; overflow: hidden; }}
+.holding-band {{ position: absolute; top: 0; bottom: 0; background: rgba(8, 153, 129, .08); border-left: 1px solid rgba(8, 153, 129, .32); border-right: 1px solid rgba(8, 153, 129, .14); }}
 .watchlist-list-wrap {{ max-height: 760px; overflow: auto; }}
 .watch-row-button {{ width: 100%; justify-content: flex-start; border: 0; background: transparent; color: #131722; padding: 0; min-height: 0; text-align: left; }}
 .watch-row-button:hover {{ background: transparent; color: #2962ff; }}
@@ -1977,7 +1981,7 @@ def render_ashare_dashboard() -> str:
   <div class="dashboard-panel">
     <h2>下一步</h2>
     <div class="scan-facts">
-      <span class="scan-fact"><span>无结果</span>先跑全市场或板块扫描</span>
+      <span class="scan-fact"><span>无结果</span>先跑全市场扫描</span>
       <span class="scan-fact"><span>有候选</span>看量能分、涨跌停状态和图形位置</span>
       <span class="scan-fact"><span>加自选</span>只保留明天值得盯盘的票</span>
       <span class="scan-fact"><span>要验证</span>用 A 股回测检查涨跌停和高开过滤</span>
@@ -2340,6 +2344,52 @@ def render_optional_condition_tags(row: object) -> str:
     return "".join(tags) if tags else '<span class="condition-tag condition-off">-</span>'
 
 
+def render_us_candidate_reason_tags(row: SignalResult) -> str:
+    signal_label = {
+        "B1_trend_confirm": "B1",
+        "B2_reentry": "B2",
+    }.get(row.signal_type, row.signal_type or "B")
+    tags = [
+        ("condition-primary", signal_label),
+        ("condition-on", f"三日放量" if row.signal_type else "放量"),
+        ("condition-on", f"巨量{row.massive_count_7d}次"),
+        ("condition-on", f"距MA5 {row.dist_to_ma_pct:.1f}%"),
+    ]
+    if row.ma5_rising:
+        tags.append(("condition-on", "MA5向上"))
+    if row.ma5_gt_20:
+        tags.append(("condition-on", "MA5>MA20"))
+    if row.ma20_gt_50:
+        tags.append(("condition-on", "20MA>50MA"))
+    if row.big_red_b1:
+        tags.append(("condition-primary", "大阴线B1"))
+    if row.above_ma5_3d:
+        tags.append(("condition-on", "连续3天>MA5"))
+    return "".join(f'<span class="condition-tag {cls}">{html.escape(label)}</span>' for cls, label in tags)
+
+
+def render_ashare_candidate_reason_tags(row: AShareSignalSnapshot) -> str:
+    tags = [
+        ("condition-primary", row.signal_type or "B"),
+        ("condition-on", f"巨量{row.volume_ratio:.2f}x"),
+        ("condition-on", f"量能{row.volume_score:.1f}/5"),
+        ("condition-on", f"20日额{row.avg_amount_20d / 100_000_000:.1f}亿"),
+    ]
+    if row.ma5_rising:
+        tags.append(("condition-on", "MA5向上"))
+    if row.ma5_gt_20:
+        tags.append(("condition-on", "MA5>MA20"))
+    if row.ma20_gt_50:
+        tags.append(("condition-on", "20MA>50MA"))
+    if row.big_red_b1:
+        tags.append(("condition-primary", "大阴线B1"))
+    if row.above_ma5_3d:
+        tags.append(("condition-on", "连续3天>MA5"))
+    if row.limit_state and row.limit_state != "正常":
+        tags.append(("condition-off", row.limit_state))
+    return "".join(f'<span class="condition-tag {cls}">{html.escape(label)}</span>' for cls, label in tags)
+
+
 def render_result_filter_panel(params: dict[str, list[str]], rows_count: int) -> str:
     facts = "\n".join(
         f'<span class="scan-fact"><span>{label}</span><b data-secondary-count="{html.escape(key)}">0</b></span>'
@@ -2392,28 +2442,24 @@ def render_ashare_scan_result(
         )
         rows.append(
             f'<tr data-secondary-row {filter_attrs}>'
+            f'<td><a class="btn btn-secondary btn-small" href="/cn/watchlist/add?symbol={quote(row.symbol)}&name={quote(row.name or "")}">加入自选</a></td>'
             f'<td><button type="button" class="symbol-button" data-ashare-candidate-symbol="{html.escape(row.symbol)}">{html.escape(row.symbol)}</button></td>'
             f"<td>{html.escape(row.name or '-')}</td>"
-            f"<td><span class=\"score-badge {cls}\">{html.escape(row.candidate_rating)}</span></td>"
             f"<td>{html.escape(row.signal_type or '-')}</td>"
-            f'<td><span class="condition-tags">{render_optional_condition_tags(row)}</span></td>'
-            f"<td>{row.volume_score:.1f}/5</td>"
-            f"<td>{row.volume_ratio:.2f}</td>"
-            f"<td>{row.avg_amount_20d / 100_000_000:.2f}亿</td>"
-            f"<td>{html.escape(row.limit_state or '正常')}</td>"
-            f"<td>{html.escape(row.volume_context or '-')}</td>"
+            f'<td><span class="condition-tags" style="justify-content:flex-start;">{render_ashare_candidate_reason_tags(row)}</span></td>'
+            f"<td><span class=\"score-badge {cls}\">{html.escape(row.candidate_rating)}</span></td>"
             f"<td>{row.close:.2f}</td>"
+            f"<td>{row.volume_ratio:.2f}x</td>"
+            f"<td>{row.avg_amount_20d / 100_000_000:.2f}亿</td>"
             f"<td>{html.escape(row.latest_date)}</td>"
-            f"<td>{row.recent_peak_to_base:.2f}</td>"
             f"<td>{html.escape(row.data_source)}</td>"
-            f'<td><a class="btn btn-secondary btn-small" href="/cn/watchlist/add?symbol={quote(row.symbol)}&name={quote(row.name or "")}">加入自选</a></td>'
             "</tr>"
         )
     table_html = (
         """
   <div class="table-wrap">
     <table class="sortable resizable-table" data-secondary-filter-table>
-      <thead><tr><th>代码</th><th>名称</th><th>评级</th><th>B点</th><th>可选条件</th><th>量能分</th><th>量比</th><th>20日均成交额</th><th>涨跌停</th><th>量能语境</th><th>收盘</th><th>交易日</th><th>峰值/基准</th><th>数据源</th><th>操作</th></tr></thead>
+      <thead><tr><th>操作</th><th>代码</th><th>名称</th><th>B点</th><th>入选原因</th><th>评级</th><th>收盘</th><th>量比</th><th>20日均成交额</th><th>交易日</th><th>数据源</th></tr></thead>
       <tbody>
 """
         + "\n".join(rows)
@@ -2598,10 +2644,10 @@ def render_ashare_condition_panel(params: dict[str, list[str]], context: str = "
       <div class="condition-card">
         <h3>股票池过滤</h3>
         <ul class="condition-list">
-          <li><b>板块范围</b><span>{html.escape(ashare_board_filter_label(selected_boards))}</span></li>
+          <li><b>市场范围</b><span>{html.escape(ashare_board_filter_label(selected_boards))}</span></li>
+          <li><b>行业信息</b><span>仅在结果 / 自选池 / 回测中展示</span></li>
           <li><b>最低市值</b><span>{value("min_market_cap", "50")} 亿元</span></li>
           <li><b>最多扫描</b><span>{value("max_symbols", str(ASHARE_DEFAULT_MAX_SCAN_SYMBOLS))} 只</span></li>
-          <li><b>基础排除</b><span>剔除 ST / 退市 / 停牌不可用标的</span></li>
         </ul>
       </div>
       <div class="condition-card">
@@ -2742,7 +2788,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     <div class="stat-card"><div class="stat-label">最新交易日</div><div class="stat-value">{html.escape(snapshot.latest_date)}</div></div>
     <div class="stat-card"><div class="stat-label">收盘价</div><div class="stat-value">{snapshot.close:.2f}</div></div>
     <div class="stat-card"><div class="stat-label">B点 / 量能</div><div class="stat-value">{html.escape(snapshot.signal_type or '-')} / {snapshot.volume_score:.1f}</div></div>
-    <div class="stat-card"><div class="stat-label">板块</div><div class="stat-value">{html.escape(sector)}</div></div>
+    <div class="stat-card"><div class="stat-label">行业</div><div class="stat-value">{html.escape(sector)}</div></div>
   </section>
   <p class="hint">数据源 / 日K：{html.escape(snapshot.data_source)} / {snapshot.bars_count}</p>
   <div class="table-wrap">
@@ -2827,7 +2873,10 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
       </div>
     </div>
     <div class="watchlist-chart-shell" style="height:780px;">
-      <div id="ashare-main-chart" class="watchlist-chart" style="height:560px;"></div>
+      <div class="price-chart-wrap">
+        <div id="ashare-main-chart" class="watchlist-chart"></div>
+        <div id="ashare-holding-bands" class="holding-bands"></div>
+      </div>
       <div id="ashare-kdj-chart" class="watchlist-chart" style="height:200px;margin-top:12px;"></div>
       <div id="ashare-tooltip" class="chart-tooltip"></div>
     </div>
@@ -2839,6 +2888,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     const ohlc = payload.ohlc || [];
     const volume = payload.volume || [];
     const mainEl = document.getElementById("ashare-main-chart");
+    const holdingBands = document.getElementById("ashare-holding-bands");
     const kdjEl = document.getElementById("ashare-kdj-chart");
     const tooltip = document.getElementById("ashare-tooltip");
     const toLine = rows => (rows || []).map(row => ({{ time: row.x, value: row.y }})).filter(row => row.value !== null && row.value !== undefined);
@@ -2869,13 +2919,13 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
       upColor: "#089981", downColor: "#f23645", borderUpColor: "#089981", borderDownColor: "#f23645", wickUpColor: "#089981", wickDownColor: "#f23645", priceLineVisible: false,
     }});
     candle.setData(candleRows);
-    const shortTrend = mainChart.addLineSeries({{ color: "#2563eb", lineWidth: 2, title: "MA5", priceLineVisible: false }});
+    const shortTrend = mainChart.addLineSeries({{ color: "#f5a623", lineWidth: 2, title: "MA5", priceLineVisible: false }});
     shortTrend.setData(toLine(payload.ma5 || payload.zx_short_trend));
-    const multiTrend = mainChart.addLineSeries({{ color: "#dc2626", lineWidth: 2, title: "MA20", priceLineVisible: false }});
+    const multiTrend = mainChart.addLineSeries({{ color: "#94a3b8", lineWidth: 1, title: "MA20", priceLineVisible: false, lastValueVisible: false }});
     multiTrend.setData(toLine(payload.ma20 || payload.zx_multi_trend));
     const volSeries = mainChart.addHistogramSeries({{ priceScaleId: "", priceFormat: {{ type: "volume" }}, priceLineVisible: false, lastValueVisible: false }});
     volSeries.setData(volumeRows);
-    const volMaSeries = mainChart.addLineSeries({{ color: "#475569", lineWidth: 1, priceScaleId: "", title: "Vol MA20", priceLineVisible: false, lastValueVisible: false }});
+    const volMaSeries = mainChart.addLineSeries({{ color: "#2962ff", lineWidth: 1, priceScaleId: "", title: "成交量均线", priceLineVisible: false, lastValueVisible: false }});
     volMaSeries.setData(toLine(payload.volume_ma20));
     mainChart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
     const markerRows = payload.markers || (payload.signals || []).map(row => ({{
@@ -2906,6 +2956,28 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     }}
     syncRange(mainChart, kdjChart);
     syncRange(kdjChart, mainChart);
+    function renderHoldingBands() {{
+      if (!holdingBands) return;
+      holdingBands.innerHTML = "";
+      const periods = payload.holdingPeriods || [];
+      const barSpacing = mainChart.timeScale().options().barSpacing || 8;
+      const width = mainEl.clientWidth;
+      for (const period of periods) {{
+        const startX = mainChart.timeScale().timeToCoordinate(period.start);
+        const endXRaw = mainChart.timeScale().timeToCoordinate(period.end);
+        if (startX === null || endXRaw === null) continue;
+        const left = Math.max(0, Math.min(startX, endXRaw));
+        const right = Math.min(width, Math.max(startX, endXRaw) + barSpacing);
+        if (right <= 0 || left >= width || right - left < 2) continue;
+        const band = document.createElement("div");
+        band.className = "holding-band";
+        band.style.left = `${{left}}px`;
+        band.style.width = `${{Math.max(2, right - left)}}px`;
+        band.title = `${{period.start}} - ${{period.end}}`;
+        holdingBands.appendChild(band);
+      }}
+    }}
+    mainChart.timeScale().subscribeVisibleLogicalRangeChange(() => window.requestAnimationFrame(renderHoldingBands));
     function formatNum(value, digits = 2) {{
       return value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ minimumFractionDigits: digits, maximumFractionDigits: digits }});
     }}
@@ -2931,6 +3003,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     new ResizeObserver(entries => {{
       const rect = entries[0].contentRect;
       mainChart.applyOptions({{ width: Math.floor(rect.width), height: Math.floor(rect.height) }});
+      window.requestAnimationFrame(renderHoldingBands);
     }}).observe(mainEl);
     new ResizeObserver(entries => {{
       const rect = entries[0].contentRect;
@@ -2938,6 +3011,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     }}).observe(kdjEl);
     mainChart.timeScale().fitContent();
     kdjChart.timeScale().fitContent();
+    window.requestAnimationFrame(renderHoldingBands);
   }})();
   </script>
 </section>
@@ -2950,11 +3024,6 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
 <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 {result_html or '<div class="empty">请选择一只 A 股查看策略图表。</div>'}
 """
-
-    board_controls = "".join(
-        f'<label class="check-inline"><input type="checkbox" name="boards" value="{html.escape(board)}" {"checked" if board in selected_boards else ""}> {html.escape(label)}</label>'
-        for board, label in ASHARE_BOARD_LABELS.items()
-    )
 
     return f"""
 <section class="page-head">
@@ -2978,11 +3047,13 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
 <form class="form" id="ashare-scanner-form" action="/cn/scanner" method="get" data-async-submit="true">
   <input type="hidden" name="mode" value="market">
   <input type="hidden" name="j_threshold" value="{j_threshold:g}">
+  <div class="form-section-title">扫描范围 <span>股票池、市值、并发和流动性</span></div>
   <label>最低市值（亿元）<input type="number" step="1" name="min_market_cap" value="{min_market_cap:g}"></label>
   <label>最多扫描<input type="number" step="1" name="max_symbols" value="{max_symbols}"></label>
   <label>并发数<input type="number" step="1" name="max_workers" value="{int(number_field(params, "max_workers", 6))}"></label>
   <label>20日均成交额（亿元）<input type="number" step="0.1" name="min_avg_amount_20d_100m" value="{min_avg_amount_20d_100m:g}"></label>
   <label>低流动性提示（亿元）<input type="number" step="0.1" name="min_control_amount_20d_100m" value="{min_control_amount_20d_100m:g}"></label>
+  <div class="form-section-title">信号参数 <span>B1/B2、放量和量能评级</span></div>
   <label>连续放量天数<input type="number" step="1" name="vol_high_days" value="{vol_high_days}"></label>
   <label>连续放量倍数<input type="number" step="0.1" name="vol_high_multiplier" value="{vol_high_multiplier:g}"></label>
   <label>巨量倍数<input type="number" step="0.1" name="vol_multiplier" value="{vol_multiplier:g}"></label>
@@ -2991,17 +3062,19 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
   <label>B2回踩距离 %<input type="number" step="0.1" name="reentry_pct" value="{reentry_pct:g}"></label>
   <label>Strong量能分<input type="number" step="0.1" name="strong_volume_score" value="{strong_volume_score:g}"></label>
   <label>Medium量能分<input type="number" step="0.1" name="medium_volume_score" value="{medium_volume_score:g}"></label>
-  <input type="hidden" name="require_ma5_rising" value="0">
-  <label class="checkbox-label"><input type="checkbox" name="require_ma5_rising" value="1"{" checked" if require_ma5_rising else ""}> 买入要求MA5向上</label>
-  <input type="hidden" name="require_5ma_gt_20ma" value="0">
-  <label class="checkbox-label"><input type="checkbox" name="require_5ma_gt_20ma" value="1"{" checked" if require_5ma_gt_20ma else ""}> 买入要求MA5&gt;MA20</label>
-  <input type="hidden" name="b1_require_20ma_gt_50ma" value="0">
-  <label class="checkbox-label"><input type="checkbox" name="b1_require_20ma_gt_50ma" value="1"{" checked" if b1_require_20ma_gt_50ma else ""}> B1要求20MA&gt;50MA</label>
-  <input type="hidden" name="secondary_big_red_b1" value="0">
-  <label class="checkbox-label"><input type="checkbox" name="secondary_big_red_b1" value="1"{" checked" if secondary_big_red_b1 else ""}> 大阴线B1</label>
-  <input type="hidden" name="secondary_above_ma5_3d" value="0">
-  <label class="checkbox-label"><input type="checkbox" name="secondary_above_ma5_3d" value="1"{" checked" if secondary_above_ma5_3d else ""}> 连续三天&gt;MA5</label>
-  <label class="wide">板块范围<div class="checkbox-row">{board_controls}</div></label>
+  <div class="form-options">
+    <span>可选买入条件</span>
+    <input type="hidden" name="require_ma5_rising" value="0">
+    <label class="checkbox-label"><input type="checkbox" name="require_ma5_rising" value="1"{" checked" if require_ma5_rising else ""}> MA5向上</label>
+    <input type="hidden" name="require_5ma_gt_20ma" value="0">
+    <label class="checkbox-label"><input type="checkbox" name="require_5ma_gt_20ma" value="1"{" checked" if require_5ma_gt_20ma else ""}> MA5&gt;MA20</label>
+    <input type="hidden" name="b1_require_20ma_gt_50ma" value="0">
+    <label class="checkbox-label"><input type="checkbox" name="b1_require_20ma_gt_50ma" value="1"{" checked" if b1_require_20ma_gt_50ma else ""}> 20MA&gt;50MA</label>
+    <input type="hidden" name="secondary_big_red_b1" value="0">
+    <label class="checkbox-label"><input type="checkbox" name="secondary_big_red_b1" value="1"{" checked" if secondary_big_red_b1 else ""}> 大阴线B1</label>
+    <input type="hidden" name="secondary_above_ma5_3d" value="0">
+    <label class="checkbox-label"><input type="checkbox" name="secondary_above_ma5_3d" value="1"{" checked" if secondary_above_ma5_3d else ""}> 连续三天&gt;MA5</label>
+  </div>
   <button type="submit">开始选股</button>
 </form>
 <section class="progress-box" id="ashare-scan-progress">
@@ -3194,7 +3267,7 @@ def render_ashare_watchlist_page(params: dict[str, list[str]] | None = None) -> 
 <form class="form" action="/cn/watchlist/add" method="get">
   <label>股票代码/名称<input name="symbol" value="{html.escape(field(params, "symbol", ""))}" placeholder="600487 或 亨通光电" list="ashare-symbol-suggestions" data-ashare-symbol-input></label>
   <label>分组<input name="group" value="{html.escape(field(params, "group", "观察"))}" placeholder="观察 / 候选 / 持仓"></label>
-  <label class="wide">备注<input name="note" value="{html.escape(field(params, "note", ""))}" placeholder="关注原因、板块、阻力位等"></label>
+  <label class="wide">备注<input name="note" value="{html.escape(field(params, "note", ""))}" placeholder="关注原因、行业、阻力位等"></label>
   <button type="submit">添加到自选</button>
 </form>
 {render_ashare_symbol_autocomplete()}
@@ -3208,7 +3281,7 @@ def render_ashare_watchlist_page(params: dict[str, list[str]] | None = None) -> 
   <div class="watchlist-panel">
     <div class="table-wrap watchlist-list-wrap">
       <table class="sortable resizable-table">
-        <thead><tr><th>代码</th><th>名称</th><th>板块</th><th>分组</th><th>备注</th><th>加入日期</th><th>操作</th></tr></thead>
+        <thead><tr><th>代码</th><th>名称</th><th>行业</th><th>分组</th><th>备注</th><th>加入日期</th><th>操作</th></tr></thead>
         <tbody>{table_rows}</tbody>
       </table>
     </div>
@@ -3222,12 +3295,15 @@ def render_ashare_watchlist_page(params: dict[str, list[str]] | None = None) -> 
     </div>
     <div class="watch-detail-grid">
       <div class="watch-detail-item"><span>名称</span><strong id="ashare-detail-name">-</strong></div>
-      <div class="watch-detail-item"><span>板块</span><strong id="ashare-detail-sector">-</strong></div>
+      <div class="watch-detail-item"><span>行业</span><strong id="ashare-detail-sector">-</strong></div>
       <div class="watch-detail-item"><span>数据源</span><strong id="ashare-detail-source">-</strong></div>
       <div class="watch-detail-item"><span>交易日数量</span><strong id="ashare-detail-count">-</strong></div>
     </div>
     <div class="watchlist-chart-shell" style="height:780px;">
-      <div id="ashare-watch-main-chart" class="watchlist-chart" style="height:560px;"></div>
+      <div class="price-chart-wrap">
+        <div id="ashare-watch-main-chart" class="watchlist-chart"></div>
+        <div id="ashare-watch-holding-bands" class="holding-bands"></div>
+      </div>
       <div id="ashare-watch-kdj-chart" class="watchlist-chart" style="height:200px;margin-top:12px;"></div>
       <div id="ashare-watch-tooltip" class="chart-tooltip"></div>
       <div id="ashare-watch-loading" class="loading-overlay"><div class="spinner"></div><div>正在拉取 A 股日 K 数据</div></div>
@@ -3239,6 +3315,7 @@ const ashareInitialSymbol = {json.dumps(default_symbol)};
 let ashareMainChart = null;
 let ashareKdjChart = null;
 const ashareMainEl = document.getElementById("ashare-watch-main-chart");
+const ashareHoldingBands = document.getElementById("ashare-watch-holding-bands");
 const ashareKdjEl = document.getElementById("ashare-watch-kdj-chart");
 const ashareTooltip = document.getElementById("ashare-watch-tooltip");
 const ashareLoading = document.getElementById("ashare-watch-loading");
@@ -3250,6 +3327,7 @@ function clearAshareCharts() {{
   if (ashareKdjChart) ashareKdjChart.remove();
   ashareMainChart = null;
   ashareKdjChart = null;
+  if (ashareHoldingBands) ashareHoldingBands.innerHTML = "";
 }}
 
 function renderAshareWatchChart(payload) {{
@@ -3272,13 +3350,13 @@ function renderAshareWatchChart(payload) {{
   ashareKdjChart = LightweightCharts.createChart(ashareKdjEl, {{ ...common, width: ashareKdjEl.clientWidth, height: ashareKdjEl.clientHeight, rightPriceScale: {{ borderColor: "#d6dbe3", scaleMargins: {{ top: 0.12, bottom: 0.12 }} }} }});
   const candle = ashareMainChart.addCandlestickSeries({{ upColor: "#089981", downColor: "#f23645", borderUpColor: "#089981", borderDownColor: "#f23645", wickUpColor: "#089981", wickDownColor: "#f23645", priceLineVisible: false }});
   candle.setData(candles);
-  const trend = ashareMainChart.addLineSeries({{ color: "#2563eb", lineWidth: 2, title: "MA5", priceLineVisible: false }});
+  const trend = ashareMainChart.addLineSeries({{ color: "#f5a623", lineWidth: 2, title: "MA5", priceLineVisible: false }});
   trend.setData(toLine(payload.ma5 || payload.zx_short_trend));
-  const multi = ashareMainChart.addLineSeries({{ color: "#dc2626", lineWidth: 2, title: "MA20", priceLineVisible: false }});
+  const multi = ashareMainChart.addLineSeries({{ color: "#94a3b8", lineWidth: 1, title: "MA20", priceLineVisible: false, lastValueVisible: false }});
   multi.setData(toLine(payload.ma20 || payload.zx_multi_trend));
   const volSeries = ashareMainChart.addHistogramSeries({{ priceScaleId: "", priceFormat: {{ type: "volume" }}, priceLineVisible: false, lastValueVisible: false }});
   volSeries.setData(volumes);
-  const volMa = ashareMainChart.addLineSeries({{ color: "#475569", lineWidth: 1, priceScaleId: "", title: "Vol MA20", priceLineVisible: false, lastValueVisible: false }});
+  const volMa = ashareMainChart.addLineSeries({{ color: "#2962ff", lineWidth: 1, priceScaleId: "", title: "成交量均线", priceLineVisible: false, lastValueVisible: false }});
   volMa.setData(toLine(payload.volume_ma20));
   ashareMainChart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
   const markerRows = payload.markers || (payload.signals || []).map(row => ({{ time: row.x, position: "belowBar", color: "#16a34a", shape: "arrowUp", text: row.text || "B" }}));
@@ -3300,6 +3378,28 @@ function renderAshareWatchChart(payload) {{
   }}
   sync(ashareMainChart, ashareKdjChart);
   sync(ashareKdjChart, ashareMainChart);
+  function renderHoldingBands() {{
+    if (!ashareHoldingBands) return;
+    ashareHoldingBands.innerHTML = "";
+    const periods = payload.holdingPeriods || [];
+    const barSpacing = ashareMainChart.timeScale().options().barSpacing || 8;
+    const width = ashareMainEl.clientWidth;
+    for (const period of periods) {{
+      const startX = ashareMainChart.timeScale().timeToCoordinate(period.start);
+      const endXRaw = ashareMainChart.timeScale().timeToCoordinate(period.end);
+      if (startX === null || endXRaw === null) continue;
+      const left = Math.max(0, Math.min(startX, endXRaw));
+      const right = Math.min(width, Math.max(startX, endXRaw) + barSpacing);
+      if (right <= 0 || left >= width || right - left < 2) continue;
+      const band = document.createElement("div");
+      band.className = "holding-band";
+      band.style.left = `${{left}}px`;
+      band.style.width = `${{Math.max(2, right - left)}}px`;
+      band.title = `${{period.start}} - ${{period.end}}`;
+      ashareHoldingBands.appendChild(band);
+    }}
+  }}
+  ashareMainChart.timeScale().subscribeVisibleLogicalRangeChange(() => window.requestAnimationFrame(renderHoldingBands));
   const f = value => value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }});
   const fv = value => value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ maximumFractionDigits: 0 }});
   ashareMainChart.subscribeCrosshairMove(param => {{
@@ -3318,6 +3418,7 @@ function renderAshareWatchChart(payload) {{
   new ResizeObserver(entries => {{
     const rect = entries[0].contentRect;
     if (ashareMainChart) ashareMainChart.applyOptions({{ width: Math.floor(rect.width), height: Math.floor(rect.height) }});
+    window.requestAnimationFrame(renderHoldingBands);
   }}).observe(ashareMainEl);
   new ResizeObserver(entries => {{
     const rect = entries[0].contentRect;
@@ -3325,6 +3426,7 @@ function renderAshareWatchChart(payload) {{
   }}).observe(ashareKdjEl);
   ashareMainChart.timeScale().fitContent();
   ashareKdjChart.timeScale().fitContent();
+  window.requestAnimationFrame(renderHoldingBands);
 }}
 
 async function loadAshareWatchChart(symbol) {{
@@ -4646,8 +4748,6 @@ def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None
         earnings_text = "未知"
     website = str(merged.get("website") or "")
     website_html = f'<a href="{html.escape(website)}" target="_blank">官网</a>' if website.startswith(("http://", "https://")) else "-"
-    raw_summary = str(merged.get("business_summary") or "")
-    watch_points_html = render_us_company_watch_points(display_company_name, sector, industry, asset_type, website, raw_summary, raw_sector, raw_industry)
     return f"""
   <section class="status-strip">
     <div class="stat-card"><div class="stat-label">公司名称</div><div class="stat-value">{html.escape(display_company_name)}</div></div>
@@ -4672,7 +4772,6 @@ def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None
       </tr></tbody>
     </table>
   </div>
-  {watch_points_html}
 """
 
 
@@ -5503,24 +5602,23 @@ def render_candidate_table(rows: list[SignalResult], params: dict[str, list[str]
             f"<td>{html.escape(company_display_name)}</td>"
             f"<td>{html.escape(sector)}</td>"
             f"<td>{html.escape(industry)}</td>"
-            f'<td><span class="rating rating-{html.escape(r.second_stage_rating or "Pending")}">{html.escape(r.second_stage_rating or "Pending")}</span></td>'
+            f"<td>{html.escape(r.signal_date)}</td>"
+            f"<td>{html.escape({'B1_trend_confirm': 'B1', 'B2_reentry': 'B2'}.get(r.signal_type, r.signal_type or '-'))}</td>"
+            f'<td><span class="condition-tags" style="justify-content:flex-start;">{render_us_candidate_reason_tags(r)}</span></td>'
             f"<td>{earnings_badge(r)}</td>"
-            f"<td>{html.escape(r.signal_date)}</td><td>{html.escape(r.signal_type)}</td>"
-            f"<td>{r.close:.2f}</td><td>{r.ma:.2f}</td><td>{r.dist_to_ma_pct:.2f}%</td>"
-            f"<td>{r.volume_ratio:.2f}x</td><td>{r.massive_count_7d}</td>"
+            f"<td>{r.close:.2f}</td>"
+            f"<td>{r.volume_ratio:.2f}x</td>"
             f"<td>{r.market_cap / 1_000_000_000:.2f}</td>"
-            f"<td>{r.avg_dollar_volume_20d / 1_000_000:.1f}M</td>"
-            f'<td><span class="condition-tags">{render_optional_condition_tags(r)}</span></td>'
             f"</tr>"
         )
     table_rows = "\n".join(rendered_rows)
     if not table_rows:
-        table_rows = '<tr><td colspan="17" class="empty">No visible candidates.</td></tr>'
+        table_rows = '<tr><td colspan="12" class="empty">No visible candidates.</td></tr>'
     return f"""
 {render_result_filter_panel(params, len(rows))}
 <div class="table-wrap">
 <table class="resizable-table" data-secondary-filter-table>
-  <thead><tr><th>操作</th><th>代码</th><th>公司</th><th>板块</th><th>行业</th><th>评级</th><th>财报</th><th>信号日</th><th>信号</th><th>收盘</th><th>MA5</th><th>距MA5</th><th>量比</th><th>巨量7日</th><th>市值$B</th><th>20日成交额</th><th>可选条件</th></tr></thead>
+  <thead><tr><th>操作</th><th>代码</th><th>公司</th><th>板块</th><th>行业</th><th>信号日</th><th>B点</th><th>入选原因</th><th>财报</th><th>收盘</th><th>量比</th><th>市值$B</th></tr></thead>
   <tbody>{table_rows}</tbody>
 </table>
 </div>
@@ -6784,13 +6882,13 @@ def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
         board_label = ashare_board_filter_label(selected_boards)
 
         def universe_progress(message: str) -> None:
-            set_job(job_id, stage="拉取股票池", message=message, detail=f"最低市值 {min_market_cap:g} 亿元，板块：{board_label}，最多扫描 {max_symbols} 只。")
+            set_job(job_id, stage="拉取股票池", message=message, detail=f"最低市值 {min_market_cap:g} 亿元，最多扫描 {max_symbols} 只。")
 
         fetch_limit = max_symbols if set(selected_boards) == set(ASHARE_BOARD_LABELS) else max(1000, max_symbols * 4)
         universe, universe_source, market_cap_filter_applied = load_ashare_universe_for_scan(min_market_cap, fetch_limit, universe_progress)
         universe = filter_ashare_universe_by_board(universe, selected_boards)[: max(1, max_symbols)]
         filter_text = "市值过滤已生效" if market_cap_filter_applied else "当前数据源没有总市值字段，市值过滤未生效"
-        filter_text = f"{filter_text}；板块：{board_label}"
+        filter_text = f"{filter_text}；行业信息会在结果表中展示"
         set_job(
             job_id,
             stage="股票池完成",

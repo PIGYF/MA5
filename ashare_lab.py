@@ -21,7 +21,7 @@ ASHARE_UNIVERSE_CACHE_PATH = ASHARE_CACHE_DIR / "universe_cache.json"
 ASHARE_UNIVERSE_CACHE_SECONDS = 18 * 60 * 60
 ASHARE_PRICE_CACHE_DIR = ASHARE_CACHE_DIR / "prices"
 ASHARE_PRICE_CACHE_MAX_BARS = 1300
-ASHARE_PRICE_CACHE_FRESH_GRACE_DAYS = 7
+ASHARE_PRICE_CACHE_FRESH_GRACE_DAYS = int(os.environ.get("MA5_ASHARE_PRICE_CACHE_FRESH_GRACE_DAYS", "3"))
 
 
 @dataclass
@@ -161,7 +161,7 @@ def ashare_chart_payload(
 ) -> dict[str, object]:
     clean = normalize_ashare_symbol(symbol)
     bars, source = fetch_ashare_bars(clean)
-    from backtest import adjust_limit_volumes, backtest, build_ratchet_inputs, calculate_kdj, rolling_sma
+    from backtest import adjust_limit_volumes, backtest, build_ratchet_inputs, calculate_kdj, open_position_snapshot, rolling_sma
 
     bt_bars = ashare_to_backtest_bars(bars)
     closes = [bar.close for bar in bt_bars]
@@ -206,6 +206,7 @@ def ashare_chart_payload(
         for i, signal in enumerate(buy_signal)
         if signal
     ]
+    holding_periods: list[dict[str, str]] = []
     try:
         trades, equity_curve = backtest(
             bars=bt_bars,
@@ -270,6 +271,23 @@ def ashare_chart_payload(
             }
             for trade in trades
         ]
+        holding_periods = [
+            {
+                "start": trade.entry_date,
+                "end": trade.exit_date,
+                "label": str(getattr(trade, "entry_structure", "") or "hold"),
+            }
+            for trade in trades
+        ]
+        open_position = open_position_snapshot(equity_curve)
+        if open_position:
+            holding_periods.append(
+                {
+                    "start": str(open_position["entry_date"]),
+                    "end": str(open_position["mark_date"]),
+                    "label": str(open_position.get("entry_structure", "") or "holding"),
+                }
+            )
         chart_markers = executed_buy_markers + sell_signal_markers + executed_sell_markers
     except Exception:
         pass
@@ -304,6 +322,7 @@ def ashare_chart_payload(
             if signal
         ],
         "markers": sorted(chart_markers, key=lambda item: str(item["time"])),
+        "holdingPeriods": holding_periods,
     }
 
 def normalize_ashare_symbol(symbol: str) -> str:
@@ -760,6 +779,26 @@ def deserialize_universe_item(raw: dict[str, Any]) -> AShareUniverseItem:
     )
 
 
+def enrich_ashare_industries(items: list[AShareUniverseItem]) -> list[AShareUniverseItem]:
+    sector_map = load_ashare_sector_map()
+    if not sector_map:
+        return items
+    enriched: list[AShareUniverseItem] = []
+    for item in items:
+        industry = item.sector or sector_map.get(item.symbol, "")
+        enriched.append(
+            AShareUniverseItem(
+                symbol=item.symbol,
+                name=item.name,
+                sector=industry,
+                market_cap_100m=item.market_cap_100m,
+                exchange=item.exchange,
+                turnover=item.turnover,
+            )
+        )
+    return enriched
+
+
 def read_ashare_universe_cache(
     min_market_cap_100m: float,
     max_symbols: int,
@@ -777,7 +816,7 @@ def read_ashare_universe_cache(
     if min_market_cap_100m > 0 and not bool(entry.get("has_market_cap", False)):
         return None
     raw_items = entry.get("items") or []
-    items = [deserialize_universe_item(raw) for raw in raw_items if isinstance(raw, dict)]
+    items = enrich_ashare_industries([deserialize_universe_item(raw) for raw in raw_items if isinstance(raw, dict)])
     if not items:
         return None
     if progress:
@@ -797,6 +836,7 @@ def write_ashare_universe_cache(
     if not isinstance(entries, dict):
         entries = {}
     key = ashare_universe_cache_key(min_market_cap_100m, max_symbols)
+    items = enrich_ashare_industries(items)
     entries[key] = {
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "source": source,
@@ -882,7 +922,8 @@ def cached_ashare_universe_items() -> list[AShareUniverseItem]:
                     items_by_symbol[item.symbol] = item
             except Exception:
                 continue
-    return sorted(items_by_symbol.values(), key=lambda item: item.turnover or item.market_cap_100m, reverse=True)
+    items = enrich_ashare_industries(list(items_by_symbol.values()))
+    return sorted(items, key=lambda item: item.turnover or item.market_cap_100m, reverse=True)
 
 
 def suggest_ashare_symbols(query: str, limit: int = 12) -> list[dict[str, object]]:
@@ -1004,7 +1045,7 @@ def fetch_eastmoney_ashare_universe(
         "http://82.push2.eastmoney.com/api/qt/clist/get",
         "http://33.push2.eastmoney.com/api/qt/clist/get",
     ]
-    fields = "f12,f14,f2,f6,f20,f8"
+    fields = "f12,f14,f2,f6,f20,f8,f100"
     fs = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
     page_size = max(100, min(500, int(max_symbols) * 2))
     headers = {
@@ -1083,7 +1124,7 @@ def fetch_eastmoney_ashare_universe(
                 AShareUniverseItem(
                     symbol=symbol,
                     name=name,
-                    sector="",
+                    sector=str(row.get("f100", "") or ""),
                     market_cap_100m=market_cap,
                     exchange=ashare_exchange(symbol),
                     turnover=float(row.get("f6") or 0.0),
