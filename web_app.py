@@ -13,7 +13,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from backtest import (
@@ -69,6 +69,7 @@ from macro_calendar import macro_risk_state
 from ashare_lab import (
     ASHARE_ROUTE,
     ASHARE_BOARD_LABELS,
+    ASHARE_PRICE_CACHE_DIR,
     AShareSignalSnapshot,
     ashare_board_filter_label,
     ashare_chart_payload,
@@ -1058,6 +1059,14 @@ def directory_file_summary(path: Path) -> dict[str, object]:
     return file_group_summary(files)
 
 
+def mixed_cache_summary(paths: list[Path], directories: list[Path] | None = None) -> dict[str, object]:
+    files = [path for path in paths if path.exists() and path.is_file()]
+    for directory in directories or []:
+        if directory.exists():
+            files.extend([item for item in directory.iterdir() if item.is_file()])
+    return file_group_summary(files)
+
+
 def cache_dashboard_summary() -> dict[str, dict[str, object]]:
     us_market_paths = [NASDAQ_CACHE_PATH, EARNINGS_CACHE_PATH]
     if LEGACY_NASDAQ_CACHE_PATH != NASDAQ_CACHE_PATH:
@@ -1068,7 +1077,7 @@ def cache_dashboard_summary() -> dict[str, dict[str, object]]:
         "reports": directory_file_summary(REPORT_DIR),
         "prices": directory_file_summary(PRICE_CACHE_DIR),
         "us_market": file_group_summary(us_market_paths),
-        "ashare": file_group_summary(ashare_cache_paths),
+        "ashare": mixed_cache_summary(ashare_cache_paths, [ASHARE_PRICE_CACHE_DIR]),
         "latest": file_group_summary(latest_scan_paths),
     }
 
@@ -1103,7 +1112,8 @@ def clear_cache_area(area: str) -> str:
         return f"已清理美股市场/财报缓存 {deleted} 个。"
     if area == "ashare":
         deleted = delete_files([DATA_DIR / "ashare" / "universe_cache.json", DATA_DIR / "ashare" / "sector_map.json"])
-        return f"已清理 A 股股票池/板块缓存 {deleted} 个。"
+        deleted += delete_directory_files(ASHARE_PRICE_CACHE_DIR)
+        return f"已清理 A 股股票池/板块/K线缓存 {deleted} 个。"
     if area == "latest":
         us_deleted = delete_latest_scan()
         cn_deleted = 1 if delete_latest_ashare_scan() else 0
@@ -1271,6 +1281,7 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .result {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; margin-top: 14px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
 .candidate-detail {{ margin-top: 14px; }}
 .candidate-detail iframe {{ height: 980px; }}
+.candidate-detail iframe.candidate-chart-frame {{ height: 800px; }}
 .watchlist-grid {{ display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 14px; align-items: start; }}
 .watchlist-panel {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
 .watchlist-chart-shell {{ position: relative; height: 880px; min-width: 520px; }}
@@ -1496,9 +1507,9 @@ def render_us_strategy_condition_panel(params: dict[str, list[str]], context: st
     def value(name: str, default: str) -> str:
         return html.escape(field(params, name, default))
 
-    require_ma5_rising = checkbox_field(params, "require_ma5_rising", True)
-    b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", True)
-    require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", True)
+    require_ma5_rising = checkbox_field(params, "require_ma5_rising", False)
+    b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", False)
+    require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", False)
     secondary_big_red_b1 = checkbox_field(params, "secondary_big_red_b1", False)
     secondary_above_ma5_3d = checkbox_field(params, "secondary_above_ma5_3d", False)
 
@@ -1604,9 +1615,9 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
     def value(name: str, default: str) -> str:
         return html.escape(field(params, name, default))
 
-    require_ma5_rising_checked = " checked" if checkbox_field(params, "require_ma5_rising", True) else ""
-    b1_require_20ma_gt_50ma_checked = " checked" if checkbox_field(params, "b1_require_20ma_gt_50ma", True) else ""
-    require_5ma_gt_20ma_checked = " checked" if checkbox_field(params, "require_5ma_gt_20ma", True) else ""
+    require_ma5_rising_checked = " checked" if checkbox_field(params, "require_ma5_rising", False) else ""
+    b1_require_20ma_gt_50ma_checked = " checked" if checkbox_field(params, "b1_require_20ma_gt_50ma", False) else ""
+    require_5ma_gt_20ma_checked = " checked" if checkbox_field(params, "require_5ma_gt_20ma", False) else ""
     secondary_big_red_checked = " checked" if checkbox_field(params, "secondary_big_red_b1", False) else ""
     secondary_above_ma5_checked = " checked" if checkbox_field(params, "secondary_above_ma5_3d", False) else ""
 
@@ -2866,13 +2877,14 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     const volMaSeries = mainChart.addLineSeries({{ color: "#475569", lineWidth: 1, priceScaleId: "", title: "Vol MA20", priceLineVisible: false, lastValueVisible: false }});
     volMaSeries.setData(toLine(payload.volume_ma20));
     mainChart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
-    candle.setMarkers((payload.signals || []).map(row => ({{
+    const markerRows = payload.markers || (payload.signals || []).map(row => ({{
       time: row.x,
       position: "belowBar",
       color: "#16a34a",
       shape: "arrowUp",
       text: row.text || "B",
-    }})));
+    }}));
+    candle.setMarkers(markerRows);
     const kLine = kdjChart.addLineSeries({{ color: "#2563eb", lineWidth: 1.5, title: "K", priceLineVisible: false }});
     kLine.setData(toLine(payload.k));
     const dLine = kdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "D", priceLineVisible: false }});
@@ -3268,7 +3280,8 @@ function renderAshareWatchChart(payload) {{
   const volMa = ashareMainChart.addLineSeries({{ color: "#475569", lineWidth: 1, priceScaleId: "", title: "Vol MA20", priceLineVisible: false, lastValueVisible: false }});
   volMa.setData(toLine(payload.volume_ma20));
   ashareMainChart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
-  candle.setMarkers((payload.signals || []).map(row => ({{ time: row.x, position: "belowBar", color: "#16a34a", shape: "arrowUp", text: row.text || "B" }})));
+  const markerRows = payload.markers || (payload.signals || []).map(row => ({{ time: row.x, position: "belowBar", color: "#16a34a", shape: "arrowUp", text: row.text || "B" }}));
+  candle.setMarkers(markerRows);
   ashareKdjChart.addLineSeries({{ color: "#2563eb", lineWidth: 1.5, title: "K", priceLineVisible: false }}).setData(toLine(payload.k));
   ashareKdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "D", priceLineVisible: false }}).setData(toLine(payload.d));
   ashareKdjChart.addLineSeries({{ color: "#7c3aed", lineWidth: 2, title: "J", priceLineVisible: false }}).setData(toLine(payload.j));
@@ -3464,9 +3477,9 @@ def run_strategy(params: dict[str, list[str]]) -> str:
         massive_window=int(number_field(params, "massive_window", 7)),
         massive_min_count=int(number_field(params, "massive_min_count", 1)),
         massive_max_count=int(number_field(params, "massive_max_count", 2)),
-        b1_require_20ma_gt_50ma=checkbox_field(params, "b1_require_20ma_gt_50ma", True),
-        require_ma5_rising=checkbox_field(params, "require_ma5_rising", True),
-        require_5ma_gt_20ma=checkbox_field(params, "require_5ma_gt_20ma", True),
+        b1_require_20ma_gt_50ma=checkbox_field(params, "b1_require_20ma_gt_50ma", False),
+        require_ma5_rising=checkbox_field(params, "require_ma5_rising", False),
+        require_5ma_gt_20ma=checkbox_field(params, "require_5ma_gt_20ma", False),
         below_20ma_stop_days=int(number_field(params, "below_20ma_stop_days", 2)),
         weak_trend_exit_mode=field(params, "weak_trend_exit_mode", "hybrid"),
         weak_ma5_reclaim_days=int(number_field(params, "weak_ma5_reclaim_days", 5)),
@@ -3491,9 +3504,9 @@ def run_strategy(params: dict[str, list[str]]) -> str:
         "massive_window": int(number_field(params, "massive_window", 7)),
         "massive_min_count": int(number_field(params, "massive_min_count", 1)),
         "massive_max_count": int(number_field(params, "massive_max_count", 2)),
-        "b1_require_20ma_gt_50ma": checkbox_field(params, "b1_require_20ma_gt_50ma", True),
-        "require_ma5_rising": checkbox_field(params, "require_ma5_rising", True),
-        "require_5ma_gt_20ma": checkbox_field(params, "require_5ma_gt_20ma", True),
+        "b1_require_20ma_gt_50ma": checkbox_field(params, "b1_require_20ma_gt_50ma", False),
+        "require_ma5_rising": checkbox_field(params, "require_ma5_rising", False),
+        "require_5ma_gt_20ma": checkbox_field(params, "require_5ma_gt_20ma", False),
         "reentry_pct": number_field(params, "reentry_pct", 4.5),
         "stop_5ma_pct": number_field(params, "stop_5ma_pct", 7.5),
         "hard_stop_pct": number_field(params, "hard_stop_pct", 20),
@@ -3534,9 +3547,9 @@ def render_batch_form(params: dict[str, list[str]] | None = None) -> str:
     def selected(current: str, expected: str) -> str:
         return " selected" if current == expected else ""
 
-    require_ma5_rising_checked = " checked" if checkbox_field(params, "require_ma5_rising", True) else ""
-    b1_require_20ma_gt_50ma_checked = " checked" if checkbox_field(params, "b1_require_20ma_gt_50ma", True) else ""
-    require_5ma_gt_20ma_checked = " checked" if checkbox_field(params, "require_5ma_gt_20ma", True) else ""
+    require_ma5_rising_checked = " checked" if checkbox_field(params, "require_ma5_rising", False) else ""
+    b1_require_20ma_gt_50ma_checked = " checked" if checkbox_field(params, "b1_require_20ma_gt_50ma", False) else ""
+    require_5ma_gt_20ma_checked = " checked" if checkbox_field(params, "require_5ma_gt_20ma", False) else ""
 
     return f"""
 <section class="page-head">
@@ -3692,9 +3705,9 @@ def run_batch_backtest(params: dict[str, list[str]]) -> str:
                 massive_window=int(number_field(params, "massive_window", 7)),
                 massive_min_count=int(number_field(params, "massive_min_count", 1)),
                 massive_max_count=int(number_field(params, "massive_max_count", 2)),
-                b1_require_20ma_gt_50ma=checkbox_field(params, "b1_require_20ma_gt_50ma", True),
-                require_ma5_rising=checkbox_field(params, "require_ma5_rising", True),
-                require_5ma_gt_20ma=checkbox_field(params, "require_5ma_gt_20ma", True),
+                b1_require_20ma_gt_50ma=checkbox_field(params, "b1_require_20ma_gt_50ma", False),
+                require_ma5_rising=checkbox_field(params, "require_ma5_rising", False),
+                require_5ma_gt_20ma=checkbox_field(params, "require_5ma_gt_20ma", False),
                 below_20ma_stop_days=int(number_field(params, "below_20ma_stop_days", 2)),
                 weak_trend_exit_mode=field(params, "weak_trend_exit_mode", "hybrid"),
                 weak_ma5_reclaim_days=int(number_field(params, "weak_ma5_reclaim_days", 5)),
@@ -4128,6 +4141,29 @@ def google_news_url(symbol: str, company_name: str) -> str:
 
 def xueqiu_news_url(symbol: str, company_name: str) -> str:
     return f"https://xueqiu.com/k?q={quote(symbol.upper())}"
+
+
+def load_us_company_name_overrides() -> dict[str, str]:
+    path = Path(__file__).resolve().parent / "config" / "us_company_names_zh.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {str(key).upper(): str(value) for key, value in payload.items() if str(value).strip()}
+
+
+US_COMPANY_NAME_ZH_OVERRIDES = load_us_company_name_overrides()
+
+
+def us_company_display_name(symbol: str, company_name: str) -> str:
+    override = US_COMPANY_NAME_ZH_OVERRIDES.get(symbol.upper())
+    if override:
+        return override
+    return company_name or symbol.upper()
 
 
 def load_earnings_cache() -> dict[str, dict[str, object]]:
@@ -4571,9 +4607,9 @@ def fetch_us_company_profile(symbol: str) -> dict[str, object]:
     return metadata
 
 
-def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None) -> str:
+def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None, include_live_profile: bool = True) -> str:
     latest_row = candidate_from_latest_scan(symbol)
-    profile = fetch_us_company_profile(symbol)
+    profile = fetch_us_company_profile(symbol) if include_live_profile else {}
     merged: dict[str, object] = {}
     if signal_result:
         merged.update(
@@ -4592,6 +4628,7 @@ def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None
     merged.update({key: value for key, value in profile.items() if value not in ("", None, 0)})
 
     company_name = str(merged.get("company_name") or symbol)
+    display_company_name = us_company_display_name(symbol, company_name)
     raw_sector = str(merged.get("sector") or "")
     raw_industry = str(merged.get("industry") or "")
     sector = us_sector_zh(raw_sector)
@@ -4609,11 +4646,11 @@ def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None
     website = str(merged.get("website") or "")
     website_html = f'<a href="{html.escape(website)}" target="_blank">官网</a>' if website.startswith(("http://", "https://")) else "-"
     raw_summary = str(merged.get("business_summary") or "")
-    watch_points_html = render_us_company_watch_points(company_name, sector, industry, asset_type, website, raw_summary, raw_sector, raw_industry)
-
+    watch_points_html = render_us_company_watch_points(display_company_name, sector, industry, asset_type, website, raw_summary, raw_sector, raw_industry)
     return f"""
   <section class="status-strip">
-    <div class="stat-card"><div class="stat-label">公司名称</div><div class="stat-value">{html.escape(company_name)}</div></div>
+    <div class="stat-card"><div class="stat-label">公司名称</div><div class="stat-value">{html.escape(display_company_name)}</div></div>
+    <div class="stat-card"><div class="stat-label">英文名称</div><div class="stat-value">{html.escape(company_name)}</div></div>
     <div class="stat-card"><div class="stat-label">证券类型</div><div class="stat-value">{html.escape(asset_type)}</div></div>
     <div class="stat-card"><div class="stat-label">市值</div><div class="stat-value">{format_us_money(merged.get("market_cap"))}</div></div>
     <div class="stat-card"><div class="stat-label">所属板块</div><div class="stat-value">{html.escape(sector)}</div></div>
@@ -4630,7 +4667,7 @@ def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None
         <td>{format_us_number(merged.get("week_52_high"))}</td>
         <td>{format_us_number(merged.get("week_52_low"))}</td>
         <td>{website_html}</td>
-        <td><a href="{html.escape(yahoo_news_url(symbol))}" target="_blank">Yahoo</a> <a href="{html.escape(xueqiu_news_url(symbol, company_name))}" target="_blank">雪球</a></td>
+        <td><a href="{html.escape(yahoo_news_url(symbol))}" target="_blank">Yahoo</a> <a href="{html.escape(xueqiu_news_url(symbol, display_company_name))}" target="_blank">雪球</a></td>
       </tr></tbody>
     </table>
   </div>
@@ -4912,8 +4949,8 @@ def scan_symbol_candidate(
     massive_min_count: int = 1,
     massive_max_count: int = 2,
     b1_require_20ma_gt_50ma: bool = False,
-    require_ma5_rising: bool = True,
-    require_5ma_gt_20ma: bool = True,
+    require_ma5_rising: bool = False,
+    require_5ma_gt_20ma: bool = False,
 ) -> tuple[str, SignalResult | None, str | None]:
     try:
         signal_start = min(start, (date.fromisoformat(end) - timedelta(days=420)).isoformat())
@@ -5084,9 +5121,9 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
 
     asset_type = field(params, "asset_type", "stocks")
     hide_weak_checked = " checked" if field(params, "hide_weak", "1" if DEFAULT_HIDE_WEAK_CANDIDATES else "0") == "1" else ""
-    require_ma5_rising_checked = " checked" if checkbox_field(params, "require_ma5_rising", True) else ""
-    b1_require_20ma_gt_50ma_checked = " checked" if checkbox_field(params, "b1_require_20ma_gt_50ma", True) else ""
-    require_5ma_gt_20ma_checked = " checked" if checkbox_field(params, "require_5ma_gt_20ma", True) else ""
+    require_ma5_rising_checked = " checked" if checkbox_field(params, "require_ma5_rising", False) else ""
+    b1_require_20ma_gt_50ma_checked = " checked" if checkbox_field(params, "b1_require_20ma_gt_50ma", False) else ""
+    require_5ma_gt_20ma_checked = " checked" if checkbox_field(params, "require_5ma_gt_20ma", False) else ""
     secondary_big_red_checked = " checked" if checkbox_field(params, "secondary_big_red_b1", False) else ""
     secondary_above_ma5_checked = " checked" if checkbox_field(params, "secondary_above_ma5_3d", False) else ""
     earnings_filter = field(params, "earnings_filter", "show")
@@ -5446,84 +5483,103 @@ restoreActiveScan();
 def render_candidate_table(rows: list[SignalResult], params: dict[str, list[str]] | None = None) -> str:
     params = params or {}
 
-    def catalyst_secondary_url(row: SignalResult) -> str:
-        stored = row.catalyst_google_url or ""
-        if stored and "google." not in stored:
-            return stored
-        return xueqiu_news_url(row.symbol, row.company_name)
-
-    def technical_badge(row: SignalResult) -> str:
-        rating = html.escape(row.technical_rating or "Pending")
-        score = row.technical_score or 0.0
-        return f'<span class="score-badge score-{rating}" title="{html.escape(row.technical_notes or "")}">{score:.1f}</span>'
-
-    def candidate_summary(row: SignalResult) -> str:
-        pieces = [
-            f"Tech {row.technical_score:.0f}",
-            f"量比 {row.volume_ratio:.2f}x",
-            f"距5MA {row.dist_to_ma_pct:.1f}%",
-        ]
-        if row.distance_52w_high_pct:
-            pieces.append(f"距52W高 {row.distance_52w_high_pct:.1f}%")
-        if row.second_stage_rating:
-            pieces.append(row.second_stage_rating)
-        if row.earnings_days != 9999:
-            pieces.append(f"财报 {row.earnings_days}天")
-        return " / ".join(pieces)
-
-    def divergence_note(event: dict[str, object] | None) -> str:
-        if not event:
-            return "-"
-        parts = [
-            str(event.get("event_date", "-")),
-            str(event.get("importance_label", "-")),
-            str(event.get("divergence_type_label", "-")),
-        ]
-        note = str(event.get("note", "") or "").strip()
-        if note:
-            parts.append(note)
-        return " · ".join(parts)
-
     rendered_rows = []
     for r in rows:
-        divergence = best_divergence_for_symbol(r.symbol, r.signal_date)
         filter_attrs = " ".join(
             f'{result_filter_attr(key)}="{1 if result_filter_value(r, key) else 0}"'
             for key, _, _ in OPTIONAL_RESULT_FILTERS
         )
+        watch_note = " ".join(part for part in (r.second_stage_rating or "", r.signal_type or "") if part)
+        sector = us_sector_zh(r.sector or "")
+        industry = us_industry_zh(r.industry or "")
+        company_display_name = us_company_display_name(r.symbol, r.company_name or "")
         rendered_rows.append(
-            f'<tr data-secondary-row {filter_attrs}><td><button type="button" class="symbol-button" data-candidate-symbol="{html.escape(r.symbol)}">{html.escape(r.symbol)}</button></td><td>{html.escape(r.company_name or "-")}</td>'
-            f"<td>{r.market_cap / 1_000_000_000:.2f}</td>"
-            f"<td>{html.escape(candidate_summary(r))}</td>"
-            f'<td><span class="condition-tags">{render_optional_condition_tags(r)}</span></td>'
-            f"<td>{render_divergence_chip(divergence)}</td>"
-            f"<td>{(divergence or {}).get('score', 0)}/5</td>"
-            f"<td>{html.escape(divergence_note(divergence))}</td>"
-            f"<td>{technical_badge(r)}</td>"
-            f"<td>{r.second_stage_score_total}/20</td>"
+            f'<tr data-secondary-row {filter_attrs}>'
+            f'<td class="action-cell">'
+            f'<button type="button" class="mini-action" data-add-watchlist="{html.escape(r.symbol)}" data-watch-note="{html.escape(watch_note)}">加自选</button>'
+            f'</td>'
+            f'<td><button type="button" class="symbol-button" data-candidate-symbol="{html.escape(r.symbol)}">{html.escape(r.symbol)}</button></td>'
+            f"<td>{html.escape(company_display_name)}</td>"
+            f"<td>{html.escape(sector)}</td>"
+            f"<td>{html.escape(industry)}</td>"
             f'<td><span class="rating rating-{html.escape(r.second_stage_rating or "Pending")}">{html.escape(r.second_stage_rating or "Pending")}</span></td>'
-            f'<td><button type="button" class="mini-action" data-add-watchlist="{html.escape(r.symbol)}" data-watch-note="{html.escape((r.second_stage_rating or "") + " " + (r.catalyst_label or ""))}">加入自选</button></td>'
             f"<td>{earnings_badge(r)}</td>"
-            f'<td>{r.catalyst_score}/5 {html.escape(r.catalyst_label or "Manual review")} <a href="{html.escape(r.catalyst_yahoo_url or yahoo_news_url(r.symbol))}" target="_blank">Yahoo</a> <a href="{html.escape(catalyst_secondary_url(r))}" target="_blank">雪球</a></td>'
-            f"<td>{r.sector_score}/5 {html.escape(r.sector_label or '-')} ({r.sector_peer_count}/{r.industry_peer_count})</td>"
-            f"<td>{r.space_score}/5 {html.escape(r.space_label or '-')} / 52W {r.distance_52w_high_pct:.1f}% / 200MA {html.escape(r.above_200ma or '-')}</td>"
-            f"<td>{r.candle_score}/5 {html.escape(r.candle_label or '-')} / close pos {r.close_position_pct:.0f}% / upper shadow {format_metric(r.upper_shadow_body_ratio, 'x')}</td>"
-            f"<td>{html.escape(r.sector or '-')}</td><td>{html.escape(r.industry or '-')}</td>"
             f"<td>{html.escape(r.signal_date)}</td><td>{html.escape(r.signal_type)}</td>"
             f"<td>{r.close:.2f}</td><td>{r.ma:.2f}</td><td>{r.dist_to_ma_pct:.2f}%</td>"
-            f"<td>{r.volume_ratio:.2f}x</td><td>{r.massive_count_7d}</td><td>{r.avg_dollar_volume_20d / 1_000_000:.1f}M</td></tr>"
+            f"<td>{r.volume_ratio:.2f}x</td><td>{r.massive_count_7d}</td>"
+            f"<td>{r.market_cap / 1_000_000_000:.2f}</td>"
+            f"<td>{r.avg_dollar_volume_20d / 1_000_000:.1f}M</td>"
+            f'<td><span class="condition-tags">{render_optional_condition_tags(r)}</span></td>'
+            f"</tr>"
         )
     table_rows = "\n".join(rendered_rows)
     if not table_rows:
-        table_rows = '<tr><td colspan="27" class="empty">No visible candidates.</td></tr>'
+        table_rows = '<tr><td colspan="17" class="empty">No visible candidates.</td></tr>'
     return f"""
 {render_result_filter_panel(params, len(rows))}
 <div class="table-wrap">
 <table class="resizable-table" data-secondary-filter-table>
-  <thead><tr><th>Symbol</th><th>Company</th><th>Mkt Cap $B</th><th>Summary</th><th>可选条件</th><th>Divergence</th><th>D Score</th><th>D Event</th><th>Tech</th><th>Total</th><th>Rating</th><th>Watch</th><th>Next Earnings</th><th>Catalyst</th><th>Sector Score</th><th>Space</th><th>Candle</th><th>Sector</th><th>Industry</th><th>Signal Date</th><th>Signal</th><th>Close</th><th>MA</th><th>Dist</th><th>Vol Ratio</th><th>Massive 7D</th><th>20D $Vol</th></tr></thead>
+  <thead><tr><th>操作</th><th>代码</th><th>公司</th><th>板块</th><th>行业</th><th>评级</th><th>财报</th><th>信号日</th><th>信号</th><th>收盘</th><th>MA5</th><th>距MA5</th><th>量比</th><th>巨量7日</th><th>市值$B</th><th>20日成交额</th><th>可选条件</th></tr></thead>
   <tbody>{table_rows}</tbody>
 </table>
 </div>
+"""
+
+
+def render_candidate_table_script(params: dict[str, list[str]] | None = None) -> str:
+    params = params or {}
+    query_params = {
+        key: values[-1]
+        for key, values in params.items()
+        if values and not key.startswith("_")
+    }
+    return f"""
+<script>
+const candidateBaseParams = {json.dumps(query_params, ensure_ascii=False)};
+document.addEventListener("click", async event => {{
+  const addButton = event.target.closest("[data-add-watchlist]");
+  if (addButton) {{
+    event.preventDefault();
+    const symbol = addButton.dataset.addWatchlist;
+    const note = addButton.dataset.watchNote || "";
+    addButton.disabled = true;
+    addButton.textContent = "添加中";
+    const params = new URLSearchParams({{ symbol, group: "候选", note }});
+    const res = await fetch(`/watchlist/add.json?${{params.toString()}}`);
+    const data = await res.json();
+    if (data.ok) {{
+      addButton.classList.add("added");
+      addButton.textContent = "已加入";
+      window.showToast?.(`${{symbol}} 已加入自选池`, "success");
+    }} else {{
+      addButton.disabled = false;
+      addButton.textContent = data.error || "失败";
+      window.showToast?.(data.error || `${{symbol}} 加入失败`, "error");
+    }}
+    return;
+  }}
+
+  const button = event.target.closest("[data-candidate-symbol]");
+  if (!button) return;
+  event.preventDefault();
+  const symbol = button.dataset.candidateSymbol;
+  const host = button.closest(".result") || document.body;
+  let detail = host.querySelector("#candidate-detail");
+  if (!detail) {{
+    detail = document.createElement("section");
+    detail.id = "candidate-detail";
+    detail.className = "candidate-detail";
+    host.appendChild(detail);
+  }}
+  detail.innerHTML = `<section class="result"><div class="loading-overlay active" style="position:relative; min-height:140px;"><div class="spinner"></div><div>正在生成 ${{symbol}} 的日 K 线和策略交易点</div></div></section>`;
+  const params = new URLSearchParams(candidateBaseParams);
+  params.set("symbol", symbol);
+  const res = await fetch(`/candidate?${{params.toString()}}`);
+  const html = await res.text();
+  detail.innerHTML = html;
+  detail.scrollIntoView({{ behavior: "smooth", block: "start" }});
+}});
+</script>
 """
 
 
@@ -5570,9 +5626,17 @@ def latest_scan_to_html() -> str:
     latest = load_latest_scan()
     if not latest:
         return f"""
-{render_scanner_form({})}
+<section class="page-head">
+  <div>
+    <h1>当前选股结果</h1>
+    <p class="hint">当前信号日期还没有保存的扫描结果。</p>
+  </div>
+  <div class="mode-pill">Daily Close</div>
+</section>
 <section class="result">
-  <p class="hint">当前信号日期还没有保存的扫描结果。</p>
+  <div class="inline-actions links">
+    <a href="/us/scanner">返回选股器</a>
+  </div>
 </section>
 """
     candidates = [SignalResult(**row) for row in latest.get("candidates", [])]
@@ -5588,10 +5652,17 @@ def latest_scan_to_html() -> str:
     }
     saved_params["_skip_latest_banner"] = ["1"]
     return f"""
-{render_scanner_form(saved_params)}
+<section class="page-head">
+  <div>
+    <h1>当前选股结果</h1>
+    <p class="hint">这里显示当天保存的美股选股结果。点击单个股票可在下方查看日 K、策略点和基础信息。</p>
+  </div>
+  <div class="mode-pill">Daily Close</div>
+</section>
 <section class="result">
   <div class="toolbar">
     <div class="inline-actions links">
+      <a href="/us/scanner">返回选股器</a>
       <a href="{report}" target="_blank">打开扫描报告</a>
       <a href="{csv_url}" target="_blank">下载 CSV</a>
       <form class="delete-form" action="/scan/delete" method="get" onsubmit="return confirm('确认删除当前扫描结果？删除后页面将恢复为未扫描状态。');">
@@ -5603,6 +5674,7 @@ def latest_scan_to_html() -> str:
   {render_candidate_table(candidates, saved_params)}
   {render_failure_table(errors)}
 </section>
+{render_candidate_table_script(saved_params)}
 <script>
 if (window.initializeResizableTables) initializeResizableTables(document);
 if (window.initializeSortableTables) initializeSortableTables(document);
@@ -5627,9 +5699,9 @@ def run_scanner(params: dict[str, list[str]]) -> str:
     massive_window = int(number_field(params, "massive_window", 7))
     massive_min_count = int(number_field(params, "massive_min_count", 1))
     massive_max_count = int(number_field(params, "massive_max_count", 2))
-    b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", True)
-    require_ma5_rising = checkbox_field(params, "require_ma5_rising", True)
-    require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", True)
+    b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", False)
+    require_ma5_rising = checkbox_field(params, "require_ma5_rising", False)
+    require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", False)
     min_price = number_field(params, "min_price", 5)
     min_avg_dollar_volume = number_field(params, "min_avg_dollar_volume", 20_000_000)
     if source == "auto":
@@ -5734,8 +5806,6 @@ def run_scanner(params: dict[str, list[str]]) -> str:
 
 
 def render_candidate_detail(params: dict[str, list[str]]) -> str:
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    cleanup_old_reports()
     symbol = field(params, "symbol", "").upper()
     if not symbol:
         raise ValueError("Missing symbol")
@@ -5743,118 +5813,121 @@ def render_candidate_detail(params: dict[str, list[str]]) -> str:
     scan_end = default_scan_end_date()
     start = field(params, "start", default_scan_start_date(scan_end).isoformat())
     end = field(params, "end", scan_end.isoformat())
-    signal_start = min(start, (date.fromisoformat(end) - timedelta(days=420)).isoformat())
-    bars = fetch_bars("yfinance", symbol, signal_start, end, "qfq", None)
-    signal_result = latest_b_signal(
-        symbol,
-        bars,
-        int(number_field(params, "ma_length", 5)),
-        int(number_field(params, "vol_length", 20)),
-        number_field(params, "vol_multiplier", 1.45),
-        number_field(params, "reentry_pct", 4.5),
-        number_field(params, "min_price", 5),
-        number_field(params, "min_avg_dollar_volume", 20_000_000),
-        int(number_field(params, "vol_high_days", 3)),
-        number_field(params, "vol_high_multiplier", 1.0),
-        int(number_field(params, "massive_window", 7)),
-        int(number_field(params, "massive_min_count", 1)),
-        int(number_field(params, "massive_max_count", 2)),
-        checkbox_field(params, "b1_require_20ma_gt_50ma", True),
-        checkbox_field(params, "require_ma5_rising", True),
-        checkbox_field(params, "require_5ma_gt_20ma", True),
-    )
-    company_info_panel = render_us_company_info_panel(symbol, signal_result)
+    latest_row = candidate_from_latest_scan(symbol)
+    signal_result = SignalResult(**latest_row) if latest_row else None
+    company_info_panel = render_us_company_info_panel(symbol, signal_result, include_live_profile=False)
     detail_panel = ""
     if signal_result:
-        signal_result = add_space_and_candle_quality(signal_result, quality_bars_for_symbol(symbol, bars, end))
-        add_sector_and_rating([signal_result])
         plan_date = next_market_weekday(date.fromisoformat(signal_result.signal_date)).isoformat()
         detail_panel = f"""
   <section class="status-strip">
     <div class="stat-card"><div class="stat-label">信号日期</div><div class="stat-value">{html.escape(signal_result.signal_date)}</div></div>
     <div class="stat-card"><div class="stat-label">计划买入日</div><div class="stat-value">{plan_date}</div></div>
-    <div class="stat-card"><div class="stat-label">总分 / 评级</div><div class="stat-value">{signal_result.second_stage_score_total}/20 {html.escape(signal_result.second_stage_rating)}</div></div>
+    <div class="stat-card"><div class="stat-label">信号类型</div><div class="stat-value">{html.escape(signal_result.signal_type)}</div></div>
     <div class="stat-card"><div class="stat-label">20日均成交额</div><div class="stat-value">{signal_result.avg_dollar_volume_20d / 1_000_000:.1f}M</div></div>
   </section>
-  <div class="table-wrap">
-    <table>
-      <thead><tr><th>Catalyst</th><th>Sector</th><th>Space</th><th>Candle</th><th>52W Distance</th><th>200MA</th><th>News</th></tr></thead>
-      <tbody><tr>
-        <td>{signal_result.catalyst_score}/5 {html.escape(signal_result.catalyst_label)}</td>
-        <td>{signal_result.sector_score}/5 {html.escape(signal_result.sector_label)}</td>
-        <td>{signal_result.space_score}/5 {html.escape(signal_result.space_label)}</td>
-        <td>{signal_result.candle_score}/5 {html.escape(signal_result.candle_label)}</td>
-        <td>{signal_result.distance_52w_high_pct:.1f}%</td>
-        <td>{html.escape(signal_result.above_200ma)}</td>
-        <td><a href="{html.escape(yahoo_news_url(symbol))}" target="_blank">Yahoo</a> <a href="{html.escape(xueqiu_news_url(symbol, signal_result.company_name))}" target="_blank">雪球</a></td>
-      </tr></tbody>
-    </table>
-  </div>
 """
-    strategy_settings = {
-        "vol_high_days": int(number_field(params, "vol_high_days", 3)),
-        "vol_high_multiplier": number_field(params, "vol_high_multiplier", 1.0),
-        "massive_window": int(number_field(params, "massive_window", 7)),
-        "massive_min_count": int(number_field(params, "massive_min_count", 1)),
-        "massive_max_count": int(number_field(params, "massive_max_count", 2)),
-        "b1_require_20ma_gt_50ma": checkbox_field(params, "b1_require_20ma_gt_50ma", True),
-        "require_ma5_rising": checkbox_field(params, "require_ma5_rising", True),
-        "require_5ma_gt_20ma": checkbox_field(params, "require_5ma_gt_20ma", True),
-        "reentry_pct": number_field(params, "reentry_pct", 4.5),
-        "stop_5ma_pct": 7.5,
-        "hard_stop_pct": 20,
-        "below_20ma_stop_days": int(number_field(params, "below_20ma_stop_days", 2)),
-    }
-    trades, equity_curve = backtest(
-        bars=bars,
-        ma_length=int(number_field(params, "ma_length", 5)),
-        vol_length=int(number_field(params, "vol_length", 20)),
-        vol_multiplier=number_field(params, "vol_multiplier", 1.45),
-        initial_cash=100000,
-        commission_pct=0.1,
-        slippage_pct=0,
-        strategy_name="ratchet",
-        stop_5ma_pct=7.5,
-        hard_stop_pct=20,
-        reentry_pct=number_field(params, "reentry_pct", 4.5),
-        vol_high_days=int(strategy_settings["vol_high_days"]),
-        vol_high_multiplier=float(strategy_settings["vol_high_multiplier"]),
-        massive_window=int(strategy_settings["massive_window"]),
-        massive_min_count=int(strategy_settings["massive_min_count"]),
-        massive_max_count=int(strategy_settings["massive_max_count"]),
-        b1_require_20ma_gt_50ma=bool(strategy_settings["b1_require_20ma_gt_50ma"]),
-        require_ma5_rising=bool(strategy_settings["require_ma5_rising"]),
-        require_5ma_gt_20ma=bool(strategy_settings["require_5ma_gt_20ma"]),
-        below_20ma_stop_days=int(strategy_settings["below_20ma_stop_days"]),
-    )
-    summary = summarize(trades, equity_curve, 100000)
-
-    stem = safe_name(f"candidate_{symbol}_{start}_{end}_{int(time.time())}")
-    report_path = REPORT_DIR / f"{stem}.html"
-    make_report(
-        report_path,
-        f"{symbol} daily chart and strategy points {start} to {end}",
-        bars,
-        trades,
-        equity_curve,
-        summary,
-        benchmark=None,
-        strategy_settings=strategy_settings,
-        report_mode="candidate",
-    )
-    report_url = f"/reports/{quote(report_path.name)}"
+    chart_params = urlencode_candidate_params(params, symbol)
+    chart_url = f"/candidate/chart?{chart_params}"
     return f"""
 <section class="result">
-  <p class="links">
-    <strong>{html.escape(symbol)}</strong>
-    <a href="{report_url}" target="_blank">打开完整图表</a>
-  </p>
+  <p class="links"><strong>{html.escape(symbol)}</strong></p>
   <p class="hint">下方只用于看图确认候选股：保留 K 线、均线、成交量、KDJ 和策略信号点；收益统计请在回测页面查看。</p>
   {company_info_panel}
   {detail_panel}
-  <iframe src="{report_url}" title="{html.escape(symbol)} candidate detail"></iframe>
+  <iframe class="candidate-chart-frame" src="{chart_url}" title="{html.escape(symbol)} candidate chart"></iframe>
 </section>
 """
+
+
+def urlencode_candidate_params(params: dict[str, list[str]], symbol: str) -> str:
+    flat = {
+        key: values[-1]
+        for key, values in params.items()
+        if values and not key.startswith("_")
+    }
+    flat["symbol"] = symbol
+    flat.setdefault("preset", "1y")
+    flat["fast"] = "1"
+    return urlencode(flat)
+
+
+def render_candidate_chart_frame(params: dict[str, list[str]]) -> bytes:
+    payload = watchlist_chart_payload(params)
+    error = str(payload.get("error", "")) if isinstance(payload, dict) else ""
+    body = f"""
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+* {{ box-sizing: border-box; }}
+body {{ margin: 0; background: #fff; color: #131722; font-family: Inter, "Microsoft YaHei UI", "PingFang SC", Arial, sans-serif; }}
+.frame {{ height: 760px; padding: 10px; }}
+.title {{ display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin: 0 0 8px; font-size: 13px; color: #5d6675; }}
+.title strong {{ color: #131722; font-size: 15px; }}
+#price {{ height: 520px; }}
+#kdj {{ height: 170px; margin-top: 12px; border-top: 1px solid #eef1f5; }}
+.error {{ margin: 20px; padding: 12px; border: 1px solid #ffc9cf; background: #fff5f6; color: #b42332; border-radius: 6px; }}
+</style>
+</head>
+<body>
+<div class="frame">
+  <div class="title"><strong id="title">候选图表</strong><span id="range"></span></div>
+  <div id="price"></div>
+  <div id="kdj"></div>
+</div>
+<script type="application/json" id="payload">{json.dumps(payload, ensure_ascii=False, allow_nan=False)}</script>
+<script>
+const payload = JSON.parse(document.getElementById("payload").textContent);
+if (payload.error) {{
+  document.body.innerHTML = `<div class="error">${{payload.error}}</div>`;
+}} else {{
+  document.getElementById("title").textContent = `${{payload.symbol}} 日K`;
+  document.getElementById("range").textContent = `${{payload.start}} 到 ${{payload.end}}`;
+  const priceEl = document.getElementById("price");
+  const kdjEl = document.getElementById("kdj");
+  const baseOptions = {{
+    layout: {{ background: {{ type: "solid", color: "#ffffff" }}, textColor: "#131722", fontFamily: "Inter, Microsoft YaHei UI, PingFang SC, Arial, sans-serif" }},
+    rightPriceScale: {{ borderColor: "#d6dbe3" }},
+    timeScale: {{ borderColor: "#d6dbe3", rightOffset: 6, barSpacing: 8, minBarSpacing: 3 }},
+    grid: {{ vertLines: {{ color: "#f1f3f6" }}, horzLines: {{ color: "#f1f3f6" }} }},
+    crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
+    handleScroll: {{ mouseWheel: true, pressedMouseMove: true }},
+    handleScale: {{ axisPressedMouseMove: true, mouseWheel: true, pinch: true }},
+  }};
+  const chart = LightweightCharts.createChart(priceEl, {{ ...baseOptions, width: priceEl.clientWidth, height: priceEl.clientHeight, rightPriceScale: {{ borderColor: "#d6dbe3", scaleMargins: {{ top: 0.08, bottom: 0.28 }} }} }});
+  const candle = chart.addCandlestickSeries({{ upColor: "#089981", downColor: "#f23645", borderUpColor: "#089981", borderDownColor: "#f23645", wickUpColor: "#089981", wickDownColor: "#f23645", priceLineVisible: false }});
+  candle.setData(payload.ohlc || []);
+  chart.addLineSeries({{ color: "#f5a623", lineWidth: 2, title: "5MA", priceLineVisible: false }}).setData(payload.ma || []);
+  chart.addLineSeries({{ color: "#94a3b8", lineWidth: 1, title: "20MA", priceLineVisible: false, lastValueVisible: false }}).setData(payload.ma20 || []);
+  const volume = chart.addHistogramSeries({{ priceScaleId: "", priceFormat: {{ type: "volume" }}, priceLineVisible: false, lastValueVisible: false }});
+  volume.setData(payload.volume || []);
+  chart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
+  chart.addLineSeries({{ color: "#2962ff", lineWidth: 1, priceScaleId: "", title: "成交量均线", priceLineVisible: false, lastValueVisible: false }}).setData(payload.volMa || []);
+  chart.addLineSeries({{ color: "#f97316", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, priceScaleId: "", title: `${{payload.volMultiplier || ""}}x Vol`, priceLineVisible: false, lastValueVisible: false }}).setData(payload.volThreshold || []);
+  candle.setMarkers(payload.markers || []);
+  const kdjChart = LightweightCharts.createChart(kdjEl, {{ ...baseOptions, width: kdjEl.clientWidth, height: kdjEl.clientHeight }});
+  kdjChart.addLineSeries({{ color: "#2563eb", lineWidth: 1.5, title: "K", priceLineVisible: false }}).setData(payload.kdjK || []);
+  kdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "D", priceLineVisible: false }}).setData(payload.kdjD || []);
+  kdjChart.addLineSeries({{ color: "#7c3aed", lineWidth: 2, title: "J", priceLineVisible: false }}).setData(payload.kdjJ || []);
+  kdjChart.addLineSeries({{ color: "#94a3b8", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: "80", priceLineVisible: false, lastValueVisible: false }}).setData(payload.kdjUpper || []);
+  kdjChart.addLineSeries({{ color: "#94a3b8", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: "20", priceLineVisible: false, lastValueVisible: false }}).setData(payload.kdjLower || []);
+  let syncing = false;
+  chart.timeScale().subscribeVisibleLogicalRangeChange(range => {{ if (!range || syncing) return; syncing = true; kdjChart.timeScale().setVisibleLogicalRange(range); syncing = false; }});
+  kdjChart.timeScale().subscribeVisibleLogicalRangeChange(range => {{ if (!range || syncing) return; syncing = true; chart.timeScale().setVisibleLogicalRange(range); syncing = false; }});
+  chart.timeScale().fitContent();
+  kdjChart.timeScale().fitContent();
+  new ResizeObserver(entries => chart.applyOptions({{ width: Math.floor(entries[0].contentRect.width), height: Math.floor(entries[0].contentRect.height) }})).observe(priceEl);
+  new ResizeObserver(entries => kdjChart.applyOptions({{ width: Math.floor(entries[0].contentRect.width), height: Math.floor(entries[0].contentRect.height) }})).observe(kdjEl);
+}}
+</script>
+</body>
+</html>
+"""
+    return body.encode("utf-8")
 
 
 def watchlist_metadata_by_symbol(symbols: list[str]) -> dict[str, dict[str, object]]:
@@ -6301,7 +6374,11 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
     end_day = default_scan_end_date()
     start_day = chart_start_for_preset(preset, end_day)
     try:
-        bars = fetch_bars("yfinance", symbol, start_day.isoformat(), end_day.isoformat(), "qfq", None)
+        fast_mode = field(params, "fast", "0") == "1"
+        cached = read_price_cache(symbol) if fast_mode else []
+        bars = slice_bars(cached, start_day.isoformat(), end_day.isoformat()) if cached else []
+        if len(bars) < 2:
+            bars = fetch_bars("yfinance", symbol, start_day.isoformat(), end_day.isoformat(), "qfq", None)
     except Exception as exc:
         return {"error": str(exc)}
     if not bars:
@@ -6551,9 +6628,9 @@ def execute_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
         massive_window = int(number_field(params, "massive_window", 7))
         massive_min_count = int(number_field(params, "massive_min_count", 1))
         massive_max_count = int(number_field(params, "massive_max_count", 2))
-        b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", True)
-        require_ma5_rising = checkbox_field(params, "require_ma5_rising", True)
-        require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", True)
+        b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", False)
+        require_ma5_rising = checkbox_field(params, "require_ma5_rising", False)
+        require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", False)
         min_price = number_field(params, "min_price", 5)
         min_avg_dollar_volume = number_field(params, "min_avg_dollar_volume", 20_000_000)
 
@@ -6964,6 +7041,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.scan_job_active()
             elif route_path == "/candidate":
                 self.send_bytes(render_candidate_detail(params).encode("utf-8"))
+            elif route_path == "/candidate/chart":
+                self.send_bytes(render_candidate_chart_frame(params))
             elif route_path.startswith("/reports/"):
                 self.send_report(route_path)
             else:
@@ -7240,3 +7319,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

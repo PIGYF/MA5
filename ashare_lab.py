@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import csv
 import time
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -18,6 +19,9 @@ ASHARE_SECTOR_CACHE_PATH = ASHARE_CACHE_DIR / "sector_map.json"
 ASHARE_SECTOR_CACHE_SECONDS = 7 * 24 * 60 * 60
 ASHARE_UNIVERSE_CACHE_PATH = ASHARE_CACHE_DIR / "universe_cache.json"
 ASHARE_UNIVERSE_CACHE_SECONDS = 18 * 60 * 60
+ASHARE_PRICE_CACHE_DIR = ASHARE_CACHE_DIR / "prices"
+ASHARE_PRICE_CACHE_MAX_BARS = 1300
+ASHARE_PRICE_CACHE_FRESH_GRACE_DAYS = 7
 
 
 @dataclass
@@ -157,7 +161,7 @@ def ashare_chart_payload(
 ) -> dict[str, object]:
     clean = normalize_ashare_symbol(symbol)
     bars, source = fetch_ashare_bars(clean)
-    from backtest import adjust_limit_volumes, build_ratchet_inputs, calculate_kdj, rolling_sma
+    from backtest import adjust_limit_volumes, backtest, build_ratchet_inputs, calculate_kdj, rolling_sma
 
     bt_bars = ashare_to_backtest_bars(bars)
     closes = [bar.close for bar in bt_bars]
@@ -191,6 +195,84 @@ def ashare_chart_payload(
         None if not volume_ma20[i] else adjusted_volumes[i] / float(volume_ma20[i])
         for i in range(len(bars))
     ]
+    chart_markers = [
+        {
+            "time": bars[i].date,
+            "position": "belowBar",
+            "color": "#2563eb" if buy_stage[i] == "B2" else "#84cc16",
+            "shape": "circle",
+            "text": buy_stage[i] or "B",
+        }
+        for i, signal in enumerate(buy_signal)
+        if signal
+    ]
+    try:
+        trades, equity_curve = backtest(
+            bars=bt_bars,
+            ma_length=5,
+            vol_length=20,
+            vol_multiplier=1.45,
+            initial_cash=100000,
+            commission_pct=0.03,
+            slippage_pct=0.3,
+            strategy_name="ratchet",
+            stop_5ma_pct=7.5,
+            hard_stop_pct=20,
+            reentry_pct=4.5,
+            vol_high_days=2,
+            vol_high_multiplier=1.0,
+            massive_window=7,
+            massive_min_count=1,
+            massive_max_count=2,
+            b1_require_20ma_gt_50ma=b1_require_20ma_gt_50ma,
+            require_ma5_rising=require_ma5_rising,
+            require_5ma_gt_20ma=require_5ma_gt_20ma,
+            below_20ma_stop_days=2,
+            market="cn",
+            limit_pct=limit_pct,
+            max_buy_gap_pct=6.0,
+            stamp_duty_pct=0.05,
+            weak_trend_exit_mode="hybrid",
+        )
+        executed_buy_markers = []
+        previous_position = 0.0
+        for row in equity_curve:
+            position = float(row.get("position_shares", 0) or 0)
+            if position > previous_position:
+                executed_buy_markers.append(
+                    {
+                        "time": str(row.get("date", "")),
+                        "position": "belowBar",
+                        "color": "#089981",
+                        "shape": "arrowUp",
+                        "text": "买",
+                    }
+                )
+            previous_position = position
+        sell_signal_markers = [
+            {
+                "time": str(row.get("date", "")),
+                "position": "aboveBar",
+                "color": "#f97316",
+                "shape": "circle",
+                "text": "S",
+            }
+            for row in equity_curve
+            if int(row.get("sell_signal", 0) or 0)
+        ]
+        executed_sell_markers = [
+            {
+                "time": trade.exit_date,
+                "position": "aboveBar",
+                "color": "#f23645",
+                "shape": "arrowDown",
+                "text": "卖",
+            }
+            for trade in trades
+        ]
+        chart_markers = executed_buy_markers + sell_signal_markers + executed_sell_markers
+    except Exception:
+        pass
     return {
         "symbol": clean,
         "name": name,
@@ -221,6 +303,7 @@ def ashare_chart_payload(
             for i, signal in enumerate(buy_signal)
             if signal
         ],
+        "markers": sorted(chart_markers, key=lambda item: str(item["time"])),
     }
 
 def normalize_ashare_symbol(symbol: str) -> str:
@@ -412,15 +495,105 @@ def fetch_tencent_qfq_bars(symbol: str, start_day: date, end_day: date) -> tuple
     return bars, "tencent qfq"
 
 
+def ashare_price_cache_path(symbol: str) -> Path:
+    clean = normalize_ashare_symbol(symbol)
+    return ASHARE_PRICE_CACHE_DIR / f"{clean}.csv"
+
+
+def read_ashare_price_cache(symbol: str) -> list[AShareBar]:
+    path = ashare_price_cache_path(symbol)
+    if not path.exists():
+        return []
+    bars: list[AShareBar] = []
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            for row in csv.DictReader(f):
+                try:
+                    bars.append(
+                        AShareBar(
+                            date=str(row.get("date", ""))[:10],
+                            open=float(row.get("open", 0.0) or 0.0),
+                            high=float(row.get("high", 0.0) or 0.0),
+                            low=float(row.get("low", 0.0) or 0.0),
+                            close=float(row.get("close", 0.0) or 0.0),
+                            volume=float(row.get("volume", 0.0) or 0.0),
+                            amount=float(row.get("amount", 0.0) or 0.0),
+                        )
+                    )
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    return sorted([bar for bar in bars if bar.date and bar.close > 0], key=lambda bar: bar.date)
+
+
+def write_ashare_price_cache(symbol: str, bars: list[AShareBar]) -> list[AShareBar]:
+    ASHARE_PRICE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    merged = {bar.date: bar for bar in bars if bar.date and bar.close > 0}
+    ordered = [merged[key] for key in sorted(merged)]
+    if len(ordered) > ASHARE_PRICE_CACHE_MAX_BARS:
+        ordered = ordered[-ASHARE_PRICE_CACHE_MAX_BARS:]
+    with ashare_price_cache_path(symbol).open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["date", "open", "high", "low", "close", "volume", "amount"])
+        writer.writeheader()
+        for bar in ordered:
+            writer.writerow(bar.__dict__)
+    return ordered
+
+
+def slice_ashare_bars(bars: list[AShareBar], start_day: date, end_day: date) -> list[AShareBar]:
+    start_text = start_day.isoformat()
+    end_text = end_day.isoformat()
+    return [bar for bar in bars if start_text <= bar.date <= end_text]
+
+
+def ashare_cache_covers_range(bars: list[AShareBar], start_day: date, end_day: date) -> bool:
+    if not bars:
+        return False
+    dates = [date.fromisoformat(bar.date) for bar in bars if bar.date]
+    if not dates:
+        return False
+    earliest = min(dates)
+    latest = max(dates)
+    if earliest > start_day:
+        return False
+    stale_cutoff = date.today() - timedelta(days=ASHARE_PRICE_CACHE_FRESH_GRACE_DAYS)
+    required_latest = end_day if end_day < stale_cutoff else stale_cutoff
+    return latest >= required_latest
+
+
 def fetch_ashare_bars(symbol: str, start: str | None = None, end: str | None = None) -> tuple[list[AShareBar], str]:
     clean = normalize_ashare_symbol(symbol)
     end_day = date.today() if end is None else date.fromisoformat(end)
     start_day = end_day - timedelta(days=520) if start is None else date.fromisoformat(start)
-    start_ak = start_day.strftime("%Y%m%d")
+    cached_bars = read_ashare_price_cache(clean)
+    if ashare_cache_covers_range(cached_bars, start_day, end_day):
+        sliced = slice_ashare_bars(cached_bars, start_day, end_day)
+        if len(sliced) >= 2:
+            return sliced, "ashare price cache"
+
+    fetch_start_day = start_day
+    if cached_bars:
+        try:
+            cached_dates = [date.fromisoformat(bar.date) for bar in cached_bars if bar.date]
+            earliest = min(cached_dates)
+            latest = max(cached_dates)
+            if earliest <= start_day:
+                fetch_start_day = max(start_day, latest - timedelta(days=7))
+        except Exception:
+            fetch_start_day = start_day
+
+    start_ak = fetch_start_day.strftime("%Y%m%d")
     end_ak = end_day.strftime("%Y%m%d")
 
+    def finish_with_cache(fetched: list[AShareBar], source: str) -> tuple[list[AShareBar], str]:
+        merged = write_ashare_price_cache(clean, cached_bars + fetched)
+        sliced = slice_ashare_bars(merged, start_day, end_day)
+        return (sliced if sliced else fetched), f"{source} + cache"
+
     try:
-        return fetch_tencent_qfq_bars(clean, start_day, end_day)
+        bars, source = fetch_tencent_qfq_bars(clean, fetch_start_day, end_day)
+        return finish_with_cache(bars, source)
     except Exception:
         pass
 
@@ -441,18 +614,17 @@ def fetch_ashare_bars(symbol: str, start: str | None = None, end: str | None = N
             for _, row in df.iterrows()
         ]
         if bars:
-            return bars, "efinance"
+            return finish_with_cache(bars, "efinance")
     except Exception:
         pass
 
     try:
-        return fetch_tdx_ashare_bars(clean, start_day, end_day)
+        bars, source = fetch_tdx_ashare_bars(clean, fetch_start_day, end_day)
+        return finish_with_cache(bars, source)
     except Exception:
         pass
 
     try:
-        raise RuntimeError("akshare disabled")
-        raise RuntimeError("akshare disabled")
         import akshare as ak
 
         df = ak.stock_zh_a_hist(symbol=clean, period="daily", start_date=start_ak, end_date=end_ak, adjust="qfq")
@@ -469,7 +641,7 @@ def fetch_ashare_bars(symbol: str, start: str | None = None, end: str | None = N
             for _, row in df.iterrows()
         ]
         if bars:
-            return bars, "akshare"
+            return finish_with_cache(bars, "akshare")
     except Exception:
         pass
 
