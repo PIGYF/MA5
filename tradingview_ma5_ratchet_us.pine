@@ -17,6 +17,7 @@ below20StopDays = input.int(2, "Consecutive closes below MA20", minval=0)
 hardStopPct = input.float(20.0, "Cost stop %", minval=0.1, step=0.1)
 showHoldingBg = input.bool(true, "Show buy/sell holding background", group="Display")
 showSignalMarkers = input.bool(false, "Show B1/B2/S markers", group="Display")
+showExecutionMarkers = input.bool(true, "Show next-open buy/sell markers", group="Display")
 showIntervalLabels = input.bool(true, "Show interval % label", group="Display")
 showBarColor = input.bool(false, "Color signal candles", group="Display")
 showMa50 = input.bool(false, "Show MA50", group="Display")
@@ -71,13 +72,36 @@ var bool inTrade = false
 var float entryPrice = na
 var int entryBar = na
 var string entryStage = ""
+var bool pendingBuy = false
+var string pendingBuyStage = ""
+var bool pendingSell = false
 
-entrySignal = buySignal and not inTrade
-if entrySignal
+sellExecution = pendingSell and inTrade
+if sellExecution
+    intervalPct = not na(entryPrice) and entryPrice != 0 ? (open / entryPrice - 1) * 100 : na
+    if showIntervalLabels and not na(intervalPct)
+        labelColor = intervalPct >= 0 ? color.new(color.teal, 0) : color.new(color.red, 0)
+        labelText = entryStage + " -> 卖\n" + str.tostring(intervalPct, "#.##") + "%"
+        label.new(bar_index, high, labelText, style=label.style_label_down, color=labelColor, textcolor=color.white, size=size.small)
+    inTrade := false
+    entryPrice := na
+    entryBar := na
+    entryStage := ""
+    pendingSell := false
+
+buyExecution = pendingBuy and not inTrade
+if buyExecution
     inTrade := true
-    entryPrice := close
+    entryPrice := open
     entryBar := bar_index
-    entryStage := b2 ? "B2" : "B1"
+    entryStage := pendingBuyStage
+    pendingBuy := false
+    pendingBuyStage := ""
+
+entrySignal = buySignal and not inTrade and not pendingBuy
+if entrySignal
+    pendingBuy := true
+    pendingBuyStage := b2 ? "B2" : "B1"
 
 var int below20Days = 0
 
@@ -92,17 +116,9 @@ costStop = inTrade and not na(entryPrice) and close < entryPrice * (1 - hardStop
 sellSignal = defenseStop or trendStop or costStop
 
 if sellSignal
-    intervalPct = not na(entryPrice) and entryPrice != 0 ? (close / entryPrice - 1) * 100 : na
-    if showIntervalLabels and not na(intervalPct)
-        labelColor = intervalPct >= 0 ? color.new(color.teal, 0) : color.new(color.red, 0)
-        labelText = entryStage + " -> S\n" + str.tostring(intervalPct, "#.##") + "%"
-        label.new(bar_index, high, labelText, style=label.style_label_down, color=labelColor, textcolor=color.white, size=size.small)
-    inTrade := false
-    entryPrice := na
-    entryBar := na
-    entryStage := ""
+    pendingSell := true
 
-bgColor = sellSignal ? color.new(color.red, 84) : inTrade ? color.new(color.teal, 90) : na
+bgColor = sellExecution ? color.new(color.red, 84) : inTrade ? color.new(color.teal, 90) : na
 bgcolor(showHoldingBg ? bgColor : na, title="Holding background")
 
 plot(ma5, "MA5", color=color.new(color.blue, 0), linewidth=2)
@@ -114,9 +130,13 @@ plot(showStopLines ? ma5 * (1 - stopMa5Pct / 100) : na, "MA5 stop line", color=c
 plotshape(showSignalMarkers and entrySignal and b1, title="B1", text="B1", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 0), textcolor=color.black, size=size.tiny)
 plotshape(showSignalMarkers and entrySignal and b2, title="B2", text="B2", style=shape.circle, location=location.belowbar, color=color.new(color.blue, 0), textcolor=color.white, size=size.tiny)
 plotshape(showSignalMarkers and sellSignal, title="Sell", text="S", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+plotshape(showExecutionMarkers and buyExecution, title="Buy execution", text="买", style=shape.arrowup, location=location.belowbar, color=color.new(color.teal, 0), textcolor=color.white, size=size.tiny)
+plotshape(showExecutionMarkers and sellExecution, title="Sell execution", text="卖", style=shape.arrowdown, location=location.abovebar, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
 
 barcolor(showBarColor ? (b1 ? color.new(color.lime, 70) : b2 ? color.new(color.blue, 70) : sellSignal ? color.new(color.red, 70) : na) : na)
 
 alertcondition(b1, "MA5 Ratchet B1", "B1 trend-confirm signal")
 alertcondition(b2, "MA5 Ratchet B2", "B2 reentry/add signal")
 alertcondition(sellSignal, "MA5 Ratchet Sell", "Sell/stop signal")
+alertcondition(buyExecution, "MA5 Ratchet Buy Execution", "Buy at next bar open")
+alertcondition(sellExecution, "MA5 Ratchet Sell Execution", "Sell at next bar open")

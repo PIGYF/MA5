@@ -1289,6 +1289,9 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .watchlist-chart {{ width: 100%; height: 100%; }}
 .watchlist-price-chart {{ height: 640px; }}
 .watchlist-kdj-chart {{ height: 200px; margin-top: 12px; border-top: 1px solid #eef1f5; }}
+.chart-toggle-row {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 10px; }}
+.chart-toggle {{ display: inline-flex; align-items: center; gap: 5px; min-height: 28px; border: 1px solid #d6dbe3; background: #fff; color: #334155; border-radius: 4px; padding: 0 8px; font-size: 12px; font-weight: 800; cursor: pointer; }}
+.chart-toggle input {{ margin: 0; }}
 .price-chart-wrap {{ position: relative; height: 560px; }}
 .price-chart-wrap .watchlist-chart {{ height: 100%; }}
 .holding-bands {{ position: absolute; inset: 0; z-index: 2; pointer-events: none; overflow: hidden; }}
@@ -2872,6 +2875,10 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
         <p class="hint">主图显示 K 线、MA5/MA20、成交量与 B1/B2 标记；下方显示 KDJ。</p>
       </div>
     </div>
+    <div class="chart-toggle-row">
+      <label class="chart-toggle"><input id="ashare-toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
+      <label class="chart-toggle"><input id="ashare-toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
+    </div>
     <div class="watchlist-chart-shell" style="height:780px;">
       <div class="price-chart-wrap">
         <div id="ashare-main-chart" class="watchlist-chart"></div>
@@ -2891,6 +2898,8 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     const holdingBands = document.getElementById("ashare-holding-bands");
     const kdjEl = document.getElementById("ashare-kdj-chart");
     const tooltip = document.getElementById("ashare-tooltip");
+    const toggleMa5Stop25 = document.getElementById("ashare-toggle-ma5-stop-25");
+    const toggleMa5StopStrategy = document.getElementById("ashare-toggle-ma5-stop-strategy");
     const toLine = rows => (rows || []).map(row => ({{ time: row.x, value: row.y }})).filter(row => row.value !== null && row.value !== undefined);
     const candleRows = ohlc.map(row => ({{ time: row.x, open: row.open, high: row.high, low: row.low, close: row.close }}));
     const volumeRows = volume.map(row => ({{ time: row.x, value: row.y, color: row.color }}));
@@ -2923,6 +2932,15 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     shortTrend.setData(toLine(payload.ma5 || payload.zx_short_trend));
     const multiTrend = mainChart.addLineSeries({{ color: "#94a3b8", lineWidth: 1, title: "MA20", priceLineVisible: false, lastValueVisible: false }});
     multiTrend.setData(toLine(payload.ma20 || payload.zx_multi_trend));
+    const ma5Stop25 = mainChart.addLineSeries({{ color: "#dc2626", lineWidth: 1, title: "5MA-2.5%", priceLineVisible: false, lastValueVisible: false }});
+    const ma5Stop = mainChart.addLineSeries({{ color: "#ef4444", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, title: `5MA-${{payload.ma5StopPct || 7.5}}%`, priceLineVisible: false, lastValueVisible: false }});
+    function refreshDefenseLines() {{
+      ma5Stop25.setData(toggleMa5Stop25?.checked ? toLine(payload.ma5Stop25) : []);
+      ma5Stop.setData(toggleMa5StopStrategy?.checked ? toLine(payload.ma5Stop) : []);
+    }}
+    refreshDefenseLines();
+    toggleMa5Stop25?.addEventListener("change", refreshDefenseLines);
+    toggleMa5StopStrategy?.addEventListener("change", refreshDefenseLines);
     const volSeries = mainChart.addHistogramSeries({{ priceScaleId: "", priceFormat: {{ type: "volume" }}, priceLineVisible: false, lastValueVisible: false }});
     volSeries.setData(volumeRows);
     const volMaSeries = mainChart.addLineSeries({{ color: "#2962ff", lineWidth: 1, priceScaleId: "", title: "成交量均线", priceLineVisible: false, lastValueVisible: false }});
@@ -2956,9 +2974,17 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     }}
     syncRange(mainChart, kdjChart);
     syncRange(kdjChart, mainChart);
+    let holdingBandFrame = null;
+    function scheduleHoldingBandsRender() {{
+      if (holdingBandFrame !== null) window.cancelAnimationFrame(holdingBandFrame);
+      holdingBandFrame = window.requestAnimationFrame(() => {{
+        holdingBandFrame = null;
+        renderHoldingBands();
+      }});
+    }}
     function renderHoldingBands() {{
       if (!holdingBands) return;
-      holdingBands.innerHTML = "";
+      holdingBands.replaceChildren();
       const periods = payload.holdingPeriods || [];
       const barSpacing = mainChart.timeScale().options().barSpacing || 8;
       const width = mainEl.clientWidth;
@@ -2977,7 +3003,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
         holdingBands.appendChild(band);
       }}
     }}
-    mainChart.timeScale().subscribeVisibleLogicalRangeChange(() => window.requestAnimationFrame(renderHoldingBands));
+    mainChart.timeScale().subscribeVisibleLogicalRangeChange(() => scheduleHoldingBandsRender());
     function formatNum(value, digits = 2) {{
       return value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ minimumFractionDigits: digits, maximumFractionDigits: digits }});
     }}
@@ -3003,7 +3029,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     new ResizeObserver(entries => {{
       const rect = entries[0].contentRect;
       mainChart.applyOptions({{ width: Math.floor(rect.width), height: Math.floor(rect.height) }});
-      window.requestAnimationFrame(renderHoldingBands);
+      scheduleHoldingBandsRender();
     }}).observe(mainEl);
     new ResizeObserver(entries => {{
       const rect = entries[0].contentRect;
@@ -3011,7 +3037,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     }}).observe(kdjEl);
     mainChart.timeScale().fitContent();
     kdjChart.timeScale().fitContent();
-    window.requestAnimationFrame(renderHoldingBands);
+    scheduleHoldingBandsRender();
   }})();
   </script>
 </section>
@@ -3299,6 +3325,10 @@ def render_ashare_watchlist_page(params: dict[str, list[str]] | None = None) -> 
       <div class="watch-detail-item"><span>数据源</span><strong id="ashare-detail-source">-</strong></div>
       <div class="watch-detail-item"><span>交易日数量</span><strong id="ashare-detail-count">-</strong></div>
     </div>
+    <div class="chart-toggle-row">
+      <label class="chart-toggle"><input id="ashare-watch-toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
+      <label class="chart-toggle"><input id="ashare-watch-toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
+    </div>
     <div class="watchlist-chart-shell" style="height:780px;">
       <div class="price-chart-wrap">
         <div id="ashare-watch-main-chart" class="watchlist-chart"></div>
@@ -3321,6 +3351,8 @@ const ashareTooltip = document.getElementById("ashare-watch-tooltip");
 const ashareLoading = document.getElementById("ashare-watch-loading");
 const ashareTitle = document.getElementById("ashare-watch-title");
 const ashareSubtitle = document.getElementById("ashare-watch-subtitle");
+const ashareToggleMa5Stop25 = document.getElementById("ashare-watch-toggle-ma5-stop-25");
+const ashareToggleMa5StopStrategy = document.getElementById("ashare-watch-toggle-ma5-stop-strategy");
 
 function clearAshareCharts() {{
   if (ashareMainChart) ashareMainChart.remove();
@@ -3354,6 +3386,15 @@ function renderAshareWatchChart(payload) {{
   trend.setData(toLine(payload.ma5 || payload.zx_short_trend));
   const multi = ashareMainChart.addLineSeries({{ color: "#94a3b8", lineWidth: 1, title: "MA20", priceLineVisible: false, lastValueVisible: false }});
   multi.setData(toLine(payload.ma20 || payload.zx_multi_trend));
+  const ma5Stop25 = ashareMainChart.addLineSeries({{ color: "#dc2626", lineWidth: 1, title: "5MA-2.5%", priceLineVisible: false, lastValueVisible: false }});
+  const ma5Stop = ashareMainChart.addLineSeries({{ color: "#ef4444", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, title: `5MA-${{payload.ma5StopPct || 7.5}}%`, priceLineVisible: false, lastValueVisible: false }});
+  function refreshAshareDefenseLines() {{
+    ma5Stop25.setData(ashareToggleMa5Stop25?.checked ? toLine(payload.ma5Stop25) : []);
+    ma5Stop.setData(ashareToggleMa5StopStrategy?.checked ? toLine(payload.ma5Stop) : []);
+  }}
+  refreshAshareDefenseLines();
+  if (ashareToggleMa5Stop25) ashareToggleMa5Stop25.onchange = refreshAshareDefenseLines;
+  if (ashareToggleMa5StopStrategy) ashareToggleMa5StopStrategy.onchange = refreshAshareDefenseLines;
   const volSeries = ashareMainChart.addHistogramSeries({{ priceScaleId: "", priceFormat: {{ type: "volume" }}, priceLineVisible: false, lastValueVisible: false }});
   volSeries.setData(volumes);
   const volMa = ashareMainChart.addLineSeries({{ color: "#2962ff", lineWidth: 1, priceScaleId: "", title: "成交量均线", priceLineVisible: false, lastValueVisible: false }});
@@ -3378,9 +3419,17 @@ function renderAshareWatchChart(payload) {{
   }}
   sync(ashareMainChart, ashareKdjChart);
   sync(ashareKdjChart, ashareMainChart);
+  let ashareHoldingBandFrame = null;
+  function scheduleAshareHoldingBandsRender() {{
+    if (ashareHoldingBandFrame !== null) window.cancelAnimationFrame(ashareHoldingBandFrame);
+    ashareHoldingBandFrame = window.requestAnimationFrame(() => {{
+      ashareHoldingBandFrame = null;
+      renderHoldingBands();
+    }});
+  }}
   function renderHoldingBands() {{
     if (!ashareHoldingBands) return;
-    ashareHoldingBands.innerHTML = "";
+    ashareHoldingBands.replaceChildren();
     const periods = payload.holdingPeriods || [];
     const barSpacing = ashareMainChart.timeScale().options().barSpacing || 8;
     const width = ashareMainEl.clientWidth;
@@ -3399,7 +3448,7 @@ function renderAshareWatchChart(payload) {{
       ashareHoldingBands.appendChild(band);
     }}
   }}
-  ashareMainChart.timeScale().subscribeVisibleLogicalRangeChange(() => window.requestAnimationFrame(renderHoldingBands));
+  ashareMainChart.timeScale().subscribeVisibleLogicalRangeChange(() => scheduleAshareHoldingBandsRender());
   const f = value => value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }});
   const fv = value => value === null || value === undefined ? "-" : Number(value).toLocaleString(undefined, {{ maximumFractionDigits: 0 }});
   ashareMainChart.subscribeCrosshairMove(param => {{
@@ -3418,7 +3467,7 @@ function renderAshareWatchChart(payload) {{
   new ResizeObserver(entries => {{
     const rect = entries[0].contentRect;
     if (ashareMainChart) ashareMainChart.applyOptions({{ width: Math.floor(rect.width), height: Math.floor(rect.height) }});
-    window.requestAnimationFrame(renderHoldingBands);
+    scheduleAshareHoldingBandsRender();
   }}).observe(ashareMainEl);
   new ResizeObserver(entries => {{
     const rect = entries[0].contentRect;
@@ -3426,7 +3475,7 @@ function renderAshareWatchChart(payload) {{
   }}).observe(ashareKdjEl);
   ashareMainChart.timeScale().fitContent();
   ashareKdjChart.timeScale().fitContent();
-  window.requestAnimationFrame(renderHoldingBands);
+  scheduleAshareHoldingBandsRender();
 }}
 
 async function loadAshareWatchChart(symbol) {{
@@ -5969,12 +6018,19 @@ body {{ margin: 0; background: #fff; color: #131722; font-family: Inter, "Micros
 .title strong {{ color: #131722; font-size: 15px; }}
 #price {{ height: 520px; }}
 #kdj {{ height: 170px; margin-top: 12px; border-top: 1px solid #eef1f5; }}
+.chart-toggle-row {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 8px; }}
+.chart-toggle {{ display: inline-flex; align-items: center; gap: 5px; min-height: 24px; border: 1px solid #d6dbe3; background: #fff; color: #334155; border-radius: 4px; padding: 0 7px; font-size: 12px; font-weight: 800; cursor: pointer; }}
+.chart-toggle input {{ margin: 0; }}
 .error {{ margin: 20px; padding: 12px; border: 1px solid #ffc9cf; background: #fff5f6; color: #b42332; border-radius: 6px; }}
 </style>
 </head>
 <body>
 <div class="frame">
   <div class="title"><strong id="title">候选图表</strong><span id="range"></span></div>
+  <div class="chart-toggle-row">
+    <label class="chart-toggle"><input id="candidate-toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
+    <label class="chart-toggle"><input id="candidate-toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
+  </div>
   <div id="price"></div>
   <div id="kdj"></div>
 </div>
@@ -6002,6 +6058,15 @@ if (payload.error) {{
   candle.setData(payload.ohlc || []);
   chart.addLineSeries({{ color: "#f5a623", lineWidth: 2, title: "5MA", priceLineVisible: false }}).setData(payload.ma || []);
   chart.addLineSeries({{ color: "#94a3b8", lineWidth: 1, title: "20MA", priceLineVisible: false, lastValueVisible: false }}).setData(payload.ma20 || []);
+  const ma5Stop25 = chart.addLineSeries({{ color: "#dc2626", lineWidth: 1, title: "5MA-2.5%", priceLineVisible: false, lastValueVisible: false }});
+  const ma5Stop = chart.addLineSeries({{ color: "#ef4444", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, title: `5MA-${{payload.ma5StopPct || 7.5}}%`, priceLineVisible: false, lastValueVisible: false }});
+  function refreshDefenseLines() {{
+    ma5Stop25.setData(document.getElementById("candidate-toggle-ma5-stop-25")?.checked ? (payload.ma5Stop25 || []) : []);
+    ma5Stop.setData(document.getElementById("candidate-toggle-ma5-stop-strategy")?.checked ? (payload.ma5Stop || []) : []);
+  }}
+  refreshDefenseLines();
+  document.getElementById("candidate-toggle-ma5-stop-25")?.addEventListener("change", refreshDefenseLines);
+  document.getElementById("candidate-toggle-ma5-stop-strategy")?.addEventListener("change", refreshDefenseLines);
   const volume = chart.addHistogramSeries({{ priceScaleId: "", priceFormat: {{ type: "volume" }}, priceLineVisible: false, lastValueVisible: false }});
   volume.setData(payload.volume || []);
   chart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
@@ -6249,6 +6314,10 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
       <button type="button" data-preset="3y">3Y</button>
       <button type="button" data-preset="5y">5Y</button>
     </div>
+    <div class="chart-toggle-row">
+      <label class="chart-toggle"><input id="watch-toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
+      <label class="chart-toggle"><input id="watch-toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
+    </div>
     <div class="watchlist-chart-shell">
       <div id="watchlist-chart" class="watchlist-chart watchlist-price-chart"></div>
       <div id="watchlist-kdj-chart" class="watchlist-chart watchlist-kdj-chart"></div>
@@ -6270,6 +6339,8 @@ const watchTooltip = document.getElementById("watchlist-tooltip");
 const watchTitle = document.getElementById("watch-chart-title");
 const watchSubtitle = document.getElementById("watch-chart-subtitle");
 const watchLoading = document.getElementById("watch-chart-loading");
+const watchToggleMa5Stop25 = document.getElementById("watch-toggle-ma5-stop-25");
+const watchToggleMa5StopStrategy = document.getElementById("watch-toggle-ma5-stop-strategy");
 const divergenceSymbolInput = document.getElementById("divergence-symbol-input");
 const divergenceList = document.getElementById("divergence-list");
 function attr(node, name, fallback = "-") {{
@@ -6349,6 +6420,15 @@ function makeWatchChart(payload) {{
   ma.setData(payload.ma);
   const ma20 = watchChart.addLineSeries({{ color: "#94a3b8", lineWidth: 1, title: "20MA", priceLineVisible: false, lastValueVisible: false }});
   ma20.setData(payload.ma20 || []);
+  const ma5Stop25 = watchChart.addLineSeries({{ color: "#dc2626", lineWidth: 1, title: "5MA-2.5%", priceLineVisible: false, lastValueVisible: false }});
+  const ma5Stop = watchChart.addLineSeries({{ color: "#ef4444", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, title: `5MA-${{payload.ma5StopPct || 7.5}}%`, priceLineVisible: false, lastValueVisible: false }});
+  function refreshWatchDefenseLines() {{
+    ma5Stop25.setData(watchToggleMa5Stop25?.checked ? (payload.ma5Stop25 || []) : []);
+    ma5Stop.setData(watchToggleMa5StopStrategy?.checked ? (payload.ma5Stop || []) : []);
+  }}
+  refreshWatchDefenseLines();
+  if (watchToggleMa5Stop25) watchToggleMa5Stop25.onchange = refreshWatchDefenseLines;
+  if (watchToggleMa5StopStrategy) watchToggleMa5StopStrategy.onchange = refreshWatchDefenseLines;
   const volume = watchChart.addHistogramSeries({{ priceScaleId: "", priceFormat: {{ type: "volume" }}, priceLineVisible: false, lastValueVisible: false }});
   volume.setData(payload.volume);
   watchChart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
@@ -6545,6 +6625,8 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
     trade_exit_dates = {trade.exit_date for trade in trades}
     rows = []
     ma_points = []
+    ma5_stop_points = []
+    ma5_stop_25_points = []
     ma20_points = []
     vol_ma_points = []
     vol_threshold_points = []
@@ -6584,6 +6666,8 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
         )
         if ma is not None:
             ma_points.append({"time": bar.date, "value": ma})
+            ma5_stop_points.append({"time": bar.date, "value": ma * 0.925})
+            ma5_stop_25_points.append({"time": bar.date, "value": ma * 0.975})
         if ma20 is not None:
             ma20_points.append({"time": bar.date, "value": ma20})
         if vol_ma is not None:
@@ -6615,6 +6699,9 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
         "volume": volume_points,
         "ma": ma_points,
         "ma20": ma20_points,
+        "ma5Stop": ma5_stop_points,
+        "ma5Stop25": ma5_stop_25_points,
+        "ma5StopPct": 7.5,
         "volMa": vol_ma_points,
         "volThreshold": vol_threshold_points,
         "volMultiplier": vol_multiplier,

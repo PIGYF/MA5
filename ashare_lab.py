@@ -308,6 +308,9 @@ def ashare_chart_payload(
         ],
         "ma5": [{"x": bars[i].date, "y": value} for i, value in enumerate(ma5) if value is not None],
         "ma20": [{"x": bars[i].date, "y": value} for i, value in enumerate(ma20) if value is not None],
+        "ma5Stop": [{"x": bars[i].date, "y": value * 0.925} for i, value in enumerate(ma5) if value is not None],
+        "ma5Stop25": [{"x": bars[i].date, "y": value * 0.975} for i, value in enumerate(ma5) if value is not None],
+        "ma5StopPct": 7.5,
         "amount20": [{"x": bars[i].date, "y": value / 100_000_000} for i, value in enumerate(amount20) if value is not None],
         "volume_ma20": [{"x": bars[i].date, "y": value} for i, value in enumerate(volume_ma20) if value is not None],
         "volume_ratio": [{"x": bars[i].date, "y": value} for i, value in enumerate(volume_ratio) if value is not None],
@@ -926,9 +929,59 @@ def cached_ashare_universe_items() -> list[AShareUniverseItem]:
     return sorted(items, key=lambda item: item.turnover or item.market_cap_100m, reverse=True)
 
 
+PINYIN_INITIAL_RANGES = [
+    (-20319, -20284, "A"),
+    (-20283, -19776, "B"),
+    (-19775, -19219, "C"),
+    (-19218, -18711, "D"),
+    (-18710, -18527, "E"),
+    (-18526, -18240, "F"),
+    (-18239, -17923, "G"),
+    (-17922, -17418, "H"),
+    (-17417, -16475, "J"),
+    (-16474, -16213, "K"),
+    (-16212, -15641, "L"),
+    (-15640, -15166, "M"),
+    (-15165, -14923, "N"),
+    (-14922, -14915, "O"),
+    (-14914, -14631, "P"),
+    (-14630, -14150, "Q"),
+    (-14149, -14091, "R"),
+    (-14090, -13319, "S"),
+    (-13318, -12839, "T"),
+    (-12838, -12557, "W"),
+    (-12556, -11848, "X"),
+    (-11847, -11056, "Y"),
+    (-11055, -10247, "Z"),
+]
+
+
+def pinyin_initial_for_char(char: str) -> str:
+    if not char:
+        return ""
+    if char.isascii():
+        return char.upper() if char.isalnum() else ""
+    try:
+        encoded = char.encode("gbk")
+    except Exception:
+        return ""
+    if len(encoded) < 2:
+        return ""
+    code = encoded[0] * 256 + encoded[1] - 65536
+    for start, end, initial in PINYIN_INITIAL_RANGES:
+        if start <= code <= end:
+            return initial
+    return ""
+
+
+def ashare_name_initials(name: str) -> str:
+    return "".join(pinyin_initial_for_char(char) for char in str(name or ""))
+
+
 def suggest_ashare_symbols(query: str, limit: int = 12) -> list[dict[str, object]]:
     q_raw = query.strip()
     q = q_raw.upper()
+    q_letters = "".join(ch for ch in q if ch.isalnum())
     if not q:
         return []
     items = cached_ashare_universe_items()
@@ -941,16 +994,23 @@ def suggest_ashare_symbols(query: str, limit: int = 12) -> list[dict[str, object
     for item in items:
         symbol = item.symbol.upper()
         name = item.name.upper()
+        initials = ashare_name_initials(item.name).upper()
         if symbol == q or item.name == q_raw:
             score = 0
         elif symbol.startswith(q):
             score = 1
-        elif q in symbol:
+        elif q_letters and initials == q_letters:
             score = 2
-        elif item.name.startswith(q_raw):
+        elif q_letters and initials.startswith(q_letters):
             score = 3
-        elif q in name or q_raw in item.name:
+        elif q in symbol:
             score = 4
+        elif item.name.startswith(q_raw):
+            score = 5
+        elif q in name or q_raw in item.name:
+            score = 6
+        elif q_letters and q_letters in initials:
+            score = 7
         else:
             continue
         scored.append((score, item))

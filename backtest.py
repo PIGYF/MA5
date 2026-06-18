@@ -764,6 +764,7 @@ def backtest(
 
         dynamic_stop = ""
         trend_stop_line = ""
+        ma5_stop_line = ""
         defense_warning = False
         ratchet_sell_today = False
         exit_reason_today = ""
@@ -773,6 +774,7 @@ def backtest(
             highest_close_since_entry = max(highest_close_since_entry, bar.close)
             dynamic_stop = entry_price * (1 - hard_stop_pct / 100) if entry_price else ""
             trend_stop_line = "" if ma20[i] is None else ma20[i]
+            ma5_stop_line = "" if ma[i] is None else ma[i] * (1 - stop_5ma_pct / 100)
             if ma[i] is not None and bar.close > ma[i]:
                 weak_reclaimed_ma5 = True
             if ma20[i] is not None and bar.close > ma20[i]:
@@ -867,6 +869,7 @@ def backtest(
                 "equity": equity,
                 "dynamic_stop": dynamic_stop,
                 "trend_stop": trend_stop_line,
+                "ma5_stop": ma5_stop_line,
             }
         )
 
@@ -1441,6 +1444,8 @@ def make_report(
         "volume": "\u6210\u4ea4\u91cf",
         "volume_ma": "\u6210\u4ea4\u91cf\u5747\u7ebf",
         "dynamic_stop": "\u6210\u672c20%\u6b62\u635f",
+        "ma5_stop": "5MA\u7b56\u7565\u9632\u5b88\u7ebf",
+        "ma5_stop_25": "5MA-2.5%\u9632\u5b88\u7ebf",
         "buy": "\u4e70\u5165",
         "sell": "\u5356\u51fa",
         "hold_buy": "\u6301\u4ed3B\u70b9",
@@ -1458,6 +1463,15 @@ def make_report(
     report_vol_multiplier = float((strategy_settings or {}).get("vol_multiplier", 1.45))
     dynamic_stop_values = [None if row.get("dynamic_stop", "") in ("", None) else float(row["dynamic_stop"]) for row in equity_curve]
     trend_stop_values = [None if row.get("trend_stop", "") in ("", None) else float(row["trend_stop"]) for row in equity_curve]
+    stop_5ma_line_pct = float((strategy_settings or {}).get("stop_5ma_pct", 7.5))
+    ma5_stop_values = [
+        (ma_values[i] * (1 - stop_5ma_line_pct / 100) if ma_values[i] is not None else None)
+        for i in range(len(equity_curve))
+    ]
+    ma5_stop_25_values = [
+        (ma_values[i] * 0.975 if ma_values[i] is not None else None)
+        for i in range(len(equity_curve))
+    ]
     k_values, d_values, j_values = calculate_kdj(bars)
     volume_colors = ["rgba(8,153,129,0.42)" if bar.close >= bar.open else "rgba(242,54,69,0.42)" for bar in bars]
 
@@ -1549,6 +1563,9 @@ def make_report(
         "kdjLower": [{"time": day, "value": 20} for day in dates],
         "dynamicStop": [{"time": dates[i], "value": value} for i, value in enumerate(dynamic_stop_values) if value is not None],
         "trendStop": [{"time": dates[i], "value": value} for i, value in enumerate(trend_stop_values) if value is not None],
+        "ma5Stop": [{"time": dates[i], "value": value} for i, value in enumerate(ma5_stop_values) if value is not None],
+        "ma5Stop25": [{"time": dates[i], "value": value} for i, value in enumerate(ma5_stop_25_values) if value is not None],
+        "ma5StopPct": stop_5ma_line_pct,
         "rows": [
             {
                 "time": bar.date,
@@ -1566,6 +1583,8 @@ def make_report(
                 "kdjJ": j_values[i],
                 "dynamicStop": dynamic_stop_values[i],
                 "trendStop": trend_stop_values[i],
+                "ma5Stop": ma5_stop_values[i],
+                "ma5Stop25": ma5_stop_25_values[i],
             }
             for i, bar in enumerate(bars)
         ],
@@ -1821,10 +1840,12 @@ h2 {{ margin: 24px 0 10px; font-size: 17px; }}
 .chart-toolbar {{ position: absolute; top: 12px; left: 12px; z-index: 5; display: flex; gap: 8px; align-items: center; }}
 .chart-toolbar button {{ border: 1px solid #d6dbe3; background: rgba(255,255,255,0.92); color: #131722; border-radius: 4px; height: 28px; padding: 0 10px; font-weight: 700; cursor: pointer; }}
 .chart-toolbar span {{ color: #64748b; font-size: 12px; background: rgba(255,255,255,0.86); padding: 5px 8px; border-radius: 4px; }}
+.chart-toggle {{ display: inline-flex; align-items: center; gap: 4px; height: 28px; border: 1px solid #d6dbe3; background: rgba(255,255,255,0.92); color: #334155; border-radius: 4px; padding: 0 8px; font-size: 12px; font-weight: 700; cursor: pointer; }}
+.chart-toggle input {{ margin: 0; }}
 .tv-chart {{ width: 100%; height: 100%; }}
 .price-chart-wrap {{ position: relative; height: 640px; }}
 .price-chart-main {{ position: relative; z-index: 1; height: 100%; }}
-.holding-bands {{ position: absolute; inset: 0; z-index: 2; pointer-events: none; }}
+.holding-bands {{ position: absolute; inset: 0; z-index: 2; pointer-events: none; overflow: hidden; }}
 .holding-band {{ position: absolute; top: 0; bottom: 0; border-radius: 0; background: rgba(8,153,129,0.08); border-left: 1px solid rgba(8,153,129,0.18); border-right: 1px solid rgba(8,153,129,0.18); }}
 .kdj-chart {{ height: 180px; margin-top: 12px; border-top: 1px solid #eef1f5; }}
 .chart-tooltip {{ position: absolute; z-index: 6; display: none; min-width: 220px; pointer-events: none; border: 1px solid #d6dbe3; background: rgba(255,255,255,0.96); border-radius: 6px; box-shadow: 0 8px 22px rgba(15,23,42,0.12); padding: 8px 10px; font-size: 12px; line-height: 1.6; }}
@@ -1898,7 +1919,12 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
 </div>
 <section class="panel">
   <div class="chart-shell">
-    <div class="chart-toolbar"><button id="fit-chart">{labels['reset_view']}</button><span>{labels['chart_hint']}</span></div>
+    <div class="chart-toolbar">
+      <button id="fit-chart">{labels['reset_view']}</button>
+      <label class="chart-toggle"><input id="toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
+      <label class="chart-toggle"><input id="toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
+      <span>{labels['chart_hint']}</span>
+    </div>
     <div class="price-chart-wrap">
       <div id="price-chart" class="tv-chart price-chart-main"></div>
       <div id="holding-bands" class="holding-bands"></div>
@@ -1936,6 +1962,17 @@ const maSeries = priceChart.addLineSeries({{ color: '#f5a623', lineWidth: 2, tit
 maSeries.setData(chartData.ma);
 const ma20Series = priceChart.addLineSeries({{ color: '#94a3b8', lineWidth: 1, title: '20MA', priceLineVisible: false, lastValueVisible: false }});
 ma20Series.setData(chartData.ma20 || []);
+const ma5Stop25Series = priceChart.addLineSeries({{ color: '#dc2626', lineWidth: 1, title: chartLabels.ma5_stop_25, priceLineVisible: false, lastValueVisible: false }});
+const ma5StopSeries = priceChart.addLineSeries({{ color: '#ef4444', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, title: `${{chartLabels.ma5_stop}}(${{chartData.ma5StopPct || ''}}%)`, priceLineVisible: false, lastValueVisible: false }});
+function refreshDefenseLines() {{
+  const show25 = document.getElementById('toggle-ma5-stop-25')?.checked;
+  const showStrategy = document.getElementById('toggle-ma5-stop-strategy')?.checked;
+  ma5Stop25Series.setData(show25 ? (chartData.ma5Stop25 || []) : []);
+  ma5StopSeries.setData(showStrategy ? (chartData.ma5Stop || []) : []);
+}}
+refreshDefenseLines();
+document.getElementById('toggle-ma5-stop-25')?.addEventListener('change', refreshDefenseLines);
+document.getElementById('toggle-ma5-stop-strategy')?.addEventListener('change', refreshDefenseLines);
 const volumeSeries = priceChart.addHistogramSeries({{ color: 'rgba(41,98,255,0.25)', priceFormat: {{ type: 'volume' }}, priceScaleId: '', priceLineVisible: false, lastValueVisible: false }});
 volumeSeries.setData(chartData.volume);
 priceChart.priceScale('').applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
@@ -1973,21 +2010,33 @@ syncVisibleRange(kdjChart, priceChart);
 const markerData = [...chartData.entryMarkers, ...chartData.exitMarkers, ...chartData.holdBuyMarkers, ...chartData.holdSellMarkers].sort((a, b) => a.time.localeCompare(b.time));
 candleSeries.setMarkers(markerData);
 const rowByTime = new Map(chartData.rows.map(row => [row.time, row]));
+let holdingBandFrame = null;
+function scheduleHoldingBandsRender() {{
+  if (holdingBandFrame !== null) window.cancelAnimationFrame(holdingBandFrame);
+  holdingBandFrame = window.requestAnimationFrame(() => {{
+    holdingBandFrame = null;
+    renderHoldingBands();
+  }});
+}}
 function renderHoldingBands() {{
   if (!holdingBands) return;
-  holdingBands.innerHTML = '';
+  holdingBands.replaceChildren();
   const periods = chartData.holdingPeriods || [];
   const barSpacing = priceChart.timeScale().options().barSpacing || 8;
+  const chartWidth = chartElement.clientWidth;
   for (const period of periods) {{
     const startX = priceChart.timeScale().timeToCoordinate(period.start);
     const endX = priceChart.timeScale().timeToCoordinate(period.end);
     if (startX === null || endX === null) continue;
-    const left = Math.min(startX, endX) - barSpacing * 0.5;
-    const width = Math.max(barSpacing, Math.abs(endX - startX) + barSpacing);
+    const rawLeft = Math.min(startX, endX) - barSpacing * 0.5;
+    const rawRight = Math.max(startX, endX) + barSpacing * 0.5;
+    const left = Math.max(0, rawLeft);
+    const right = Math.min(chartWidth, rawRight);
+    if (right <= 0 || left >= chartWidth || right - left < 2) continue;
     const band = document.createElement('div');
     band.className = 'holding-band';
-    band.style.left = `${{Math.max(0, left)}}px`;
-    band.style.width = `${{width}}px`;
+    band.style.left = `${{left}}px`;
+    band.style.width = `${{right - left}}px`;
     band.title = `${{period.label || '持仓'}}: ${{period.start}} -> ${{period.end}}`;
     holdingBands.appendChild(band);
   }}
@@ -2003,6 +2052,7 @@ priceChart.subscribeCrosshairMove(param => {{
     `<div><span class="${{up ? 'up' : 'down'}}">${{chartLabels.open}} ${{formatNumber(row.open)}} &nbsp; ${{chartLabels.high}} ${{formatNumber(row.high)}} &nbsp; ${{chartLabels.low}} ${{formatNumber(row.low)}} &nbsp; ${{chartLabels.close}} ${{formatNumber(row.close)}}</span></div>` +
     `<div>${{chartLabels.volume}} ${{formatVolume(row.volume)}} &nbsp; 阈值量 ${{formatVolume(row.volThreshold)}} &nbsp; 5MA ${{formatNumber(row.ma)}} &nbsp; 20MA ${{formatNumber(row.ma20)}}</div>` +
     `<div>KDJ K ${{formatNumber(row.kdjK)}} &nbsp; D ${{formatNumber(row.kdjD)}} &nbsp; J ${{formatNumber(row.kdjJ)}}</div>`;
+  tooltip.innerHTML += `<div>${{chartLabels.ma5_stop}} ${{formatNumber(row.ma5Stop)}}</div>`;
   tooltip.style.display = 'block';
   const left = Math.min(param.point.x + 16, chartElement.clientWidth - 250);
   const top = Math.max(44, param.point.y - 72);
@@ -2012,19 +2062,19 @@ priceChart.subscribeCrosshairMove(param => {{
 new ResizeObserver(entries => {{
   const rect = entries[0].contentRect;
   priceChart.applyOptions({{ width: Math.floor(rect.width), height: Math.floor(rect.height) }});
-  window.requestAnimationFrame(renderHoldingBands);
+  scheduleHoldingBandsRender();
 }}).observe(chartElement);
 new ResizeObserver(entries => {{
   const rect = entries[0].contentRect;
   kdjChart.applyOptions({{ width: Math.floor(rect.width), height: Math.floor(rect.height) }});
 }}).observe(kdjElement);
 priceChart.timeScale().subscribeVisibleLogicalRangeChange(() => {{
-  window.requestAnimationFrame(renderHoldingBands);
+  scheduleHoldingBandsRender();
 }});
-document.getElementById('fit-chart').addEventListener('click', () => {{ priceChart.timeScale().fitContent(); kdjChart.timeScale().fitContent(); window.requestAnimationFrame(renderHoldingBands); }});
+document.getElementById('fit-chart').addEventListener('click', () => {{ priceChart.timeScale().fitContent(); kdjChart.timeScale().fitContent(); scheduleHoldingBandsRender(); }});
 priceChart.timeScale().fitContent();
 kdjChart.timeScale().fitContent();
-window.requestAnimationFrame(renderHoldingBands);
+scheduleHoldingBandsRender();
 
 const chartConfig = {{ responsive: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d', 'select2d'] }};
 
@@ -2115,6 +2165,12 @@ def main() -> None:
         trades=trades,
         equity_curve=equity_curve,
         summary=summary,
+        strategy_settings={
+            "vol_multiplier": args.vol_multiplier,
+            "stop_5ma_pct": args.stop_5ma_pct,
+            "below_20ma_stop_days": 2,
+            "hard_stop_pct": args.hard_stop_pct,
+        },
     )
     print_summary(summary)
     print(f"交易明细已保存: {args.trades_out.resolve()}")
