@@ -1243,6 +1243,14 @@ label {{ display: block; font-size: 12px; color: #5d6675; font-weight: 700; }}
 input, select, textarea {{ width: 100%; margin-top: 6px; padding: 8px 9px; border: 1px solid #c7ccd5; border-radius: 4px; background: #fff; color: #131722; font-family: inherit; font-size: 13px; outline: none; }}
 input:focus, select:focus, textarea:focus {{ border-color: #2962ff; box-shadow: 0 0 0 2px rgba(41, 98, 255, .12); }}
 textarea {{ min-height: 78px; resize: vertical; line-height: 1.45; }}
+.ashare-symbol-field {{ grid-column: span 2; }}
+.ashare-suggest-panel {{ position: absolute; z-index: 1000; max-height: 240px; overflow-y: auto; border: 1px solid #c7ccd5; border-radius: 6px; background: #fff; box-shadow: 0 12px 30px rgba(19, 23, 34, .16); padding: 3px; }}
+.ashare-suggest-panel[hidden] {{ display: none; }}
+.ashare-suggest-item {{ width: 100%; display: grid; grid-template-columns: 62px minmax(86px, 1fr) minmax(54px, auto); gap: 6px; align-items: center; min-height: 28px; padding: 5px 6px; border: 0; border-radius: 4px; background: transparent; color: #131722; text-align: left; font-size: 12px; line-height: 1.2; }}
+.ashare-suggest-item:hover, .ashare-suggest-item:focus {{ background: #eef4ff; color: #131722; }}
+.ashare-suggest-symbol {{ font-weight: 900; color: #2962ff; font-size: 12px; }}
+.ashare-suggest-name {{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 800; font-size: 12px; }}
+.ashare-suggest-meta {{ color: #64748b; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }}
 button, .btn {{ display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 8px 13px; border: 1px solid #2962ff; border-radius: 4px; background: #2962ff; color: #fff; font: inherit; font-size: 13px; font-weight: 800; line-height: 1.2; text-decoration: none; cursor: pointer; transition: background-color .12s ease, border-color .12s ease, color .12s ease, box-shadow .12s ease, transform .06s ease; }}
 button:hover, .btn:hover {{ filter: none; background: #1e53e5; border-color: #1e53e5; color: #fff; text-decoration: none; }}
 button:active, .btn:active {{ transform: translateY(1px); }}
@@ -2182,37 +2190,107 @@ def ashare_backtest_defaults(params: dict[str, list[str]]) -> dict[str, float | 
 
 def render_ashare_symbol_autocomplete() -> str:
     return """
-<datalist id="ashare-symbol-suggestions"></datalist>
+<div id="ashare-symbol-suggestions" class="ashare-suggest-panel" hidden></div>
 <script>
 (function() {
-  const list = document.getElementById("ashare-symbol-suggestions");
-  if (!list || list.dataset.ready === "true") return;
-  list.dataset.ready = "true";
+  const panel = document.getElementById("ashare-symbol-suggestions");
+  if (!panel || panel.dataset.ready === "true") return;
+  panel.dataset.ready = "true";
   let timer = 0;
   let lastQuery = "";
-  async function updateSuggestions(query) {
+  let activeInput = null;
+  let activeItems = [];
+  let requestSeq = 0;
+  function escapeHtml(value) {
+    return String(value || "").replace(/[&<>"']/g, ch => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;"
+    }[ch]));
+  }
+  function positionPanel(input) {
+    const rect = input.getBoundingClientRect();
+    panel.style.left = `${rect.left + window.scrollX}px`;
+    panel.style.top = `${rect.bottom + window.scrollY + 4}px`;
+    panel.style.width = `${rect.width}px`;
+  }
+  function hidePanel() {
+    panel.hidden = true;
+    panel.innerHTML = "";
+    activeItems = [];
+  }
+  function renderSuggestions(input, items) {
+    activeInput = input;
+    activeItems = items || [];
+    if (!activeItems.length) {
+      hidePanel();
+      return;
+    }
+    positionPanel(input);
+    panel.innerHTML = activeItems.map((item, index) => {
+      const meta = [item.initials, item.sector, item.exchange].filter(Boolean).join(" / ");
+      return `
+        <button type="button" class="ashare-suggest-item" data-index="${index}">
+          <span class="ashare-suggest-symbol">${escapeHtml(item.symbol)}</span>
+          <span class="ashare-suggest-name">${escapeHtml(item.name)}</span>
+          <span class="ashare-suggest-meta">${escapeHtml(meta)}</span>
+        </button>`;
+    }).join("");
+    panel.hidden = false;
+  }
+  async function updateSuggestions(input, query) {
     const q = (query || "").trim();
-    if (q.length < 1 || q === lastQuery) return;
+    if (q.length < 1) {
+      requestSeq += 1;
+      hidePanel();
+      return;
+    }
+    if (q === lastQuery && !panel.hidden) return;
     lastQuery = q;
+    const requestId = ++requestSeq;
     try {
       const res = await fetch(`/cn/suggest?q=${encodeURIComponent(q)}`);
       const payload = await res.json();
-      list.innerHTML = "";
-      for (const item of payload.suggestions || []) {
-        const option = document.createElement("option");
-        option.value = item.value;
-        option.label = [item.name, item.sector, item.exchange].filter(Boolean).join(" / ");
-        list.appendChild(option);
-      }
+      if (requestId !== requestSeq || input !== activeInput || input.value.trim() !== q) return;
+      renderSuggestions(input, payload.suggestions || []);
     } catch (error) {
-      list.innerHTML = "";
+      if (requestId === requestSeq) hidePanel();
     }
   }
   document.addEventListener("input", event => {
     const input = event.target;
     if (!(input instanceof HTMLInputElement) || !input.matches("[data-ashare-symbol-input]")) return;
+    activeInput = input;
     window.clearTimeout(timer);
-    timer = window.setTimeout(() => updateSuggestions(input.value), 160);
+    timer = window.setTimeout(() => updateSuggestions(input, input.value), 120);
+  });
+  document.addEventListener("focusin", event => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || !input.matches("[data-ashare-symbol-input]")) return;
+    activeInput = input;
+    if (input.value.trim()) updateSuggestions(input, input.value);
+  });
+  panel.addEventListener("mousedown", event => {
+    const button = event.target.closest("[data-index]");
+    if (!button || !activeInput) return;
+    event.preventDefault();
+    const item = activeItems[Number(button.dataset.index)];
+    if (!item) return;
+    activeInput.value = item.value || `${item.symbol} ${item.name || ""}`.trim();
+    activeInput.dispatchEvent(new Event("change", { bubbles: true }));
+    hidePanel();
+  });
+  window.addEventListener("scroll", () => {
+    if (!panel.hidden && activeInput) positionPanel(activeInput);
+  }, true);
+  window.addEventListener("resize", () => {
+    if (!panel.hidden && activeInput) positionPanel(activeInput);
+  });
+  document.addEventListener("mousedown", event => {
+    if (event.target.closest("#ashare-symbol-suggestions") || event.target.closest("[data-ashare-symbol-input]")) return;
+    hidePanel();
   });
 })();
 </script>
@@ -2247,7 +2325,7 @@ def render_ashare_backtest_form(params: dict[str, list[str]] | None = None) -> s
 </section>
 {render_ashare_condition_panel({key: [str(value)] for key, value in defaults.items()}, "backtest")}
 <form class="form" action="/cn/run" method="get" id="ashare-backtest-form">
-  <label>股票代码/名称<input name="symbol" value="{value("symbol", defaults["symbol"])}" placeholder="600487 或 亨通光电" list="ashare-symbol-suggestions" data-ashare-symbol-input></label>
+  <label class="ashare-symbol-field">股票代码/名称<input name="symbol" value="{value("symbol", defaults["symbol"])}" placeholder="600487 或 亨通光电" autocomplete="off" data-ashare-symbol-input></label>
   <label>回测周期
     <select name="preset" id="ashare-preset">
       <option value="6m"{selected(display_preset, "6m")}>近 6 个月</option>
@@ -3168,7 +3246,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
 <form class="form" action="/cn/scanner" method="get">
   <input type="hidden" name="mode" value="single">
   <input type="hidden" name="j_threshold" value="{j_threshold:g}">
-  <label>股票代码/名称<input name="symbol" value="{html.escape(symbol)}" placeholder="600487 或 亨通光电" list="ashare-symbol-suggestions" data-ashare-symbol-input></label>
+  <label class="ashare-symbol-field">股票代码/名称<input name="symbol" value="{html.escape(symbol)}" placeholder="600487 或 亨通光电" autocomplete="off" data-ashare-symbol-input></label>
   <button type="submit">单票验证</button>
 </form>
 {render_ashare_symbol_autocomplete()}
@@ -3394,7 +3472,7 @@ def render_ashare_watchlist_page(params: dict[str, list[str]] | None = None) -> 
   <div class="mode-pill">A Share | Watchlist</div>
 </section>
 <form class="form" action="/cn/watchlist/add" method="get">
-  <label>股票代码/名称<input name="symbol" value="{html.escape(field(params, "symbol", ""))}" placeholder="600487 或 亨通光电" list="ashare-symbol-suggestions" data-ashare-symbol-input></label>
+  <label class="ashare-symbol-field">股票代码/名称<input name="symbol" value="{html.escape(field(params, "symbol", ""))}" placeholder="600487 或 亨通光电" autocomplete="off" data-ashare-symbol-input></label>
   <label>分组<input name="group" value="{html.escape(field(params, "group", "观察"))}" placeholder="观察 / 候选 / 持仓"></label>
   <label class="wide">备注<input name="note" value="{html.escape(field(params, "note", ""))}" placeholder="关注原因、行业、阻力位等"></label>
   <button type="submit">添加到自选</button>

@@ -955,53 +955,16 @@ def stale_ashare_universe_cache(
     return result, "stale ashare universe cache", has_market_cap
 
 
-PINYIN_INITIAL_RANGES = [
-    (-20319, -20284, "A"),
-    (-20283, -19776, "B"),
-    (-19775, -19219, "C"),
-    (-19218, -18711, "D"),
-    (-18710, -18527, "E"),
-    (-18526, -18240, "F"),
-    (-18239, -17923, "G"),
-    (-17922, -17418, "H"),
-    (-17417, -16475, "J"),
-    (-16474, -16213, "K"),
-    (-16212, -15641, "L"),
-    (-15640, -15166, "M"),
-    (-15165, -14923, "N"),
-    (-14922, -14915, "O"),
-    (-14914, -14631, "P"),
-    (-14630, -14150, "Q"),
-    (-14149, -14091, "R"),
-    (-14090, -13319, "S"),
-    (-13318, -12839, "T"),
-    (-12838, -12557, "W"),
-    (-12556, -11848, "X"),
-    (-11847, -11056, "Y"),
-    (-11055, -10247, "Z"),
-]
-
-
-def pinyin_initial_for_char(char: str) -> str:
-    if not char:
+def ashare_name_initials(name: str) -> str:
+    text = str(name or "").strip()
+    if not text:
         return ""
-    if char.isascii():
-        return char.upper() if char.isalnum() else ""
     try:
-        encoded = char.encode("gbk")
+        from pypinyin import Style, lazy_pinyin
+
+        return "".join(lazy_pinyin(text, style=Style.FIRST_LETTER, errors="ignore")).upper()
     except Exception:
         return ""
-    if len(encoded) < 2:
-        return ""
-    code = encoded[0] * 256 + encoded[1] - 65536
-    for start, end, initial in PINYIN_INITIAL_RANGES:
-        if start <= code <= end:
-            return initial
-    return ""
-
-
-def ashare_name_initials(name: str) -> str:
-    return "".join(pinyin_initial_for_char(char) for char in str(name or ""))
 
 
 def suggest_ashare_symbols(query: str, limit: int = 12) -> list[dict[str, object]]:
@@ -1047,6 +1010,7 @@ def suggest_ashare_symbols(query: str, limit: int = 12) -> list[dict[str, object
             "name": item.name,
             "sector": item.sector,
             "exchange": item.exchange,
+            "initials": ashare_name_initials(item.name).upper(),
             "label": f"{item.symbol} {item.name}".strip(),
             "value": f"{item.symbol} {item.name}".strip(),
         }
