@@ -929,6 +929,28 @@ def cached_ashare_universe_items() -> list[AShareUniverseItem]:
     return sorted(items, key=lambda item: item.turnover or item.market_cap_100m, reverse=True)
 
 
+def stale_ashare_universe_cache(
+    min_market_cap_100m: float,
+    max_symbols: int,
+    progress: Callable[[str], None] | None = None,
+) -> tuple[list[AShareUniverseItem], str, bool] | None:
+    items = cached_ashare_universe_items()
+    if not items:
+        return None
+    filtered = [item for item in items if item.market_cap_100m >= min_market_cap_100m]
+    has_market_cap = bool(filtered)
+    if not filtered:
+        filtered = items
+        has_market_cap = False
+    filtered.sort(key=lambda item: item.market_cap_100m or item.turnover, reverse=True)
+    result = filtered[: max(1, int(max_symbols))]
+    if not result:
+        return None
+    if progress:
+        progress(f"外部股票池不可用，使用30日内股票池缓存：{len(result)} 只")
+    return result, "stale ashare universe cache", has_market_cap
+
+
 PINYIN_INITIAL_RANGES = [
     (-20319, -20284, "A"),
     (-20283, -19776, "B"),
@@ -1362,7 +1384,11 @@ def load_ashare_universe_with_meta(
             write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
             return result
         except Exception as tdx_exc:
-            raise RuntimeError(f"A 股股票池拉取失败：efinance、东方财富直连、通达信列表均不可用；东方财富 {eastmoney_error}；通达信 {tdx_exc}") from tdx_exc
+            stale = stale_ashare_universe_cache(min_market_cap_100m, max_symbols, progress)
+            if stale:
+                return stale
+            if progress:
+                progress(f"TDX universe unavailable: {tdx_exc}")
         if progress:
             progress("东方财富股票池不可用，切换代码/名称表快速兜底")
         try:
@@ -1465,7 +1491,11 @@ def load_ashare_universe_for_scan(
             write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
             return result
         except Exception as tdx_exc:
-            raise RuntimeError(f"A 股股票池拉取失败：efinance、东方财富直连、通达信列表均不可用；东方财富 {eastmoney_error}；通达信 {tdx_exc}") from tdx_exc
+            stale = stale_ashare_universe_cache(min_market_cap_100m, max_symbols, progress)
+            if stale:
+                return stale
+            if progress:
+                progress(f"TDX universe unavailable: {tdx_exc}")
         if progress:
             progress("东方财富股票池不可用，切换代码/名称表快速兜底")
         try:

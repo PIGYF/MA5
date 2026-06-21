@@ -209,6 +209,16 @@ def latest_job_for_market(market: str, include_finished: bool = True) -> tuple[s
     return None
 
 
+def clear_jobs_for_market(market: str) -> int:
+    deleted = 0
+    with SCAN_JOBS_LOCK:
+        for job_id, job in list(SCAN_JOBS.items()):
+            if job_market(job_id, job) == market:
+                SCAN_JOBS.pop(job_id, None)
+                deleted += 1
+    return deleted
+
+
 def job_pause_requested(job_id: str) -> bool:
     job = get_job(job_id)
     return bool(job and job.get("pause_requested"))
@@ -388,14 +398,16 @@ def build_benchmark(symbol: str, start: str, end: str, initial_cash: float) -> d
 
 def market_environment(symbol: str = "QQQ") -> dict[str, object]:
     end = default_scan_end_date()
-    start = end - timedelta(days=120)
     macro = macro_risk_state(date.today())
     try:
-        bars = fetch_bars("yfinance", symbol, start.isoformat(), end.isoformat(), "qfq", None)
+        bars = [bar for bar in read_price_cache(symbol) if date.fromisoformat(bar.date) <= end]
+        bars = bars[-120:]
+        if len(bars) < 50:
+            raise RuntimeError("本地大盘缓存不足")
         vix_value = 0.0
         vix_label = "Unavailable"
         try:
-            vix_bars = fetch_bars("yfinance", "^VIX", start.isoformat(), end.isoformat(), "qfq", None)
+            vix_bars = [bar for bar in read_price_cache("^VIX") if date.fromisoformat(bar.date) <= end]
             if vix_bars:
                 vix_value = vix_bars[-1].close
                 if vix_value >= 30:
@@ -3325,6 +3337,12 @@ def render_ashare_watchlist_page(params: dict[str, list[str]] | None = None) -> 
       <div class="watch-detail-item"><span>数据源</span><strong id="ashare-detail-source">-</strong></div>
       <div class="watch-detail-item"><span>交易日数量</span><strong id="ashare-detail-count">-</strong></div>
     </div>
+    <div class="chart-toggle-row" id="ashare-watch-strategy-options">
+      <span class="hint" style="margin:0;font-weight:800;">图表条件</span>
+      <label class="chart-toggle"><input data-ashare-watch-condition="require_ma5_rising" type="checkbox">MA5向上</label>
+      <label class="chart-toggle"><input data-ashare-watch-condition="require_5ma_gt_20ma" type="checkbox">MA5&gt;MA20</label>
+      <label class="chart-toggle"><input data-ashare-watch-condition="b1_require_20ma_gt_50ma" type="checkbox">20MA&gt;50MA</label>
+    </div>
     <div class="chart-toggle-row">
       <label class="chart-toggle"><input id="ashare-watch-toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
       <label class="chart-toggle"><input id="ashare-watch-toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
@@ -3342,6 +3360,7 @@ def render_ashare_watchlist_page(params: dict[str, list[str]] | None = None) -> 
 </section>
 <script>
 const ashareInitialSymbol = {json.dumps(default_symbol)};
+let ashareCurrentSymbol = ashareInitialSymbol;
 let ashareMainChart = null;
 let ashareKdjChart = null;
 const ashareMainEl = document.getElementById("ashare-watch-main-chart");
@@ -3353,6 +3372,7 @@ const ashareTitle = document.getElementById("ashare-watch-title");
 const ashareSubtitle = document.getElementById("ashare-watch-subtitle");
 const ashareToggleMa5Stop25 = document.getElementById("ashare-watch-toggle-ma5-stop-25");
 const ashareToggleMa5StopStrategy = document.getElementById("ashare-watch-toggle-ma5-stop-strategy");
+const ashareStrategyOptions = document.getElementById("ashare-watch-strategy-options");
 
 function clearAshareCharts() {{
   if (ashareMainChart) ashareMainChart.remove();
@@ -3480,11 +3500,16 @@ function renderAshareWatchChart(payload) {{
 
 async function loadAshareWatchChart(symbol) {{
   if (!symbol) return;
+  ashareCurrentSymbol = symbol;
   ashareTitle.textContent = symbol;
   ashareSubtitle.textContent = "正在加载...";
   ashareLoading?.classList.add("active");
   try {{
-    const res = await fetch(`/cn/watchlist/chart?symbol=${{encodeURIComponent(symbol)}}&j_threshold=14`);
+    const params = new URLSearchParams({{ symbol, j_threshold: "14" }});
+    ashareStrategyOptions?.querySelectorAll("[data-ashare-watch-condition]").forEach(input => {{
+      params.set(input.dataset.ashareWatchCondition, input.checked ? "1" : "0");
+    }});
+    const res = await fetch(`/cn/watchlist/chart?${{params.toString()}}`);
     const payload = await res.json();
     if (payload.error) {{
       ashareSubtitle.textContent = payload.error;
@@ -3511,6 +3536,10 @@ document.addEventListener("click", event => {{
   if (!target) return;
   event.preventDefault();
   loadAshareWatchChart(target.getAttribute("data-ashare-symbol"));
+}});
+ashareStrategyOptions?.addEventListener("change", event => {{
+  if (!event.target.closest("[data-ashare-watch-condition]")) return;
+  loadAshareWatchChart(ashareCurrentSymbol);
 }});
 if (ashareInitialSymbol) loadAshareWatchChart(ashareInitialSymbol);
 </script>
@@ -6127,10 +6156,10 @@ def watchlist_row(item: dict[str, str], metadata: dict[str, object] | None) -> s
     ma_status = "-"
     s_status = "-"
     earnings = "未知"
+    cache_bars = read_price_cache(symbol)
     try:
         end = default_scan_end_date()
-        start = end - timedelta(days=90)
-        bars = fetch_bars("yfinance", symbol, start.isoformat(), end.isoformat(), "qfq", None)
+        bars = [bar for bar in cache_bars if date.fromisoformat(bar.date) <= end][-120:]
         if bars:
             latest_close = f"{bars[-1].close:.2f}"
             if len(bars) >= 2 and bars[-2].close:
@@ -6182,7 +6211,6 @@ def watchlist_row(item: dict[str, str], metadata: dict[str, object] | None) -> s
     except Exception:
         pass
     cap_text = f"{market_cap / 1_000_000_000:.2f}" if market_cap else "-"
-    cache_bars = read_price_cache(symbol)
     cache_text = f"数据至 {max((bar.date for bar in cache_bars), default='-')}" if cache_bars else "待拉取"
     form_id = f"watch-edit-{html.escape(symbol)}"
     tags = []
@@ -6314,6 +6342,12 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
       <button type="button" data-preset="3y">3Y</button>
       <button type="button" data-preset="5y">5Y</button>
     </div>
+    <div class="chart-toggle-row" id="watch-strategy-options">
+      <span class="hint" style="margin:0;font-weight:800;">图表条件</span>
+      <label class="chart-toggle"><input data-watch-condition="require_ma5_rising" type="checkbox">MA5向上</label>
+      <label class="chart-toggle"><input data-watch-condition="require_5ma_gt_20ma" type="checkbox">MA5&gt;MA20</label>
+      <label class="chart-toggle"><input data-watch-condition="b1_require_20ma_gt_50ma" type="checkbox">20MA&gt;50MA</label>
+    </div>
     <div class="chart-toggle-row">
       <label class="chart-toggle"><input id="watch-toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
       <label class="chart-toggle"><input id="watch-toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
@@ -6341,6 +6375,7 @@ const watchSubtitle = document.getElementById("watch-chart-subtitle");
 const watchLoading = document.getElementById("watch-chart-loading");
 const watchToggleMa5Stop25 = document.getElementById("watch-toggle-ma5-stop-25");
 const watchToggleMa5StopStrategy = document.getElementById("watch-toggle-ma5-stop-strategy");
+const watchStrategyOptions = document.getElementById("watch-strategy-options");
 const divergenceSymbolInput = document.getElementById("divergence-symbol-input");
 const divergenceList = document.getElementById("divergence-list");
 function attr(node, name, fallback = "-") {{
@@ -6500,7 +6535,11 @@ async function loadWatchChart(symbol, preset = watchCurrentPreset) {{
   watchSubtitle.textContent = "正在加载...";
   watchLoading?.classList.add("active");
   try {{
-    const res = await fetch(`/watchlist/chart?symbol=${{encodeURIComponent(symbol)}}&preset=${{encodeURIComponent(preset)}}`);
+    const params = new URLSearchParams({{ symbol, preset }});
+    watchStrategyOptions?.querySelectorAll("[data-watch-condition]").forEach(input => {{
+      params.set(input.dataset.watchCondition, input.checked ? "1" : "0");
+    }});
+    const res = await fetch(`/watchlist/chart?${{params.toString()}}`);
     const payload = await res.json();
     if (payload.error) {{
       watchSubtitle.textContent = payload.error;
@@ -6535,6 +6574,10 @@ document.getElementById("watch-periods").addEventListener("click", event => {{
   button.classList.add("active");
   loadWatchChart(watchCurrentSymbol, button.dataset.preset);
 }});
+watchStrategyOptions?.addEventListener("change", event => {{
+  if (!event.target.closest("[data-watch-condition]")) return;
+  loadWatchChart(watchCurrentSymbol, watchCurrentPreset);
+}});
 if (window.initializeResizableTables) initializeResizableTables(document);
 if (window.initializeSortableTables) initializeSortableTables(document);
 const initialWatchButton = document.querySelector(`[data-watch-symbol="${{watchInitialSymbol}}"]`) || document.querySelector("[data-watch-symbol]");
@@ -6550,6 +6593,9 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
         return {"error": "缺少股票代码。"}
     preset = field(params, "preset", "1y").lower()
     vol_multiplier = number_field(params, "vol_multiplier", 1.45)
+    require_ma5_rising = checkbox_field(params, "require_ma5_rising", False)
+    require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", False)
+    b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", False)
     end_day = default_scan_end_date()
     start_day = chart_start_for_preset(preset, end_day)
     try:
@@ -6575,6 +6621,9 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
             stop_5ma_pct=7.5,
             hard_stop_pct=20,
             reentry_pct=4.5,
+            b1_require_20ma_gt_50ma=b1_require_20ma_gt_50ma,
+            require_ma5_rising=require_ma5_rising,
+            require_5ma_gt_20ma=require_5ma_gt_20ma,
         )
     except Exception as exc:
         return {"error": str(exc)}
@@ -6705,6 +6754,11 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
         "volMa": vol_ma_points,
         "volThreshold": vol_threshold_points,
         "volMultiplier": vol_multiplier,
+        "conditions": {
+            "require_ma5_rising": require_ma5_rising,
+            "require_5ma_gt_20ma": require_5ma_gt_20ma,
+            "b1_require_20ma_gt_50ma": b1_require_20ma_gt_50ma,
+        },
         "kdjK": k_points,
         "kdjD": d_points,
         "kdjJ": j_points,
@@ -7341,6 +7395,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def delete_ashare_scan_result(self) -> None:
         deleted = delete_latest_ashare_scan()
+        clear_jobs_for_market("cn")
         message = "已删除当前 A 股扫描结果。" if deleted else "当前没有可删除的 A 股扫描结果。"
         content = render_ashare_scanner({}) + f'<section class="result"><p class="hint">{html.escape(message)}</p></section>'
         self.send_bytes(page_shell(content, "scanner", "cn"))
@@ -7370,7 +7425,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             j_threshold = number_field(params, "j_threshold", 14.0)
-            payload = ashare_chart_payload(symbol, j_threshold)
+            payload = ashare_chart_payload(
+                symbol,
+                j_threshold,
+                b1_require_20ma_gt_50ma=checkbox_field(params, "b1_require_20ma_gt_50ma", False),
+                require_ma5_rising=checkbox_field(params, "require_ma5_rising", False),
+                require_5ma_gt_20ma=checkbox_field(params, "require_5ma_gt_20ma", False),
+            )
             payload["j_threshold"] = j_threshold
             self.send_json(payload)
         except Exception as exc:
@@ -7400,7 +7461,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def delete_scan_result(self) -> None:
         deleted = delete_latest_scan()
+        cleared_jobs = clear_jobs_for_market("us")
         message = f"已删除当前扫描结果（清理 {deleted} 个文件）。" if deleted else "当前没有可删除的扫描结果。"
+        if cleared_jobs:
+            message += f" 已清理后台任务状态 {cleared_jobs} 个。"
         content = render_scanner_form({}) + f'<section class="result"><p class="hint">{html.escape(message)}</p></section>'
         self.send_bytes(page_shell(content, "scanner"))
 
