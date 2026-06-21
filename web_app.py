@@ -86,11 +86,14 @@ from ashare_lab import (
     scan_ashare_candidates,
     suggest_ashare_symbols,
 )
-from scan_next_b import SignalResult, latest_b_signal, load_symbols, unique_symbols, write_html
+from scan_next_b import SPLIT_CACHE_PATH, SignalResult, latest_b_signal, load_symbols, unique_symbols, write_html
 
 
 SCAN_JOBS: dict[str, dict[str, object]] = {}
 SCAN_JOBS_LOCK = threading.Lock()
+TASK_HISTORY_PATH = SCAN_DIR / "task_history.json"
+TASK_HISTORY_LIMIT = 80
+TASK_HISTORY_LOCK = threading.Lock()
 ACTIVE_SCAN_STATUSES = {"queued", "running", "pausing", "paused", "stopping"}
 FINISHED_SCAN_STATUSES = {"done", "stopped", "error"}
 ASHARE_DEFAULT_MAX_SCAN_SYMBOLS = 6000
@@ -219,6 +222,52 @@ def clear_jobs_for_market(market: str) -> int:
     return deleted
 
 
+def load_task_history(limit: int = 12) -> list[dict[str, object]]:
+    if not TASK_HISTORY_PATH.exists():
+        return []
+    try:
+        payload = json.loads(TASK_HISTORY_PATH.read_text(encoding="utf-8"))
+        items = payload.get("items", []) if isinstance(payload, dict) else []
+        if not isinstance(items, list):
+            return []
+        return [item for item in items if isinstance(item, dict)][: max(1, int(limit))]
+    except Exception:
+        return []
+
+
+def append_task_history(
+    job_id: str,
+    market: str,
+    status: str,
+    scanned: int = 0,
+    candidates: int = 0,
+    errors: int = 0,
+    source: str = "",
+    params: dict[str, list[str]] | None = None,
+    message: str = "",
+) -> None:
+    with TASK_HISTORY_LOCK:
+        TASK_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        existing = load_task_history(TASK_HISTORY_LIMIT)
+        entry = {
+            "job_id": job_id,
+            "market": market,
+            "market_label": "A股" if market == "cn" else "美股",
+            "status": status,
+            "status_label": JOB_STATUS_LABELS.get(status, status),
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "scanned": int(scanned or 0),
+            "candidates": int(candidates or 0),
+            "errors": int(errors or 0),
+            "source": source,
+            "message": message,
+            "params": {key: values[-1] if values else "" for key, values in (params or {}).items()},
+        }
+        deduped = [item for item in existing if item.get("job_id") != job_id]
+        payload = {"updated_at": entry["created_at"], "items": [entry] + deduped[: TASK_HISTORY_LIMIT - 1]}
+        TASK_HISTORY_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def job_pause_requested(job_id: str) -> bool:
     job = get_job(job_id)
     return bool(job and job.get("pause_requested"))
@@ -231,6 +280,8 @@ def job_stop_requested(job_id: str) -> bool:
 
 def classify_scan_error(reason: str) -> str:
     text = str(reason or "").lower()
+    if any(token in text for token in ("recent split", "split adjustment", "拆股", "复权", "volume regime")):
+        return "数据质量"
     if any(token in text for token in ("缺少", "no module", "importerror", "install yfinance", "pip install")):
         return "依赖缺失"
     if any(token in text for token in ("timeout", "timed out", "connection", "network", "http", "urlopen", "远程", "网络")):
@@ -305,7 +356,7 @@ def render_health_tag(label: str, value: str, cls: str = "condition-primary") ->
 
 def render_data_health_panel(market: str) -> str:
     if market == "cn":
-        packages = [("efinance", "efinance"), ("pytdx", "pytdx"), ("yfinance备用", "yfinance")]
+        packages = [("pytdx", "pytdx"), ("yfinance备用", "yfinance")]
         latest = load_latest_ashare_scan()
         latest_errors = [
             (str(item.get("symbol", "")), str(item.get("reason", "")))
@@ -324,7 +375,7 @@ def render_data_health_panel(market: str) -> str:
             render_health_tag("行业缓存", sector_status, sector_cls),
         ]
         title = "A股数据源状态"
-        note = "A股优先使用直连/efinance/通达信等多数据源；这里显示依赖和缓存是否可用。"
+        note = "A股选股股票池优先使用通达信，并用 Tencent 行情补充市值；这里显示依赖和缓存是否可用。"
     else:
         latest = load_latest_scan()
         latest_errors = [
@@ -1081,7 +1132,7 @@ def mixed_cache_summary(paths: list[Path], directories: list[Path] | None = None
 
 
 def cache_dashboard_summary() -> dict[str, dict[str, object]]:
-    us_market_paths = [NASDAQ_CACHE_PATH, EARNINGS_CACHE_PATH]
+    us_market_paths = [NASDAQ_CACHE_PATH, EARNINGS_CACHE_PATH, SPLIT_CACHE_PATH]
     if LEGACY_NASDAQ_CACHE_PATH != NASDAQ_CACHE_PATH:
         us_market_paths.append(LEGACY_NASDAQ_CACHE_PATH)
     ashare_cache_paths = [DATA_DIR / "ashare" / "universe_cache.json", DATA_DIR / "ashare" / "sector_map.json"]
@@ -1121,7 +1172,7 @@ def clear_cache_area(area: str) -> str:
         deleted = delete_directory_files(PRICE_CACHE_DIR)
         return f"已清理行情缓存 {deleted} 个。"
     if area == "us_market":
-        deleted = delete_files([NASDAQ_CACHE_PATH, LEGACY_NASDAQ_CACHE_PATH, EARNINGS_CACHE_PATH])
+        deleted = delete_files([NASDAQ_CACHE_PATH, LEGACY_NASDAQ_CACHE_PATH, EARNINGS_CACHE_PATH, SPLIT_CACHE_PATH])
         return f"已清理美股市场/财报缓存 {deleted} 个。"
     if area == "ashare":
         deleted = delete_files([DATA_DIR / "ashare" / "universe_cache.json", DATA_DIR / "ashare" / "sector_map.json"])
@@ -1749,6 +1800,14 @@ backtestForm.addEventListener("submit", (event) => {{
 
 def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
     params = params or {}
+    active_jobs = [
+        normalize_job_payload(job_id, job)
+        for market in ("us", "cn")
+        for item in [latest_job_for_market(market, include_finished=False)]
+        if item
+        for job_id, job in [item]
+    ]
+    history = load_task_history(6)
     us_latest = load_latest_scan()
     us_summary = us_latest.get("summary", {}) if us_latest else {}
     us_signal = str(us_latest.get("signal_date", "-")) if us_latest else "-"
@@ -1777,6 +1836,25 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
         <input type="hidden" name="area" value="{html.escape(area)}">
         <button class="{cls}" type="submit">{html.escape(label)}</button>
       </form>"""
+
+    active_job_html = "".join(
+        f"""
+      <span class="scan-fact"><span>{html.escape(str(job.get("market_label", "-")))}</span>{html.escape(str(job.get("status_label", "-")))} {int(job.get("progress_pct") or 0)}% · {int(job.get("scanned") or 0)}/{int(job.get("total") or 0)}</span>"""
+        for job in active_jobs
+    ) or '<span class="scan-fact"><span>当前</span>没有运行中的扫描任务</span>'
+    history_rows = "".join(
+        f"""
+      <tr>
+        <td>{html.escape(str(item.get("created_at", "-")))}</td>
+        <td>{html.escape(str(item.get("market_label", "-")))}</td>
+        <td>{html.escape(str(item.get("status_label", "-")))}</td>
+        <td>{int(item.get("scanned") or 0)}</td>
+        <td>{int(item.get("candidates") or 0)}</td>
+        <td>{int(item.get("errors") or 0)}</td>
+        <td>{html.escape(str(item.get("source", "-"))[:60])}</td>
+      </tr>"""
+        for item in history
+    ) or '<tr><td colspan="7" class="empty">还没有扫描任务历史。</td></tr>'
 
     return f"""
 <section class="page-head">
@@ -1834,6 +1912,18 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
       {clear_form("us_market", "清理美股缓存")}
       {clear_form("ashare", "清理A股缓存")}
       {clear_form("latest", "清理扫描结果", True)}
+    </div>
+  </div>
+  <div class="dashboard-panel">
+    <h2>任务状态</h2>
+    <div class="scan-facts">
+      {active_job_html}
+    </div>
+    <div class="table-wrap" style="margin-top:10px;">
+      <table class="resizable-table">
+        <thead><tr><th>时间</th><th>市场</th><th>状态</th><th>扫描</th><th>候选</th><th>失败</th><th>数据源</th></tr></thead>
+        <tbody>{history_rows}</tbody>
+      </table>
     </div>
   </div>
   <div class="dashboard-panel">
@@ -3091,6 +3181,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
   <label>并发数<input type="number" step="1" name="max_workers" value="{int(number_field(params, "max_workers", 6))}"></label>
   <label>20日均成交额（亿元）<input type="number" step="0.1" name="min_avg_amount_20d_100m" value="{min_avg_amount_20d_100m:g}"></label>
   <label>低流动性提示（亿元）<input type="number" step="0.1" name="min_control_amount_20d_100m" value="{min_control_amount_20d_100m:g}"></label>
+  <div class="wide risk-note">A股全市场建议并发 4-6；首次建 K 线缓存或外部源超时较多时，用 3-4 更稳。</div>
   <div class="form-section-title">信号参数 <span>B1/B2、放量和量能评级</span></div>
   <label>连续放量天数<input type="number" step="1" name="vol_high_days" value="{vol_high_days}"></label>
   <label>连续放量倍数<input type="number" step="0.1" name="vol_high_multiplier" value="{vol_high_multiplier:g}"></label>
@@ -5337,6 +5428,7 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
   <label>最低当日成交量<input name="min_screener_volume" value="{value("min_screener_volume", "500000")}"></label>
   <label>最多扫描数量<input name="max_symbols" value="{value("max_symbols", str(DEFAULT_MAX_SCAN_SYMBOLS))}"></label>
   <label>并发数<input name="max_workers" value="{value("max_workers", "6")}"></label>
+  <div class="wide risk-note">美股建议并发 6-8；数据源失败变多时先降到 4-6。拆股事件会走本地缓存，只有疑似异常时才补查 yfinance。</div>
   <label>资产类型
     <select name="asset_type">
       <option value="stocks"{selected(asset_type, "stocks")}>只扫 Stocks</option>
@@ -6897,6 +6989,7 @@ def execute_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
                         errors=len(errors),
                         result_html=result_html,
                     )
+                    append_task_history(job_id, "us", "stopped", scanned, len(rows), len(errors), source, params, "已终止，保留当前结果")
                     return
 
                 if job_pause_requested(job_id) and not pending:
@@ -6983,8 +7076,10 @@ def execute_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
             errors=len(errors),
             result_html=result_html,
         )
+        append_task_history(job_id, "us", "done", len(symbols), len(rows), len(errors), source, params, "扫描完成")
     except Exception as exc:
         set_job(job_id, status="error", message="扫描失败", error=str(exc))
+        append_task_history(job_id, "us", "error", 0, 0, 1, "", params, str(exc))
 
 
 def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
@@ -6994,7 +7089,7 @@ def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
             status="running",
             stage="准备股票池",
             message="正在拉取 A 股股票池",
-            detail="优先使用东方财富总市值行情，失败后自动切换备用数据源。",
+            detail="优先使用通达信股票列表，并用 Tencent 行情补充总市值；失败后使用本地缓存兜底。",
             data_source="",
             total=0,
             scanned=0,
@@ -7146,6 +7241,7 @@ def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
                 errors=len(errors),
                 result_html=result_html,
             )
+            append_task_history(job_id, "cn", "stopped", scanned, len(candidates), len(errors), universe_source, params, "A 股扫描已终止，当前结果已保留")
             return
 
         rating_order = {"Strong": 0, "Medium": 1, "Watch": 2, "None": 3}
@@ -7165,11 +7261,14 @@ def execute_ashare_scan_job(job_id: str, params: dict[str, list[str]]) -> None:
             errors=len(errors),
             result_html=result_html,
         )
+        append_task_history(job_id, "cn", "done", scanned, len(candidates), len(errors), universe_source, params, "A 股扫描完成")
     except Exception as exc:
         if job_stop_requested(job_id):
             set_job(job_id, status="stopped", stage="已终止", message="A 股扫描已终止", detail="已按用户请求终止。", current="")
+            append_task_history(job_id, "cn", "stopped", 0, 0, 0, "", params, "A 股扫描已终止")
             return
         set_job(job_id, status="error", stage="失败", message="A 股扫描失败", detail="请查看错误信息；通常是外部数据源返回异常或网络超时。", error=str(exc))
+        append_task_history(job_id, "cn", "error", 0, 0, 1, "", params, str(exc))
 
 
 class Handler(BaseHTTPRequestHandler):

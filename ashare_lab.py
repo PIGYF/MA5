@@ -814,7 +814,8 @@ def read_ashare_universe_cache(
     entry = (payload.get("entries") or {}).get(key)
     if not isinstance(entry, dict):
         return None
-    if "akshare" in str(entry.get("source", "")).lower():
+    source_text = str(entry.get("source", "")).lower()
+    if any(name in source_text for name in ("akshare", "efinance", "eastmoney", "东方财富")):
         return None
     if min_market_cap_100m > 0 and not bool(entry.get("has_market_cap", False)):
         return None
@@ -915,6 +916,9 @@ def cached_ashare_universe_items() -> list[AShareUniverseItem]:
     items_by_symbol: dict[str, AShareUniverseItem] = {}
     for entry in (payload.get("entries") or {}).values():
         if not isinstance(entry, dict):
+            continue
+        source_text = str(entry.get("source", "")).lower()
+        if any(name in source_text for name in ("akshare", "efinance", "eastmoney", "东方财富")):
             continue
         for raw in entry.get("items") or []:
             if not isinstance(raw, dict):
@@ -1364,6 +1368,24 @@ def load_ashare_universe_with_meta(
         return cached
     try:
         if progress:
+            progress("正在尝试通达信股票列表，并用 Tencent 行情补充总市值")
+        result = fetch_tdx_ashare_universe(min_market_cap_100m, max_symbols)
+        write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
+        return result
+    except Exception as tdx_exc:
+        stale = stale_ashare_universe_cache(min_market_cap_100m, max_symbols, progress)
+        if stale:
+            return stale
+        if progress:
+            progress(f"通达信股票池不可用：{tdx_exc}；正在尝试代码/名称表兜底")
+        try:
+            result = fetch_akshare_code_name_universe(max_symbols)
+            write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
+            return result
+        except Exception as code_name_exc:
+            raise RuntimeError(f"A 股股票池拉取失败：通达信 {tdx_exc}；代码表 {code_name_exc}") from code_name_exc
+    try:
+        if progress:
             progress("正在尝试 efinance 股票池")
         result = fetch_efinance_ashare_universe(min_market_cap_100m, max_symbols)
         write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
@@ -1469,6 +1491,24 @@ def load_ashare_universe_for_scan(
     cached = read_ashare_universe_cache(min_market_cap_100m, max_symbols, progress)
     if cached:
         return cached
+    try:
+        if progress:
+            progress("正在尝试通达信股票列表，并用 Tencent 行情补充总市值")
+        result = fetch_tdx_ashare_universe(min_market_cap_100m, max_symbols)
+        write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
+        return result
+    except Exception as tdx_exc:
+        stale = stale_ashare_universe_cache(min_market_cap_100m, max_symbols, progress)
+        if stale:
+            return stale
+        if progress:
+            progress(f"通达信股票池不可用：{tdx_exc}；正在尝试代码/名称表兜底")
+        try:
+            result = fetch_akshare_code_name_universe(max_symbols)
+            write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
+            return result
+        except Exception as code_name_exc:
+            raise RuntimeError(f"A 股股票池拉取失败：通达信 {tdx_exc}；代码表 {code_name_exc}") from code_name_exc
     try:
         if progress:
             progress("正在尝试 efinance 股票池")

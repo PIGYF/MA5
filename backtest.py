@@ -316,6 +316,66 @@ def rolling_optional_sma(values: list[float | None], length: int) -> list[float 
     return result
 
 
+def median_float(values: list[float]) -> float:
+    clean = sorted(value for value in values if is_valid_number(value) and value > 0)
+    if not clean:
+        return 0.0
+    mid = len(clean) // 2
+    if len(clean) % 2:
+        return clean[mid]
+    return (clean[mid - 1] + clean[mid]) / 2
+
+
+def near_common_split_ratio(value: float, tolerance: float = 0.18) -> float:
+    if value <= 0:
+        return 0.0
+    for ratio in (2.0, 3.0, 4.0, 5.0, 10.0):
+        if abs(value - ratio) / ratio <= tolerance:
+            return ratio
+    return 0.0
+
+
+def recent_split_adjustment(
+    bars: list[Bar],
+    lookback: int = 35,
+    min_post_days: int = 2,
+) -> dict[str, object] | None:
+    if len(bars) < 25:
+        return None
+    start = max(10, len(bars) - lookback)
+    for boundary in range(start, len(bars) - min_post_days + 1):
+        pre = bars[max(0, boundary - 20) : boundary]
+        post = bars[boundary : min(len(bars), boundary + 5)]
+        if len(pre) < 8 or len(post) < min_post_days:
+            continue
+        pre_price = median_float([bar.close for bar in pre[-8:]])
+        post_price = median_float([bar.close for bar in post])
+        pre_volume = median_float([bar.volume for bar in pre])
+        post_volume = median_float([bar.volume for bar in post])
+        if not all((pre_price, post_price, pre_volume, post_volume)):
+            continue
+        price_down_ratio = pre_price / post_price
+        volume_up_ratio = post_volume / pre_volume
+        price_split_ratio = near_common_split_ratio(price_down_ratio, 0.10)
+        if price_split_ratio and volume_up_ratio >= max(1.5, price_split_ratio * 0.35):
+            return {
+                "date": bars[boundary].date,
+                "index": boundary,
+                "ratio": price_split_ratio,
+                "mode": "price-volume",
+            }
+        volume_split_ratio = near_common_split_ratio(volume_up_ratio, 0.25)
+        price_continuous = 0.70 <= post_price / pre_price <= 1.35
+        if volume_split_ratio and price_continuous:
+            return {
+                "date": bars[boundary].date,
+                "index": boundary,
+                "ratio": volume_split_ratio,
+                "mode": "volume-only",
+            }
+    return None
+
+
 def calculate_kdj(
     bars: list[Bar],
     length: int = 9,
@@ -469,6 +529,13 @@ def build_ratchet_inputs(
         vol_ma[i] is not None and volumes[i] >= vol_ma[i] * vol_multiplier
         for i in range(len(bars))
     ]
+    split_event = recent_split_adjustment(bars, lookback=max(35, vol_length + 10))
+    if split_event:
+        split_index = int(split_event["index"])
+        suppress_until = min(len(bars), split_index + vol_length)
+        for idx in range(split_index, suppress_until):
+            is_vol_high[idx] = False
+            is_massive_vol[idx] = False
     massive_counts = rolling_sum([1 if x else 0 for x in is_massive_vol], massive_window)
 
     buy_signal = []
