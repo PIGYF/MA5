@@ -74,6 +74,7 @@ from ashare_lab import (
     AShareSignalSnapshot,
     ashare_board_filter_label,
     ashare_chart_payload,
+    ashare_required_latest_date,
     ashare_limit_pct,
     ashare_to_backtest_bars,
     fetch_ashare_profile,
@@ -1015,7 +1016,12 @@ def load_latest_ashare_scan() -> dict[str, object] | None:
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return payload if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            return None
+        expected_signal_date = ashare_required_latest_date(date.today()).isoformat()
+        if str(payload.get("signal_date", "")) != expected_signal_date:
+            return None
+        return payload
     except Exception:
         path.unlink(missing_ok=True)
         return None

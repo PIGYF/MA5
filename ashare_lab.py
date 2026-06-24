@@ -5,7 +5,7 @@ import os
 import csv
 import time
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, time as datetime_time, timedelta
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote
@@ -21,7 +21,7 @@ ASHARE_UNIVERSE_CACHE_PATH = ASHARE_CACHE_DIR / "universe_cache.json"
 ASHARE_UNIVERSE_CACHE_SECONDS = 18 * 60 * 60
 ASHARE_PRICE_CACHE_DIR = ASHARE_CACHE_DIR / "prices"
 ASHARE_PRICE_CACHE_MAX_BARS = 1300
-ASHARE_PRICE_CACHE_FRESH_GRACE_DAYS = int(os.environ.get("MA5_ASHARE_PRICE_CACHE_FRESH_GRACE_DAYS", "3"))
+ASHARE_PRICE_CACHE_READY_TIME = datetime_time(15, 30)
 
 
 @dataclass
@@ -569,6 +569,27 @@ def slice_ashare_bars(bars: list[AShareBar], start_day: date, end_day: date) -> 
     return [bar for bar in bars if start_text <= bar.date <= end_text]
 
 
+def previous_weekday(day: date) -> date:
+    current = day - timedelta(days=1)
+    while current.weekday() >= 5:
+        current -= timedelta(days=1)
+    return current
+
+
+def ashare_required_latest_date(end_day: date) -> date:
+    today = date.today()
+    if end_day >= today:
+        if today.weekday() >= 5:
+            return previous_weekday(today)
+        if datetime.now().time() < ASHARE_PRICE_CACHE_READY_TIME:
+            return previous_weekday(today)
+        return today
+    required = end_day
+    while required.weekday() >= 5:
+        required -= timedelta(days=1)
+    return required
+
+
 def ashare_cache_covers_range(bars: list[AShareBar], start_day: date, end_day: date) -> bool:
     if not bars:
         return False
@@ -579,8 +600,7 @@ def ashare_cache_covers_range(bars: list[AShareBar], start_day: date, end_day: d
     latest = max(dates)
     if earliest > start_day:
         return False
-    stale_cutoff = date.today() - timedelta(days=ASHARE_PRICE_CACHE_FRESH_GRACE_DAYS)
-    required_latest = end_day if end_day < stale_cutoff else stale_cutoff
+    required_latest = ashare_required_latest_date(end_day)
     return latest >= required_latest
 
 
