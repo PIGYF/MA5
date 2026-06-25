@@ -4692,6 +4692,14 @@ def earnings_badge(row: SignalResult) -> str:
     return f'<span class="badge {cls}" title="{title}">{html.escape(label)}</span>'
 
 
+def signal_rating_from_score(score: float) -> str:
+    if score >= 80:
+        return "Strong"
+    if score >= 60:
+        return "Medium"
+    return "Weak"
+
+
 def format_metric(value: float, suffix: str = "%") -> str:
     if value == 999.0:
         return "N/A"
@@ -5173,7 +5181,7 @@ def hide_weak_candidates(params: dict[str, list[str]]) -> bool:
 def visible_candidate_rows(params: dict[str, list[str]], rows: list[SignalResult]) -> list[SignalResult]:
     visible = rows
     if hide_weak_candidates(params):
-        visible = [row for row in visible if row.second_stage_rating != "Weak"]
+        visible = [row for row in visible if row.technical_rating != "Weak"]
     earnings_filter = field(params, "earnings_filter", "show")
     if earnings_filter == "hide_3d":
         visible = [row for row in visible if not row.next_earnings_date or row.earnings_days > 3]
@@ -5262,8 +5270,8 @@ def save_latest_scan(
             "scanned": len(symbols),
             "technical_candidates": len(rows),
             "visible_candidates": len(display_rows),
-            "strong": sum(1 for row in display_rows if row.second_stage_rating == "Strong"),
-            "medium": sum(1 for row in display_rows if row.second_stage_rating == "Medium"),
+            "strong": sum(1 for row in display_rows if row.technical_rating == "Strong"),
+            "medium": sum(1 for row in display_rows if row.technical_rating == "Medium"),
             "failed": len(errors),
         },
         "report": f"/reports/{html_path.name}",
@@ -5837,13 +5845,22 @@ restoreActiveScan();
 def render_candidate_table(rows: list[SignalResult], params: dict[str, list[str]] | None = None) -> str:
     params = params or {}
 
+    def technical_score_badge(row: SignalResult) -> str:
+        rating = row.technical_rating or signal_rating_from_score(row.technical_score)
+        cls = {
+            "Strong": "score-Strong",
+            "Medium": "score-Medium",
+            "Weak": "score-Weak",
+        }.get(rating, "score-Medium")
+        return f'<span class="score-badge {cls}">{row.technical_score:.0f}</span>'
+
     rendered_rows = []
     for r in rows:
         filter_attrs = " ".join(
             f'{result_filter_attr(key)}="{1 if result_filter_value(r, key) else 0}"'
             for key, _, _ in OPTIONAL_RESULT_FILTERS
         )
-        watch_note = " ".join(part for part in (r.second_stage_rating or "", r.signal_type or "") if part)
+        watch_note = " ".join(part for part in (r.technical_rating or "", r.signal_type or "") if part)
         sector = us_sector_zh(r.sector or "")
         industry = us_industry_zh(r.industry or "")
         company_display_name = us_company_display_name(r.symbol, r.company_name or "")
@@ -5858,6 +5875,7 @@ def render_candidate_table(rows: list[SignalResult], params: dict[str, list[str]
             f"<td>{html.escape(industry)}</td>"
             f"<td>{html.escape(r.signal_date)}</td>"
             f"<td>{html.escape({'B1_trend_confirm': 'B1', 'B2_reentry': 'B2'}.get(r.signal_type, r.signal_type or '-'))}</td>"
+            f"<td>{technical_score_badge(r)}</td>"
             f'<td><span class="condition-tags" style="justify-content:flex-start;">{render_us_candidate_reason_tags(r)}</span></td>'
             f"<td>{earnings_badge(r)}</td>"
             f"<td>{r.close:.2f}</td>"
@@ -5867,12 +5885,12 @@ def render_candidate_table(rows: list[SignalResult], params: dict[str, list[str]
         )
     table_rows = "\n".join(rendered_rows)
     if not table_rows:
-        table_rows = '<tr><td colspan="12" class="empty">No visible candidates.</td></tr>'
+        table_rows = '<tr><td colspan="13" class="empty">No visible candidates.</td></tr>'
     return f"""
 {render_result_filter_panel(params, len(rows))}
 <div class="table-wrap">
 <table class="resizable-table" data-secondary-filter-table>
-  <thead><tr><th>操作</th><th>代码</th><th>公司</th><th>板块</th><th>行业</th><th>信号日</th><th>B点</th><th>入选原因</th><th>财报</th><th>收盘</th><th>量比</th><th>市值$B</th></tr></thead>
+  <thead><tr><th>操作</th><th>代码</th><th>公司</th><th>板块</th><th>行业</th><th>信号日</th><th>B点</th><th>技术分</th><th>入选原因</th><th>财报</th><th>收盘</th><th>量比</th><th>市值$B</th></tr></thead>
   <tbody>{table_rows}</tbody>
 </table>
 </div>
@@ -5993,6 +6011,7 @@ def latest_scan_to_html() -> str:
 </section>
 """
     candidates = [SignalResult(**row) for row in latest.get("candidates", [])]
+    candidates.sort(key=lambda row: (row.technical_score, row.avg_dollar_volume_20d), reverse=True)
     errors = [(item.get("symbol", ""), item.get("reason", "")) for item in latest.get("errors", [])]
     summary = latest.get("summary", {})
     source = str(latest.get("source", "saved"))
@@ -6119,7 +6138,7 @@ def run_scanner(params: dict[str, list[str]]) -> str:
             errors.append((symbol, str(exc)))
 
     add_sector_and_rating(rows)
-    rows.sort(key=lambda row: (row.second_stage_score_total, row.avg_dollar_volume_20d), reverse=True)
+    rows.sort(key=lambda row: (row.technical_score, row.avg_dollar_volume_20d), reverse=True)
     enrich_earnings_dates(rows)
     display_rows = visible_candidate_rows(params, rows)
     stem = safe_name(f"next_b_{end}_{len(symbols)}")
@@ -6987,7 +7006,7 @@ def finish_scan_result(
 ) -> str:
     end = field(params, "end", default_scan_end_date().isoformat())
     add_sector_and_rating(rows)
-    rows.sort(key=lambda row: (row.second_stage_score_total, row.avg_dollar_volume_20d), reverse=True)
+    rows.sort(key=lambda row: (row.technical_score, row.avg_dollar_volume_20d), reverse=True)
     enrich_earnings_dates(rows)
     display_rows = visible_candidate_rows(params, rows)
     stem = safe_name(f"next_b_{end}_{len(symbols)}_{int(time.time())}")
