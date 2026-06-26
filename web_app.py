@@ -448,9 +448,44 @@ def build_benchmark(symbol: str, start: str, end: str, initial_cash: float) -> d
     }
 
 
+MARKET_ENV_REFRESH_LOCK = threading.Lock()
+MARKET_ENV_REFRESHING: set[str] = set()
+
+
+def latest_cached_bar_date(symbol: str) -> str:
+    bars = read_price_cache(symbol)
+    return max((bar.date for bar in bars), default="")
+
+
+def schedule_market_environment_refresh(symbols: list[str], end: date) -> None:
+    stale_symbols = [symbol for symbol in symbols if latest_cached_bar_date(symbol) < end.isoformat()]
+    if not stale_symbols:
+        return
+    refresh_key = ",".join(sorted(stale_symbols))
+    with MARKET_ENV_REFRESH_LOCK:
+        if refresh_key in MARKET_ENV_REFRESHING:
+            return
+        MARKET_ENV_REFRESHING.add(refresh_key)
+
+    def refresh() -> None:
+        start = end - timedelta(days=180)
+        try:
+            for symbol in stale_symbols:
+                try:
+                    fetch_bars("yfinance", symbol, start.isoformat(), end.isoformat(), "qfq", None)
+                except Exception:
+                    pass
+        finally:
+            with MARKET_ENV_REFRESH_LOCK:
+                MARKET_ENV_REFRESHING.discard(refresh_key)
+
+    threading.Thread(target=refresh, daemon=True).start()
+
+
 def market_environment(symbol: str = "QQQ") -> dict[str, object]:
     end = default_scan_end_date()
     macro = macro_risk_state(date.today())
+    schedule_market_environment_refresh([symbol, "^VIX"], end)
     try:
         bars = [bar for bar in read_price_cache(symbol) if date.fromisoformat(bar.date) <= end]
         bars = bars[-120:]
