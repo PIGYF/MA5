@@ -126,6 +126,7 @@ class SignalResult:
     country: str = ""
     sector: str = ""
     industry: str = ""
+    concept_tags: str = ""
     asset_type: str = ""
     second_stage_rating: str = ""
     second_stage_score_total: int = 0

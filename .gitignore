@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 *.zip
 .venv/
+.env*
 
 # Generated reports, scans, and local cache files
 reports/

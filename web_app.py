@@ -5,6 +5,7 @@ import html
 import importlib.util
 import json
 import os
+import random
 import re
 import threading
 import time
@@ -90,6 +91,28 @@ from ashare_lab import (
 from scan_next_b import SPLIT_CACHE_PATH, SignalResult, latest_b_signal, load_symbols, unique_symbols, write_html
 
 
+def load_local_env() -> None:
+    env_path = Path(__file__).resolve().parent / ".env"
+    if not env_path.exists():
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith("#") or "=" not in text:
+            continue
+        key, value = text.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_local_env()
+
+
 SCAN_JOBS: dict[str, dict[str, object]] = {}
 SCAN_JOBS_LOCK = threading.Lock()
 TASK_HISTORY_PATH = SCAN_DIR / "task_history.json"
@@ -164,6 +187,8 @@ def active_scan_job(market: str | None = None) -> tuple[str, dict[str, object]] 
 def job_market(job_id: str, job: dict[str, object] | None = None) -> str:
     if job and isinstance(job.get("market"), str):
         return str(job["market"])
+    if str(job_id).startswith("profile-"):
+        return "us_profile"
     return "cn" if str(job_id).startswith("ashare-") else "us"
 
 
@@ -181,11 +206,17 @@ def normalize_job_payload(job_id: str, job: dict[str, object]) -> dict[str, obje
     else:
         progress_pct = 0
     market = job_market(job_id, payload)
+    if market == "cn":
+        market_label = "A股"
+    elif market == "us_profile":
+        market_label = "美股资料"
+    else:
+        market_label = "美股"
     payload.update(
         {
             "job_id": job_id,
             "market": market,
-            "market_label": "A股" if market == "cn" else "美股",
+            "market_label": market_label,
             "status_label": JOB_STATUS_LABELS.get(status, status or "-"),
             "is_active": status in ACTIVE_SCAN_STATUSES,
             "is_finished": status in FINISHED_SCAN_STATUSES,
@@ -247,13 +278,19 @@ def append_task_history(
     params: dict[str, list[str]] | None = None,
     message: str = "",
 ) -> None:
+    if market == "cn":
+        market_label = "A股"
+    elif market == "us_profile":
+        market_label = "美股资料"
+    else:
+        market_label = "美股"
     with TASK_HISTORY_LOCK:
         TASK_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
         existing = load_task_history(TASK_HISTORY_LIMIT)
         entry = {
             "job_id": job_id,
             "market": market,
-            "market_label": "A股" if market == "cn" else "美股",
+            "market_label": market_label,
             "status": status,
             "status_label": JOB_STATUS_LABELS.get(status, status),
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1173,7 +1210,7 @@ def mixed_cache_summary(paths: list[Path], directories: list[Path] | None = None
 
 
 def cache_dashboard_summary() -> dict[str, dict[str, object]]:
-    us_market_paths = [NASDAQ_CACHE_PATH, EARNINGS_CACHE_PATH, SPLIT_CACHE_PATH]
+    us_market_paths = [NASDAQ_CACHE_PATH, EARNINGS_CACHE_PATH, SPLIT_CACHE_PATH, US_COMPANY_PROFILE_CACHE_PATH]
     if LEGACY_NASDAQ_CACHE_PATH != NASDAQ_CACHE_PATH:
         us_market_paths.append(LEGACY_NASDAQ_CACHE_PATH)
     ashare_cache_paths = [DATA_DIR / "ashare" / "universe_cache.json", DATA_DIR / "ashare" / "sector_map.json"]
@@ -1213,7 +1250,7 @@ def clear_cache_area(area: str) -> str:
         deleted = delete_directory_files(PRICE_CACHE_DIR)
         return f"已清理行情缓存 {deleted} 个。"
     if area == "us_market":
-        deleted = delete_files([NASDAQ_CACHE_PATH, LEGACY_NASDAQ_CACHE_PATH, EARNINGS_CACHE_PATH, SPLIT_CACHE_PATH])
+        deleted = delete_files([NASDAQ_CACHE_PATH, LEGACY_NASDAQ_CACHE_PATH, EARNINGS_CACHE_PATH, SPLIT_CACHE_PATH, US_COMPANY_PROFILE_CACHE_PATH])
         return f"已清理美股市场/财报缓存 {deleted} 个。"
     if area == "ashare":
         deleted = delete_files([DATA_DIR / "ashare" / "universe_cache.json", DATA_DIR / "ashare" / "sector_map.json"])
@@ -1851,7 +1888,7 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
     params = params or {}
     active_jobs = [
         normalize_job_payload(job_id, job)
-        for market in ("us", "cn")
+        for market in ("us", "cn", "us_profile")
         for item in [latest_job_for_market(market, include_finished=False)]
         if item
         for job_id, job in [item]
@@ -1863,6 +1900,28 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
     us_candidates = int(us_summary.get("visible_candidates", 0) or 0) if us_latest else 0
     us_strong = int(us_summary.get("strong", 0) or 0) if us_latest else 0
     us_watch_count = len(load_watchlist_items())
+    us_profile_summary = us_company_profile_summary()
+    latest_candidate_count = len(latest_scan_candidate_symbols())
+    us_profile_job_item = latest_job_for_market("us_profile", include_finished=True)
+    us_profile_job = normalize_job_payload(us_profile_job_item[0], us_profile_job_item[1]) if us_profile_job_item else {}
+    if us_profile_job and not us_profile_job.get("is_active"):
+        job_total = int(us_profile_job.get("total", 0) or 0)
+        if job_total and latest_candidate_count and job_total > max(50, latest_candidate_count * 3):
+            us_profile_job = {}
+    cached_profile_progress = us_profile_summary.get("progress", {}) if isinstance(us_profile_summary.get("progress"), dict) else {}
+    if us_profile_job:
+        profile_progress_html = f'<span class="scan-fact" id="us-profile-progress"><span>更新任务</span>{html.escape(str(us_profile_job.get("status_label", "-")))} {int(us_profile_job.get("progress_pct", 0) or 0)}% · {int(us_profile_job.get("scanned", 0) or 0)}/{int(us_profile_job.get("total", 0) or 0)}</span>'
+    elif cached_profile_progress:
+        scanned = int(cached_profile_progress.get("scanned", 0) or 0)
+        total = int(cached_profile_progress.get("total", 0) or 0)
+        if total and latest_candidate_count and total > max(50, latest_candidate_count * 3):
+            profile_progress_html = ""
+        else:
+            status_text = str(cached_profile_progress.get("status", "上次进度") or "上次进度")
+            pct = 100 if total and scanned >= total else round(scanned / total * 100) if total else 0
+            profile_progress_html = f'<span class="scan-fact" id="us-profile-progress"><span>{html.escape(status_text)}</span>{pct}% · {scanned}/{total}</span>'
+    else:
+        profile_progress_html = ""
 
     cn_latest = load_latest_ashare_scan()
     cn_summary = cn_latest.get("summary", {}) if cn_latest else {}
@@ -1885,6 +1944,51 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
         <input type="hidden" name="area" value="{html.escape(area)}">
         <button class="{cls}" type="submit">{html.escape(label)}</button>
       </form>"""
+
+    us_company_profile_html = f"""
+    <div class="toolbar" style="margin:12px 0 0;">
+      <div>
+        <div class="scan-facts" style="margin-top:0;">
+          <span class="scan-fact"><span>公司信息</span>{int(us_profile_summary["count"])} 只</span>
+          <span class="scan-fact"><span>中文名</span>{int(us_profile_summary.get("cn_name_count", 0) or 0)} 只</span>
+          <span class="scan-fact"><span>当前候选</span>{latest_candidate_count} 只</span>
+          <span class="scan-fact"><span>更新时间</span>{html.escape(str(us_profile_summary["updated_at"]))}</span>
+          {profile_progress_html}
+        </div>
+        <p class="hint" style="margin:6px 0 0;">只补全当前选股结果里缺失中文名的股票；已有缓存直接复用。</p>
+      </div>
+      <form action="/us/company-profiles/update" method="get" onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='更新中...';">
+        <button class="secondary" type="submit">更新当前结果公司信息</button>
+      </form>
+    </div>
+    <script>
+    (function() {{
+      const progressEl = document.getElementById("us-profile-progress");
+      if (!progressEl) return;
+      async function refreshProfileProgress() {{
+        try {{
+          const res = await fetch("/us/company-profiles/status");
+          const job = await res.json();
+          if (!job || job.status === "idle") return false;
+          const total = Number(job.total || 0);
+          const scanned = Number(job.scanned || 0);
+          const percent = job.progress_pct || (total ? Math.round(scanned / total * 100) : 0);
+          const label = job.status_label || job.status || "更新中";
+          progressEl.innerHTML = `<span>更新任务</span>${{label}} ${{percent}}% · ${{scanned}}/${{total || "-"}}`;
+          return !["done", "error", "stopped"].includes(job.status);
+        }} catch (error) {{
+          return false;
+        }}
+      }}
+      refreshProfileProgress().then(active => {{
+        if (!active) return;
+        const timer = window.setInterval(async () => {{
+          const keep = await refreshProfileProgress();
+          if (!keep) window.clearInterval(timer);
+        }}, 3000);
+      }});
+    }})();
+    </script>"""
 
     active_job_html = "".join(
         f"""
@@ -1929,6 +2033,7 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
       <a class="btn btn-secondary" href="/us/watchlist">自选池</a>
       <a class="btn btn-secondary" href="/us/backtest">回测</a>
     </div>
+    {us_company_profile_html}
   </div>
   <div class="dashboard-panel">
     <h2>A股</h2>
@@ -4513,10 +4618,474 @@ def nasdaq_row_metadata(row: dict[str, object]) -> dict[str, object]:
     }
 
 
+US_COMPANY_PROFILE_CACHE_PATH = DATA_DIR / "cache" / "us_company_profiles.json"
+_US_COMPANY_PROFILE_CACHE_MTIME = 0.0
+_US_COMPANY_PROFILE_CACHE: dict[str, dict[str, object]] = {}
+EASTMONEY_SEARCH_TOKEN = "D43BF722C8FEB83B4D18D2FDC0E537F8"
+FMP_PROFILE_URL = "https://financialmodelingprep.com/stable/profile"
+
+
+def normalize_us_profile_symbol(value: object) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    if "." in text and text.split(".", 1)[0].isdigit():
+        text = text.split(".", 1)[1]
+    return text.replace(" ", "")
+
+
+def read_us_company_profile_cache() -> dict[str, dict[str, object]]:
+    global _US_COMPANY_PROFILE_CACHE_MTIME, _US_COMPANY_PROFILE_CACHE
+    path = US_COMPANY_PROFILE_CACHE_PATH
+    if not path.exists():
+        _US_COMPANY_PROFILE_CACHE_MTIME = 0.0
+        _US_COMPANY_PROFILE_CACHE = {}
+        return {}
+    mtime = path.stat().st_mtime
+    if mtime == _US_COMPANY_PROFILE_CACHE_MTIME:
+        return _US_COMPANY_PROFILE_CACHE
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        profiles = payload.get("profiles", {}) if isinstance(payload, dict) else {}
+    except Exception:
+        profiles = {}
+    if not isinstance(profiles, dict):
+        profiles = {}
+    _US_COMPANY_PROFILE_CACHE_MTIME = mtime
+    _US_COMPANY_PROFILE_CACHE = {
+        normalize_us_profile_symbol(symbol): profile
+        for symbol, profile in profiles.items()
+        if normalize_us_profile_symbol(symbol) and isinstance(profile, dict)
+    }
+    return _US_COMPANY_PROFILE_CACHE
+
+
+def us_company_profile_summary() -> dict[str, object]:
+    profiles = read_us_company_profile_cache()
+    updated_at = "-"
+    source = "-"
+    warning = ""
+    progress: dict[str, object] = {}
+    if US_COMPANY_PROFILE_CACHE_PATH.exists():
+        try:
+            payload = json.loads(US_COMPANY_PROFILE_CACHE_PATH.read_text(encoding="utf-8"))
+            updated_at = str(payload.get("updated_at", "-"))
+            source = str(payload.get("source", "-"))
+            warning = str(payload.get("warning", "") or "")
+            raw_progress = payload.get("progress", {})
+            progress = raw_progress if isinstance(raw_progress, dict) else {}
+        except Exception:
+            pass
+    if not progress and warning:
+        match = re.search(r"已处理\s*(\d+)\s*/\s*(\d+)", warning)
+        if match:
+            progress = {"status": "上次进度", "scanned": int(match.group(1)), "total": int(match.group(2))}
+    cn_name_count = sum(1 for item in profiles.values() if item.get("cn_name"))
+    return {"count": len(profiles), "cn_name_count": cn_name_count, "updated_at": updated_at, "source": source, "warning": warning, "progress": progress}
+
+
+def fmp_api_key() -> str:
+    return (os.environ.get("FMP_API_KEY") or os.environ.get("FINANCIAL_MODELING_PREP_API_KEY") or "").strip()
+
+
+def fmp_company_profile(symbol: str) -> dict[str, object]:
+    normalized = normalize_us_profile_symbol(symbol)
+    key = fmp_api_key()
+    if not key:
+        raise RuntimeError("缺少 FMP_API_KEY 环境变量。")
+    if not normalized:
+        return {}
+    url = f"{FMP_PROFILE_URL}?{urlencode({'symbol': normalized, 'apikey': key})}"
+    request = Request(url, headers={"User-Agent": "stock-backtester/1.0"})
+    with urlopen(request, timeout=12) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    rows = payload if isinstance(payload, list) else [payload]
+    row = next((item for item in rows if isinstance(item, dict)), {})
+    if not row:
+        return {}
+    return {
+        "symbol": normalized,
+        "company_name": str(row.get("companyName") or "").strip(),
+        "english_name": str(row.get("companyName") or "").strip(),
+        "sector": str(row.get("sector") or "").strip(),
+        "industry": str(row.get("industry") or "").strip(),
+        "description": str(row.get("description") or "").strip(),
+        "website": str(row.get("website") or "").strip(),
+        "market_cap": float(row.get("marketCap") or 0),
+        "country": str(row.get("country") or "").strip(),
+        "exchange": str(row.get("exchange") or "").strip(),
+        "exchange_full_name": str(row.get("exchangeFullName") or "").strip(),
+        "ceo": str(row.get("ceo") or "").strip(),
+        "full_time_employees": str(row.get("fullTimeEmployees") or "").strip(),
+        "ipo_date": str(row.get("ipoDate") or "").strip(),
+        "image": str(row.get("image") or "").strip(),
+        "asset_type": "ETF" if row.get("isEtf") else "Stock",
+        "fmp_updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "profile_source": "fmp.profile",
+    }
+
+
+def eastmoney_us_headers() -> dict[str, str]:
+    return {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36",
+        "Accept": "application/json,text/plain,*/*",
+        "Referer": "https://quote.eastmoney.com/",
+    }
+
+
+def eastmoney_us_search(symbol: str, session=None) -> dict[str, object]:
+    import requests
+
+    normalized = normalize_us_profile_symbol(symbol)
+    if not normalized:
+        return {}
+    sess = session or requests.Session()
+    response = sess.get(
+        "https://searchapi.eastmoney.com/api/suggest/get",
+        params={
+            "input": normalized,
+            "type": "14",
+            "token": EASTMONEY_SEARCH_TOKEN,
+            "count": "10",
+        },
+        headers=eastmoney_us_headers(),
+        timeout=8,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    rows = (((payload or {}).get("QuotationCodeTable") or {}).get("Data") or [])
+    if not isinstance(rows, list):
+        return {}
+    exact_rows = [
+        row for row in rows
+        if isinstance(row, dict)
+        and normalize_us_profile_symbol(row.get("Code")) == normalized
+        and str(row.get("SecurityTypeName") or row.get("Classify") or "").lower() in ("美股", "usstock")
+    ]
+    row = exact_rows[0] if exact_rows else next((item for item in rows if isinstance(item, dict) and normalize_us_profile_symbol(item.get("Code")) == normalized), {})
+    if not row:
+        return {}
+    mkt_num = str(row.get("MktNum") or "").strip()
+    return {
+        "symbol": normalized,
+        "cn_name": str(row.get("Name") or "").strip(),
+        "eastmoney_mkt_num": mkt_num,
+        "eastmoney_quote_id": str(row.get("QuoteID") or f"{mkt_num}.{normalized}" if mkt_num else "").strip(),
+        "exchange": str(row.get("JYS") or "").strip(),
+        "pinyin": str(row.get("PinYin") or "").strip(),
+    }
+
+
+def eastmoney_us_stock_quote(symbol: str, mkt_num: str = "", session=None) -> dict[str, object]:
+    import requests
+
+    normalized = normalize_us_profile_symbol(symbol)
+    if not normalized:
+        return {}
+    sess = session or requests.Session()
+    prefixes = [mkt_num] if mkt_num else []
+    prefixes.extend(prefix for prefix in ("105", "106", "107") if prefix not in prefixes)
+    last_error: Exception | None = None
+    for prefix in prefixes:
+        if not prefix:
+            continue
+        try:
+            response = sess.get(
+                "https://push2.eastmoney.com/api/qt/stock/get",
+                params={
+                    "secid": f"{prefix}.{normalized}",
+                    "fields": "f43,f44,f45,f46,f47,f48,f55,f57,f58,f59,f60,f116,f170",
+                },
+                headers=eastmoney_us_headers(),
+                timeout=8,
+            )
+            response.raise_for_status()
+            data = (response.json() or {}).get("data") or {}
+            if not data:
+                continue
+            if normalize_us_profile_symbol(data.get("f57")) != normalized:
+                continue
+            divisor = 10 ** int(data.get("f59") or 3)
+            market_cap = data.get("f116")
+            return {
+                "symbol": normalized,
+                "cn_name": str(data.get("f58") or "").strip(),
+                "eastmoney_mkt_num": prefix,
+                "latest_price": float(data.get("f43") or 0) / divisor if data.get("f43") not in (None, "-") else 0,
+                "change_pct": float(data.get("f170") or 0) / 100 if data.get("f170") not in (None, "-") else 0,
+                "market_cap": float(market_cap or 0) if market_cap not in (None, "-") else 0,
+            }
+        except Exception as exc:
+            last_error = exc
+            continue
+    if last_error:
+        raise last_error
+    return {}
+
+
+def enrich_us_profile_with_eastmoney(symbol: str, base: dict[str, object], session=None) -> dict[str, object]:
+    profile = dict(base)
+    search_data: dict[str, object] = {}
+    quote_data: dict[str, object] = {}
+    try:
+        search_data = eastmoney_us_search(symbol, session=session)
+    except Exception as exc:
+        profile["eastmoney_error"] = str(exc)
+    if search_data:
+        profile.update({key: value for key, value in search_data.items() if value not in ("", None, 0)})
+    if not profile.get("cn_name"):
+        try:
+            quote_data = eastmoney_us_stock_quote(symbol, str(profile.get("eastmoney_mkt_num") or ""), session=session)
+        except Exception as exc:
+            profile["eastmoney_quote_error"] = str(exc)
+    if quote_data:
+        for key, value in quote_data.items():
+            if key == "market_cap" and value:
+                profile[key] = value
+            elif value not in ("", None, 0):
+                profile[key] = value
+    return profile
+
+
+def build_us_profile_payload(profiles: dict[str, dict[str, object]], source: str, warning: str = "", progress: dict[str, object] | None = None) -> dict[str, object]:
+    if not profiles:
+        raise RuntimeError("没有可写入的美股公司信息。")
+    US_COMPANY_PROFILE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "source": source,
+        "warning": warning,
+        "progress": progress or {},
+        "profiles": profiles,
+    }
+    US_COMPANY_PROFILE_CACHE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    read_us_company_profile_cache()
+    concept_count = sum(1 for item in profiles.values() if item.get("concept_tags"))
+    cn_name_count = sum(1 for item in profiles.values() if item.get("cn_name"))
+    return {
+        "count": len(profiles),
+        "concept_count": concept_count,
+        "cn_name_count": cn_name_count,
+        "updated_at": payload["updated_at"],
+        "source": source,
+        "warning": warning,
+    }
+
+
+def fetch_us_company_profiles_from_nasdaq_cache() -> dict[str, dict[str, object]]:
+    profiles: dict[str, dict[str, object]] = {}
+    rows = sorted(fetch_nasdaq_screener_rows(), key=lambda row: money_to_float(str(row.get("marketCap", ""))), reverse=True)
+    for row in rows:
+        symbol = normalize_us_profile_symbol(row.get("symbol"))
+        if not symbol:
+            continue
+        profiles[symbol] = {
+            "symbol": symbol,
+            "cn_name": "",
+            "english_name": str(row.get("name", "") or ""),
+            "sector": str(row.get("sector", "") or ""),
+            "industry": str(row.get("industry", "") or ""),
+            "concept_tags": "",
+        }
+    return profiles
+
+
+def latest_scan_candidate_symbols() -> list[str]:
+    latest = load_latest_scan()
+    if not latest:
+        return []
+    symbols: list[str] = []
+    for row in latest.get("candidates", []):
+        if isinstance(row, dict):
+            symbol = normalize_us_profile_symbol(row.get("symbol"))
+            if symbol:
+                symbols.append(symbol)
+    return unique_symbols(symbols)
+
+
+def missing_us_company_profile_symbols(symbols: list[str]) -> list[str]:
+    cache = read_us_company_profile_cache()
+    need_fmp = bool(fmp_api_key())
+    missing: list[str] = []
+    for symbol in unique_symbols(symbols):
+        normalized = normalize_us_profile_symbol(symbol)
+        if not normalized:
+            continue
+        profile = cache.get(normalized, {})
+        if not profile.get("cn_name"):
+            missing.append(normalized)
+            continue
+        if need_fmp and (not profile.get("company_name") or not profile.get("sector") or not profile.get("industry") or not profile.get("description")):
+            missing.append(normalized)
+    return missing
+
+
+def start_us_profile_update_for_symbols(symbols: list[str], reason: str = "current scan") -> str:
+    target_symbols = missing_us_company_profile_symbols(symbols)
+    if not target_symbols:
+        return ""
+    active = active_scan_job("us_profile")
+    if active:
+        return active[0]
+    job_id = f"profile-{uuid.uuid4().hex[:10]}"
+    set_job(
+        job_id,
+        market="us_profile",
+        status="queued",
+        stage="排队中",
+        message="美股公司信息后台更新已启动",
+        total=len(target_symbols),
+        scanned=0,
+        candidates=0,
+        errors=0,
+        current="",
+        stop_requested=False,
+        symbols=target_symbols,
+        reason=reason,
+    )
+    worker = threading.Thread(target=execute_us_company_profile_job, args=(job_id, target_symbols), daemon=True)
+    worker.start()
+    return job_id
+
+
+def execute_us_company_profile_job(job_id: str, symbols: list[str]) -> None:
+    import requests
+
+    try:
+        set_job(job_id, status="running", stage="准备", message="正在准备美股公司信息缓存", total=0, scanned=0, candidates=0, errors=0, current="")
+        base_profiles = fetch_us_company_profiles_from_nasdaq_cache()
+        existing_profiles = read_us_company_profile_cache()
+        profiles = dict(base_profiles)
+        for symbol, profile in existing_profiles.items():
+            if symbol in profiles:
+                merged = dict(profiles[symbol])
+                merged.update({key: value for key, value in profile.items() if value not in ("", None, 0)})
+                profiles[symbol] = merged
+        target_symbols = missing_us_company_profile_symbols(symbols)
+        for symbol in target_symbols:
+            profiles.setdefault(symbol, {"symbol": symbol, "cn_name": "", "english_name": "", "sector": "", "industry": "", "concept_tags": ""})
+        total = len(target_symbols)
+        if total <= 0:
+            set_job(job_id, status="done", stage="完成", message="当前候选股公司信息缓存已完整", total=0, scanned=0, candidates=0, errors=0, current="")
+            return
+        use_fmp = bool(fmp_api_key())
+        set_job(job_id, stage="更新中文名", message="正在低速请求东方财富 searchapi", total=total, scanned=0, candidates=0, errors=0)
+        session = requests.Session()
+        success = 0
+        errors = 0
+        stopped = False
+        for index, symbol in enumerate(target_symbols, 1):
+            if job_stop_requested(job_id):
+                stopped = True
+                break
+            set_job(job_id, current=symbol, scanned=index - 1, candidates=success, errors=errors, message="正在补全中文名")
+            try:
+                old_profile = profiles.get(symbol, {})
+                merged = dict(old_profile)
+                eastmoney_profile = enrich_us_profile_with_eastmoney(symbol, merged, session=session)
+                merged.update({key: value for key, value in eastmoney_profile.items() if value not in ("", None, 0)})
+                if use_fmp:
+                    try:
+                        fmp_profile = fmp_company_profile(symbol)
+                        merged.update({key: value for key, value in fmp_profile.items() if value not in ("", None, 0)})
+                    except Exception as fmp_exc:
+                        merged["fmp_error"] = str(fmp_exc)
+                profiles[symbol] = merged
+                if merged.get("cn_name"):
+                    success += 1
+            except Exception as exc:
+                errors += 1
+                profiles[symbol]["eastmoney_error"] = str(exc)
+            set_job(job_id, scanned=index, candidates=success, errors=errors, current=symbol)
+            if index % 50 == 0:
+                build_us_profile_payload(
+                    profiles,
+                    "eastmoney.searchapi + optional fmp",
+                    f"后台更新进行中：已处理 {index}/{total}。",
+                    {
+                        "status": "更新中",
+                        "scanned": index,
+                        "total": total,
+                        "cn_name_count": success,
+                        "errors": errors,
+                        "job_id": job_id,
+                    },
+                )
+            if index < total:
+                time.sleep(0.18 + random.random() * 0.22)
+        status = "stopped" if stopped else "done"
+        stage = "已终止" if stopped else "完成"
+        message = "美股公司信息更新已终止，已保留当前进度" if stopped else "美股公司信息更新完成"
+        warning = f"已处理 {int(get_job(job_id).get('scanned', 0) if get_job(job_id) else 0)}/{total}；东财失败 {errors} 只。" if stopped or errors else ""
+        scanned_final = int(get_job(job_id).get("scanned", total) if get_job(job_id) else total)
+        result = build_us_profile_payload(
+            profiles,
+            "eastmoney.searchapi + optional fmp",
+            warning,
+            {
+                "status": "已终止" if stopped else "已完成",
+                "scanned": scanned_final,
+                "total": total,
+                "cn_name_count": success,
+                "errors": errors,
+                "job_id": job_id,
+            },
+        )
+        set_job(
+            job_id,
+            status=status,
+            stage=stage,
+            message=message,
+            current="",
+            total=total,
+            scanned=scanned_final,
+            candidates=success,
+            errors=errors,
+            data_source="eastmoney.searchapi + optional fmp",
+            detail=f"中文名 {success} 只",
+        )
+        append_task_history(job_id, "us_profile", status, int(get_job(job_id).get("scanned", 0) if get_job(job_id) else 0), success, errors, "eastmoney.searchapi + optional fmp", None, message)
+    except Exception as exc:
+        set_job(job_id, status="error", stage="失败", message="美股公司信息更新失败", error=str(exc), current="")
+        append_task_history(job_id, "us_profile", "error", 0, 0, 1, "eastmoney.searchapi + optional fmp", None, str(exc))
+
+
+def us_company_profile_for_symbol(symbol: str) -> dict[str, object]:
+    return read_us_company_profile_cache().get(normalize_us_profile_symbol(symbol), {})
+
+
+def merge_us_company_profile(metadata: dict[str, object], symbol: str) -> dict[str, object]:
+    profile = us_company_profile_for_symbol(symbol)
+    if not profile:
+        return metadata
+    merged = dict(metadata)
+    if profile.get("english_name") and not merged.get("company_name"):
+        merged["company_name"] = profile["english_name"]
+    for source_key, target_key in (
+        ("cn_name", "cn_name"),
+        ("company_name", "company_name"),
+        ("english_name", "company_name"),
+        ("sector", "sector"),
+        ("industry", "industry"),
+        ("concept_tags", "concept_tags"),
+        ("description", "description"),
+        ("website", "website"),
+        ("exchange", "exchange"),
+        ("ceo", "ceo"),
+        ("country", "country"),
+        ("asset_type", "asset_type"),
+        ("market_cap", "market_cap"),
+    ):
+        if profile.get(source_key):
+            merged[target_key] = profile[source_key]
+    return merged
+
+
 def enrich_signal_result(result: SignalResult, metadata: dict[str, object] | None) -> SignalResult:
+    metadata = merge_us_company_profile(metadata or {}, result.symbol)
     if not metadata:
         return result
-    for key in ("company_name", "market_cap", "country", "sector", "industry", "asset_type"):
+    for key in ("company_name", "market_cap", "country", "sector", "industry", "concept_tags", "asset_type"):
         setattr(result, key, metadata.get(key, getattr(result, key)))
     return result
 
@@ -4551,10 +5120,19 @@ US_COMPANY_NAME_ZH_OVERRIDES = load_us_company_name_overrides()
 
 
 def us_company_display_name(symbol: str, company_name: str) -> str:
+    profile_name = str(us_company_profile_for_symbol(symbol).get("cn_name") or "")
+    if profile_name:
+        return profile_name
     override = US_COMPANY_NAME_ZH_OVERRIDES.get(symbol.upper())
     if override:
         return override
     return company_name or symbol.upper()
+
+
+def us_company_concepts_text(symbol: str, fallback: object = "") -> str:
+    profile_concepts = str(us_company_profile_for_symbol(symbol).get("concept_tags") or "")
+    text = profile_concepts or str(fallback or "")
+    return text if text.strip() else "-"
 
 
 def load_earnings_cache() -> dict[str, dict[str, object]]:
@@ -5009,6 +5587,7 @@ def fetch_us_company_profile(symbol: str) -> dict[str, object]:
 def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None, include_live_profile: bool = True) -> str:
     latest_row = candidate_from_latest_scan(symbol)
     profile = fetch_us_company_profile(symbol) if include_live_profile else {}
+    cached_profile = us_company_profile_for_symbol(symbol)
     merged: dict[str, object] = {}
     if signal_result:
         merged.update(
@@ -5017,6 +5596,7 @@ def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None
                 "market_cap": signal_result.market_cap,
                 "sector": signal_result.sector,
                 "industry": signal_result.industry,
+                "concept_tags": getattr(signal_result, "concept_tags", ""),
                 "asset_type": signal_result.asset_type,
                 "next_earnings_date": signal_result.next_earnings_date,
                 "earnings_days": signal_result.earnings_days,
@@ -5025,6 +5605,7 @@ def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None
         )
     merged.update({key: value for key, value in latest_row.items() if value not in ("", None, 0)})
     merged.update({key: value for key, value in profile.items() if value not in ("", None, 0)})
+    merged.update({key: value for key, value in cached_profile.items() if value not in ("", None, 0)})
 
     company_name = str(merged.get("company_name") or symbol)
     display_company_name = us_company_display_name(symbol, company_name)
@@ -5032,6 +5613,7 @@ def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None
     raw_industry = str(merged.get("industry") or "")
     sector = us_sector_zh(raw_sector)
     industry = us_industry_zh(raw_industry)
+    concept_tags = us_company_concepts_text(symbol, merged.get("concept_tags", ""))
     asset_type = us_asset_type_zh(str(merged.get("asset_type") or "Stock"))
     earnings_date = str(merged.get("next_earnings_date") or "")
     earnings_days = merged.get("earnings_days", "")
@@ -5052,6 +5634,7 @@ def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None
     <div class="stat-card"><div class="stat-label">市值</div><div class="stat-value">{format_us_money(merged.get("market_cap"))}</div></div>
     <div class="stat-card"><div class="stat-label">所属板块</div><div class="stat-value">{html.escape(sector)}</div></div>
     <div class="stat-card"><div class="stat-label">所属行业</div><div class="stat-value">{html.escape(industry)}</div></div>
+    <div class="stat-card"><div class="stat-label">概念板块</div><div class="stat-value">{html.escape(concept_tags)}</div></div>
     <div class="stat-card"><div class="stat-label">下一次财报</div><div class="stat-value">{html.escape(earnings_text)}</div></div>
   </section>
   <div class="table-wrap">
@@ -5315,6 +5898,10 @@ def save_latest_scan(
         "errors": [{"symbol": symbol, "reason": reason} for symbol, reason in errors],
     }
     LATEST_SCAN_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        start_us_profile_update_for_symbols([row.symbol for row in display_rows], "latest scan")
+    except Exception:
+        pass
 
 
 def quality_bars_for_symbol(symbol: str, current_bars: list[Bar], end: str) -> list[Bar]:
@@ -5896,9 +6483,12 @@ def render_candidate_table(rows: list[SignalResult], params: dict[str, list[str]
             for key, _, _ in OPTIONAL_RESULT_FILTERS
         )
         watch_note = " ".join(part for part in (r.technical_rating or "", r.signal_type or "") if part)
-        sector = us_sector_zh(r.sector or "")
-        industry = us_industry_zh(r.industry or "")
-        company_display_name = us_company_display_name(r.symbol, r.company_name or "")
+        cached = merge_us_company_profile(r.__dict__, r.symbol)
+        sector = us_sector_zh(str(cached.get("sector") or r.sector or ""))
+        industry = us_industry_zh(str(cached.get("industry") or r.industry or ""))
+        concepts = us_company_concepts_text(r.symbol, cached.get("concept_tags", getattr(r, "concept_tags", "")))
+        company_display_name = us_company_display_name(r.symbol, str(cached.get("company_name") or r.company_name or ""))
+        market_cap = float(cached.get("market_cap") or r.market_cap or 0)
         rendered_rows.append(
             f'<tr data-secondary-row {filter_attrs}>'
             f'<td class="action-cell">'
@@ -5908,6 +6498,7 @@ def render_candidate_table(rows: list[SignalResult], params: dict[str, list[str]
             f"<td>{html.escape(company_display_name)}</td>"
             f"<td>{html.escape(sector)}</td>"
             f"<td>{html.escape(industry)}</td>"
+            f"<td>{html.escape(concepts)}</td>"
             f"<td>{html.escape(r.signal_date)}</td>"
             f"<td>{html.escape({'B1_trend_confirm': 'B1', 'B2_reentry': 'B2'}.get(r.signal_type, r.signal_type or '-'))}</td>"
             f"<td>{technical_score_badge(r)}</td>"
@@ -5915,17 +6506,17 @@ def render_candidate_table(rows: list[SignalResult], params: dict[str, list[str]
             f"<td>{earnings_badge(r)}</td>"
             f"<td>{r.close:.2f}</td>"
             f"<td>{r.volume_ratio:.2f}x</td>"
-            f"<td>{r.market_cap / 1_000_000_000:.2f}</td>"
+            f"<td>{market_cap / 1_000_000_000:.2f}</td>"
             f"</tr>"
         )
     table_rows = "\n".join(rendered_rows)
     if not table_rows:
-        table_rows = '<tr><td colspan="13" class="empty">No visible candidates.</td></tr>'
+        table_rows = '<tr><td colspan="14" class="empty">No visible candidates.</td></tr>'
     return f"""
 {render_result_filter_panel(params, len(rows))}
 <div class="table-wrap">
 <table class="resizable-table" data-secondary-filter-table>
-  <thead><tr><th>操作</th><th>代码</th><th>公司</th><th>板块</th><th>行业</th><th>信号日</th><th>B点</th><th>技术分</th><th>入选原因</th><th>财报</th><th>收盘</th><th>量比</th><th>市值$B</th></tr></thead>
+  <thead><tr><th>操作</th><th>代码</th><th>公司</th><th>板块</th><th>行业</th><th>概念</th><th>信号日</th><th>B点</th><th>技术分</th><th>入选原因</th><th>财报</th><th>收盘</th><th>量比</th><th>市值$B</th></tr></thead>
   <tbody>{table_rows}</tbody>
 </table>
 </div>
@@ -6047,6 +6638,10 @@ def latest_scan_to_html() -> str:
 """
     candidates = [SignalResult(**row) for row in latest.get("candidates", [])]
     candidates.sort(key=lambda row: (row.technical_score, row.avg_dollar_volume_20d), reverse=True)
+    try:
+        start_us_profile_update_for_symbols([row.symbol for row in candidates], "latest scan page")
+    except Exception:
+        pass
     errors = [(item.get("symbol", ""), item.get("reason", "")) for item in latest.get("errors", [])]
     summary = latest.get("summary", {})
     source = str(latest.get("source", "saved"))
@@ -6372,12 +6967,15 @@ def watchlist_metadata_by_symbol(symbols: list[str]) -> dict[str, dict[str, obje
 
 def watchlist_row(item: dict[str, str], metadata: dict[str, object] | None) -> str:
     symbol = item["symbol"]
+    metadata = merge_us_company_profile(metadata or {}, symbol)
     group = item.get("group", "观察")
     note = item.get("note", "")
-    company = str((metadata or {}).get("company_name", "") or "-")
-    sector = str((metadata or {}).get("sector", "") or "-")
-    industry = str((metadata or {}).get("industry", "") or "-")
-    market_cap = float((metadata or {}).get("market_cap", 0) or 0)
+    company = str(metadata.get("company_name", "") or "-")
+    display_company = us_company_display_name(symbol, company if company != "-" else "")
+    sector = str(metadata.get("sector", "") or "-")
+    industry = str(metadata.get("industry", "") or "-")
+    concepts = us_company_concepts_text(symbol, metadata.get("concept_tags", ""))
+    market_cap = float(metadata.get("market_cap", 0) or 0)
     latest_close = "-"
     change_pct = "-"
     dist_ma = "-"
@@ -6453,9 +7051,10 @@ def watchlist_row(item: dict[str, str], metadata: dict[str, object] | None) -> s
     tag_text = " ".join(tags) if tags else "-"
     detail = {
         "symbol": symbol,
-        "company": company,
+        "company": display_company,
         "sector": sector,
         "industry": industry,
+        "concepts": concepts,
         "marketCap": cap_text,
         "close": latest_close,
         "change": change_pct,
@@ -6478,7 +7077,7 @@ def watchlist_row(item: dict[str, str], metadata: dict[str, object] | None) -> s
         "<tr>"
         '<td class="watch-row-cell">'
         '<div class="watch-row-head">'
-        f'<button type="button" class="watch-row-button" data-watch-symbol="{html.escape(symbol)}" {data_attrs}><span class="watch-symbol-line"><span>{html.escape(symbol)}</span><span>{html.escape(change_pct)}</span></span><span class="watch-meta-line">{html.escape(company)} · {html.escape(group)}</span></button>'
+        f'<button type="button" class="watch-row-button" data-watch-symbol="{html.escape(symbol)}" {data_attrs}><span class="watch-symbol-line"><span>{html.escape(symbol)}</span><span>{html.escape(change_pct)}</span></span><span class="watch-meta-line">{html.escape(display_company)} · {html.escape(group)}</span></button>'
         f'<span class="watch-row-actions"><a class="delete-link" href="/watchlist/delete?symbol={quote(symbol)}" onclick="return confirm(\'确认从自选池删除 {html.escape(symbol)}？\');">删除</a></span>'
         "</div>"
         "</td>"
@@ -6542,6 +7141,7 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
       <div class="watch-detail-item"><span>Company</span><strong id="watch-detail-company">-</strong></div>
       <div class="watch-detail-item"><span>Market Cap</span><strong id="watch-detail-market">-</strong></div>
       <div class="watch-detail-item"><span>Industry</span><strong id="watch-detail-industry">-</strong></div>
+      <div class="watch-detail-item"><span>概念</span><strong id="watch-detail-concepts">-</strong></div>
       <div class="watch-detail-item"><span>加入日期</span><strong id="watch-detail-added">-</strong></div>
       <div class="watch-detail-item"><span>技术状态</span><strong id="watch-detail-tech">-</strong></div>
       <div class="watch-detail-item"><span>B / S</span><strong id="watch-detail-signal">-</strong></div>
@@ -6619,6 +7219,7 @@ function updateWatchDetail(button) {{
   document.getElementById("watch-detail-company").textContent = attr(button, "data-company");
   document.getElementById("watch-detail-market").textContent = attr(button, "data-marketCap");
   document.getElementById("watch-detail-industry").textContent = `${{attr(button, "data-sector")}} / ${{attr(button, "data-industry")}}`;
+  document.getElementById("watch-detail-concepts").textContent = attr(button, "data-concepts");
   document.getElementById("watch-detail-added").textContent = attr(button, "data-addedAt");
   document.getElementById("watch-detail-tech").textContent = `${{attr(button, "data-maStatus")}} / 距5MA ${{attr(button, "data-distMa")}} / 量比 ${{attr(button, "data-volRatio")}}`;
   document.getElementById("watch-detail-signal").textContent = `${{attr(button, "data-bStatus")}} / ${{attr(button, "data-sStatus")}}`;
@@ -6857,13 +7458,13 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
         )
     except Exception as exc:
         return {"error": str(exc)}
-    markers = [
+    execution_markers = [
         {
             "time": str(row.get("date", "")),
             "position": "belowBar",
             "color": "#089981",
             "shape": "arrowUp",
-            "text": "买",
+            "text": str(row.get("buy_action_stage", "") or "买"),
         }
         for row in equity_curve
         if str(row.get("buy_action", ""))
@@ -6871,6 +7472,8 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
         {"time": trade.exit_date, "position": "aboveBar", "color": "#f23645", "shape": "arrowDown", "text": "卖"}
         for trade in trades
     ]
+    signal_markers: list[dict[str, object]] = []
+    markers = list(execution_markers)
     symbol_events = divergence_events_for_symbol(symbol, date.fromisoformat(bars[-1].date))
     event_by_time: dict[str, list[dict[str, object]]] = {}
     bar_dates = [date.fromisoformat(bar.date) for bar in bars]
@@ -6966,9 +7569,9 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
         position = float(row.get("position_shares", 0) or 0)
         if int(row.get("buy_signal", 0)):
             stage = str(row.get("buy_stage", "B") or "B")
-            markers.append({"time": bar.date, "position": "belowBar", "color": "#2563eb" if stage == "B2" else "#84cc16", "shape": "circle", "text": stage})
+            signal_markers.append({"time": bar.date, "position": "belowBar", "color": "#2563eb" if stage == "B2" else "#84cc16", "shape": "circle", "text": stage})
         if position > 0 and int(row.get("sell_signal", 0)) and bar.date not in trade_exit_dates:
-            markers.append({"time": bar.date, "position": "aboveBar", "color": "#f97316", "shape": "circle", "text": "S"})
+            signal_markers.append({"time": bar.date, "position": "aboveBar", "color": "#f97316", "shape": "circle", "text": "S"})
     return {
         "symbol": symbol,
         "preset": preset,
@@ -6997,6 +7600,8 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
         "dynamicStop": dynamic_points,
         "trendStop": trend_stop_points,
         "markers": sorted(markers, key=lambda item: str(item["time"])),
+        "executionMarkers": sorted(execution_markers, key=lambda item: str(item["time"])),
+        "signalMarkers": sorted(signal_markers, key=lambda item: str(item["time"])),
         "rows": rows,
         "divergenceEvents": symbol_events,
     }
@@ -7054,11 +7659,23 @@ def finish_scan_result(
             writer.writerow(row.__dict__)
     write_html(html_path, display_rows, end)
     save_latest_scan(params, source, symbols, rows, display_rows, errors, end, html_path, csv_path)
+    profile_job_id = ""
+    profile_missing_count = 0
+    display_symbols = [row.symbol for row in display_rows]
+    if display_symbols:
+        try:
+            profile_missing_count = len(missing_us_company_profile_symbols(display_symbols))
+            profile_job_id = start_us_profile_update_for_symbols(display_symbols, "scan results")
+        except Exception:
+            profile_job_id = ""
 
     error_note = ""
     if errors:
         sample = "; ".join(f"{symbol}: {message[:80]}" for symbol, message in errors[:5])
         error_note = f'<p class="hint">有 {len(errors)} 个代码扫描失败：{html.escape(sample)}</p>'
+    profile_note = ""
+    if profile_job_id:
+        profile_note = f'<p class="hint">公司信息缓存：发现 {profile_missing_count} 只候选缺公司信息，已后台更新 {html.escape(profile_job_id)}。</p>'
 
     return f"""
 <section class="result">
@@ -7073,6 +7690,7 @@ def finish_scan_result(
   </div>
   {render_scan_summary(source, len(symbols), len(rows), len(display_rows), len(errors), end)}
   {error_note}
+  {profile_note}
   {render_candidate_table(display_rows, params)}
   {render_failure_table(errors)}
 </section>
@@ -7472,6 +8090,12 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_error(404)
             elif route_path == "/":
                 self.redirect("/us/scanner")
+            elif route_path == "/company-profiles/update":
+                self.update_us_company_profiles(params)
+            elif route_path == "/company-profiles/status":
+                self.us_company_profiles_status(params)
+            elif route_path == "/company-profiles/stop":
+                self.stop_us_company_profiles_job(params)
             elif route_path == "/backtest":
                 self.send_bytes(page_shell(render_backtest_form(params), "backtest", "us"))
             elif route_path == "/run":
@@ -7533,6 +8157,59 @@ class Handler(BaseHTTPRequestHandler):
         area = field(params, "area", "")
         message = clear_cache_area(area)
         self.redirect(f"/?cache_message={quote(message)}")
+
+    def update_us_company_profiles(self, params: dict[str, list[str]] | None = None) -> None:
+        params = params or {}
+        active = active_scan_job("us_profile")
+        if active:
+            job_id, _ = active
+            message = f"美股公司信息后台更新已在运行：{job_id}。"
+            self.redirect(f"/?cache_message={quote(message)}")
+            return
+        symbols = latest_scan_candidate_symbols()
+        if not symbols:
+            message = "当前没有可更新的美股选股结果，请先完成一次美股选股。"
+            self.redirect(f"/?cache_message={quote(message)}")
+            return
+        missing = missing_us_company_profile_symbols(symbols)
+        if not missing:
+            message = f"当前选股结果的公司信息已在缓存中，无需更新（候选 {len(symbols)} 只）。"
+            self.redirect(f"/?cache_message={quote(message)}")
+            return
+        job_id = start_us_profile_update_for_symbols(symbols, "manual current scan")
+        message = f"已启动当前选股结果公司信息更新：{job_id}。本次只查询缺失信息的 {len(missing)} 只股票。"
+        self.redirect(f"/?cache_message={quote(message)}")
+
+    def us_company_profiles_status(self, params: dict[str, list[str]]) -> None:
+        job_id = field(params, "id", "")
+        if job_id:
+            job = get_job(job_id)
+            if not job:
+                self.send_json({"status": "error", "error": "找不到美股公司信息更新任务"}, status=404)
+                return
+            self.send_json(normalize_job_payload(job_id, job))
+            return
+        latest_job = latest_job_for_market("us_profile", include_finished=True)
+        if latest_job:
+            job_id, job = latest_job
+            self.send_json(normalize_job_payload(job_id, job))
+            return
+        self.send_json({"status": "idle", "job_id": ""})
+
+    def stop_us_company_profiles_job(self, params: dict[str, list[str]]) -> None:
+        job_id = field(params, "id", "")
+        if not job_id:
+            latest_job = latest_job_for_market("us_profile", include_finished=False)
+            job_id = latest_job[0] if latest_job else ""
+        job = get_job(job_id)
+        if not job:
+            self.send_json({"status": "error", "error": "找不到美股公司信息更新任务"}, status=404)
+            return
+        if job.get("status") in ("done", "error", "stopped"):
+            self.send_json(normalize_job_payload(job_id, job))
+            return
+        set_job(job_id, stop_requested=True, status="stopping", stage="正在终止", message="正在终止公司信息更新，已写入的缓存会保留")
+        self.send_json(normalize_job_payload(job_id, get_job(job_id) or {"status": "stopping"}))
 
     def add_watchlist_item(self, params: dict[str, list[str]]) -> None:
         symbol = field(params, "symbol", "")
