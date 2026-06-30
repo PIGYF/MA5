@@ -1951,11 +1951,12 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
         <div class="scan-facts" style="margin-top:0;">
           <span class="scan-fact"><span>公司信息</span>{int(us_profile_summary["count"])} 只</span>
           <span class="scan-fact"><span>中文名</span>{int(us_profile_summary.get("cn_name_count", 0) or 0)} 只</span>
+          <span class="scan-fact"><span>FMP</span>{int(us_profile_summary.get("fmp_count", 0) or 0)} 只</span>
           <span class="scan-fact"><span>当前候选</span>{latest_candidate_count} 只</span>
           <span class="scan-fact"><span>更新时间</span>{html.escape(str(us_profile_summary["updated_at"]))}</span>
           {profile_progress_html}
         </div>
-        <p class="hint" style="margin:6px 0 0;">只补全当前选股结果里缺失中文名的股票；已有缓存直接复用。</p>
+        <p class="hint" style="margin:6px 0 0;">只补全当前选股结果里缺失的信息；有 FMP_API_KEY 时会补英文公司名、行业、官网和业务简介。</p>
       </div>
       <form action="/us/company-profiles/update" method="get" onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='更新中...';">
         <button class="secondary" type="submit">更新当前结果公司信息</button>
@@ -4681,7 +4682,8 @@ def us_company_profile_summary() -> dict[str, object]:
         if match:
             progress = {"status": "上次进度", "scanned": int(match.group(1)), "total": int(match.group(2))}
     cn_name_count = sum(1 for item in profiles.values() if item.get("cn_name"))
-    return {"count": len(profiles), "cn_name_count": cn_name_count, "updated_at": updated_at, "source": source, "warning": warning, "progress": progress}
+    fmp_count = sum(1 for item in profiles.values() if item.get("profile_source") == "fmp.profile" or item.get("description"))
+    return {"count": len(profiles), "cn_name_count": cn_name_count, "fmp_count": fmp_count, "updated_at": updated_at, "source": source, "warning": warning, "progress": progress}
 
 
 def fmp_api_key() -> str:
@@ -4860,11 +4862,9 @@ def build_us_profile_payload(profiles: dict[str, dict[str, object]], source: str
     }
     US_COMPANY_PROFILE_CACHE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     read_us_company_profile_cache()
-    concept_count = sum(1 for item in profiles.values() if item.get("concept_tags"))
     cn_name_count = sum(1 for item in profiles.values() if item.get("cn_name"))
     return {
         "count": len(profiles),
-        "concept_count": concept_count,
         "cn_name_count": cn_name_count,
         "updated_at": payload["updated_at"],
         "source": source,
@@ -5067,7 +5067,6 @@ def merge_us_company_profile(metadata: dict[str, object], symbol: str) -> dict[s
         ("english_name", "company_name"),
         ("sector", "sector"),
         ("industry", "industry"),
-        ("concept_tags", "concept_tags"),
         ("description", "description"),
         ("website", "website"),
         ("exchange", "exchange"),
@@ -5085,7 +5084,7 @@ def enrich_signal_result(result: SignalResult, metadata: dict[str, object] | Non
     metadata = merge_us_company_profile(metadata or {}, result.symbol)
     if not metadata:
         return result
-    for key in ("company_name", "market_cap", "country", "sector", "industry", "concept_tags", "asset_type"):
+    for key in ("company_name", "market_cap", "country", "sector", "industry", "asset_type"):
         setattr(result, key, metadata.get(key, getattr(result, key)))
     return result
 
@@ -5127,12 +5126,6 @@ def us_company_display_name(symbol: str, company_name: str) -> str:
     if override:
         return override
     return company_name or symbol.upper()
-
-
-def us_company_concepts_text(symbol: str, fallback: object = "") -> str:
-    profile_concepts = str(us_company_profile_for_symbol(symbol).get("concept_tags") or "")
-    text = profile_concepts or str(fallback or "")
-    return text if text.strip() else "-"
 
 
 def load_earnings_cache() -> dict[str, dict[str, object]]:
@@ -5440,106 +5433,6 @@ def earnings_status_zh(value: str) -> str:
     return mapping.get(clean, clean or "未知")
 
 
-def match_us_company_points(raw_text: str, sector: str, industry: str, raw_sector: str = "", raw_industry: str = "") -> tuple[list[str], list[str], list[str]]:
-    text = f"{raw_text} {sector} {industry} {raw_sector} {raw_industry}".lower()
-    rules = [
-        ("AI/数据中心", ("artificial intelligence", " ai ", "gpu", "accelerator", "data center", "datacenter", "server", "cloud infrastructure"), "重点核对AI订单、数据中心资本开支、云厂商需求和业绩指引。"),
-        ("半导体/芯片", ("semiconductor", "semiconductors", "chip", "processor", "memory", "dram", "nand", "wafer", "foundry", "半导体"), "重点核对芯片周期、库存变化、毛利率、客户拉货和行业价格趋势。"),
-        ("软件/SaaS", ("software", "saas", "subscription", "platform", "cloud", "enterprise software"), "重点核对收入增速、净留存率、订阅收入、利润率和大客户扩张。"),
-        ("网络安全", ("cybersecurity", "security", "endpoint", "threat", "identity"), "重点核对大客户签约、ARR增长、竞争格局和预算恢复。"),
-        ("消费电子/硬件", ("smartphone", "iphone", "ipad", "mac", "wearables", "consumer electronics", "消费电子"), "重点核对新品周期、出货量、渠道库存和供应链订单。"),
-        ("电动车/新能源车", ("electric vehicle", " ev ", "battery", "automotive", "新能源车"), "重点核对交付量、价格战、毛利率、产能利用率和政策补贴。"),
-        ("医药/生物科技", ("biotechnology", "clinical", "drug", "therapy", "pharmaceutical", "fda", "trial"), "重点核对临床数据、FDA节点、药品销售和研发管线风险。"),
-        ("医疗器械/诊断", ("medical device", "diagnostic", "surgical", "patient", "healthcare"), "重点核对装机量、耗材收入、医院采购和医保支付变化。"),
-        ("金融/银行", ("bank", "loan", "deposit", "credit", "asset management", "capital markets", "insurance"), "重点核对利率环境、净息差、坏账率、资本充足率和交易/投行业务。"),
-        ("能源/油气", ("oil", "gas", "lng", "drilling", "exploration", "pipeline", "energy"), "重点核对油气价格、产量、现金流、资本开支和分红回购。"),
-        ("矿业/金属", ("gold", "copper", "steel", "mining", "metal", "lithium", "uranium"), "重点核对商品价格、矿山产量、成本曲线和供需缺口。"),
-        ("工业/设备", ("machinery", "aerospace", "defense", "industrial automation", "factory automation", "工业"), "重点核对订单积压、交付节奏、政府/企业资本开支和利润率。"),
-        ("零售/消费", ("retail", "store", "restaurant", "consumer", "apparel", "e-commerce"), "重点核对同店销售、客单价、库存、促销压力和消费景气。"),
-        ("通信/互联网内容", ("advertising", "streaming", "social", "search", "content", "communication services"), "重点核对广告需求、用户增长、订阅变化和内容/算力投入。"),
-        ("房地产/REIT", ("reit", "real estate", "property", "lease", "tenant"), "重点核对出租率、租金增速、融资成本和资产估值。"),
-        ("公用事业", ("utility", "electric", "renewable", "regulated", "power"), "重点核对电价机制、利率变化、负债成本和新能源项目进度。"),
-    ]
-    themes: list[str] = []
-    focus: list[str] = []
-    for label, keywords, note in rules:
-        if any(keyword in text for keyword in keywords):
-            themes.append(label)
-            focus.append(note)
-    if not themes:
-        themes.append(industry if industry != "-" else sector if sector != "-" else "未识别题材")
-        focus.append("重点从财报、业绩指引、行业新闻和成交量配合度判断这次放量是否有真实催化。")
-
-    business_lines: list[str] = []
-    business_rules = [
-        ("硬件产品", ("hardware", "device", "smartphone", "computer", "equipment", "server")),
-        ("软件平台", ("software", "platform", "cloud", "subscription", "saas")),
-        ("芯片/零部件", ("semiconductor", "chip", "processor", "memory", "component")),
-        ("服务收入", ("service", "services", "support", "subscription")),
-        ("金融业务", ("loan", "deposit", "insurance", "asset management", "capital markets")),
-        ("能源/资源", ("oil", "gas", "mining", "metal", "energy")),
-        ("药品/治疗管线", ("drug", "therapy", "clinical", "pharmaceutical", "biotechnology")),
-        ("零售/渠道", ("retail", "store", "restaurant", "e-commerce")),
-    ]
-    for label, keywords in business_rules:
-        if any(keyword in text for keyword in keywords):
-            business_lines.append(label)
-    if not business_lines:
-        business_lines.append(industry if industry != "-" else "主营业务需进一步核对")
-    return business_lines[:4], themes[:3], focus[:3]
-
-
-def render_us_company_watch_points(
-    company_name: str,
-    sector: str,
-    industry: str,
-    asset_type: str,
-    website: str,
-    raw_summary: str,
-    raw_sector: str = "",
-    raw_industry: str = "",
-) -> str:
-    display_name = company_name if company_name != "-" else "该标的"
-    business_lines, themes, focus_items = match_us_company_points(raw_summary, sector, industry, raw_sector, raw_industry)
-    line_html = "".join(f"<li>{html.escape(item)}</li>" for item in business_lines)
-    theme_html = " ".join(f'<span class="condition-tag condition-primary">{html.escape(item)}</span>' for item in themes)
-    focus_html = "".join(f"<li>{html.escape(item)}</li>" for item in focus_items)
-    source_note = "官网可用于核对主营业务。" if website.startswith(("http://", "https://")) else "暂未获取官网，建议用Yahoo/雪球继续核对。"
-    return f"""
-  <section class="result" style="margin-top:12px;">
-    <div class="strategy-condition-head" style="padding-left:0;padding-right:0;border-bottom:0;background:transparent;">
-      <div>
-        <strong>公司看点</strong>
-        <p class="hint">{html.escape(display_name)}：用于判断这次放量是否有业务或题材支撑。</p>
-      </div>
-    </div>
-    <div class="condition-grid">
-      <div class="condition-card">
-        <h3>主营业务线</h3>
-        <ul class="condition-list">{line_html}</ul>
-      </div>
-      <div class="condition-card">
-        <h3>可能题材</h3>
-        <div class="condition-tags" style="justify-content:flex-start;">{theme_html}</div>
-        <p class="condition-note">题材由公司介绍、板块和行业关键词提取，只作为二次看图前的线索。</p>
-      </div>
-      <div class="condition-card">
-        <h3>二次确认重点</h3>
-        <ul class="condition-list">{focus_html}</ul>
-      </div>
-      <div class="condition-card">
-        <h3>使用方式</h3>
-        <ul class="condition-list">
-          <li><b>先看催化</b><span>财报/订单/指引/行业共振</span></li>
-          <li><b>再看图形</b><span>B点、量能、上方空间</span></li>
-          <li><b>信息源</b><span>{html.escape(source_note)}</span></li>
-        </ul>
-      </div>
-    </div>
-  </section>
-"""
-
-
 def candidate_from_latest_scan(symbol: str) -> dict[str, object]:
     latest = load_latest_scan()
     wanted = symbol.upper()
@@ -5596,7 +5489,6 @@ def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None
                 "market_cap": signal_result.market_cap,
                 "sector": signal_result.sector,
                 "industry": signal_result.industry,
-                "concept_tags": getattr(signal_result, "concept_tags", ""),
                 "asset_type": signal_result.asset_type,
                 "next_earnings_date": signal_result.next_earnings_date,
                 "earnings_days": signal_result.earnings_days,
@@ -5613,7 +5505,6 @@ def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None
     raw_industry = str(merged.get("industry") or "")
     sector = us_sector_zh(raw_sector)
     industry = us_industry_zh(raw_industry)
-    concept_tags = us_company_concepts_text(symbol, merged.get("concept_tags", ""))
     asset_type = us_asset_type_zh(str(merged.get("asset_type") or "Stock"))
     earnings_date = str(merged.get("next_earnings_date") or "")
     earnings_days = merged.get("earnings_days", "")
@@ -5626,6 +5517,7 @@ def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None
         earnings_text = "未知"
     website = str(merged.get("website") or "")
     website_html = f'<a href="{html.escape(website)}" target="_blank">官网</a>' if website.startswith(("http://", "https://")) else "-"
+    profile_source = str(merged.get("profile_source") or "-")
     return f"""
   <section class="status-strip">
     <div class="stat-card"><div class="stat-label">公司名称</div><div class="stat-value">{html.escape(display_company_name)}</div></div>
@@ -5634,8 +5526,8 @@ def render_us_company_info_panel(symbol: str, signal_result: SignalResult | None
     <div class="stat-card"><div class="stat-label">市值</div><div class="stat-value">{format_us_money(merged.get("market_cap"))}</div></div>
     <div class="stat-card"><div class="stat-label">所属板块</div><div class="stat-value">{html.escape(sector)}</div></div>
     <div class="stat-card"><div class="stat-label">所属行业</div><div class="stat-value">{html.escape(industry)}</div></div>
-    <div class="stat-card"><div class="stat-label">概念板块</div><div class="stat-value">{html.escape(concept_tags)}</div></div>
     <div class="stat-card"><div class="stat-label">下一次财报</div><div class="stat-value">{html.escape(earnings_text)}</div></div>
+    <div class="stat-card"><div class="stat-label">资料来源</div><div class="stat-value">{html.escape(profile_source)}</div></div>
   </section>
   <div class="table-wrap">
     <table>
@@ -6486,8 +6378,15 @@ def render_candidate_table(rows: list[SignalResult], params: dict[str, list[str]
         cached = merge_us_company_profile(r.__dict__, r.symbol)
         sector = us_sector_zh(str(cached.get("sector") or r.sector or ""))
         industry = us_industry_zh(str(cached.get("industry") or r.industry or ""))
-        concepts = us_company_concepts_text(r.symbol, cached.get("concept_tags", getattr(r, "concept_tags", "")))
         company_display_name = us_company_display_name(r.symbol, str(cached.get("company_name") or r.company_name or ""))
+        company_title = " / ".join(
+            part
+            for part in (
+                str(cached.get("company_name") or ""),
+                str(cached.get("profile_source") or ""),
+            )
+            if part
+        )
         market_cap = float(cached.get("market_cap") or r.market_cap or 0)
         rendered_rows.append(
             f'<tr data-secondary-row {filter_attrs}>'
@@ -6495,10 +6394,9 @@ def render_candidate_table(rows: list[SignalResult], params: dict[str, list[str]
             f'<button type="button" class="mini-action" data-add-watchlist="{html.escape(r.symbol)}" data-watch-note="{html.escape(watch_note)}">加自选</button>'
             f'</td>'
             f'<td><button type="button" class="symbol-button" data-candidate-symbol="{html.escape(r.symbol)}">{html.escape(r.symbol)}</button></td>'
-            f"<td>{html.escape(company_display_name)}</td>"
+            f'<td title="{html.escape(company_title)}">{html.escape(company_display_name)}</td>'
             f"<td>{html.escape(sector)}</td>"
             f"<td>{html.escape(industry)}</td>"
-            f"<td>{html.escape(concepts)}</td>"
             f"<td>{html.escape(r.signal_date)}</td>"
             f"<td>{html.escape({'B1_trend_confirm': 'B1', 'B2_reentry': 'B2'}.get(r.signal_type, r.signal_type or '-'))}</td>"
             f"<td>{technical_score_badge(r)}</td>"
@@ -6511,12 +6409,12 @@ def render_candidate_table(rows: list[SignalResult], params: dict[str, list[str]
         )
     table_rows = "\n".join(rendered_rows)
     if not table_rows:
-        table_rows = '<tr><td colspan="14" class="empty">No visible candidates.</td></tr>'
+        table_rows = '<tr><td colspan="13" class="empty">No visible candidates.</td></tr>'
     return f"""
 {render_result_filter_panel(params, len(rows))}
 <div class="table-wrap">
 <table class="resizable-table" data-secondary-filter-table>
-  <thead><tr><th>操作</th><th>代码</th><th>公司</th><th>板块</th><th>行业</th><th>概念</th><th>信号日</th><th>B点</th><th>技术分</th><th>入选原因</th><th>财报</th><th>收盘</th><th>量比</th><th>市值$B</th></tr></thead>
+  <thead><tr><th>操作</th><th>代码</th><th>公司</th><th>板块</th><th>行业</th><th>信号日</th><th>B点</th><th>技术分</th><th>入选原因</th><th>财报</th><th>收盘</th><th>量比</th><th>市值$B</th></tr></thead>
   <tbody>{table_rows}</tbody>
 </table>
 </div>
@@ -6974,7 +6872,6 @@ def watchlist_row(item: dict[str, str], metadata: dict[str, object] | None) -> s
     display_company = us_company_display_name(symbol, company if company != "-" else "")
     sector = str(metadata.get("sector", "") or "-")
     industry = str(metadata.get("industry", "") or "-")
-    concepts = us_company_concepts_text(symbol, metadata.get("concept_tags", ""))
     market_cap = float(metadata.get("market_cap", 0) or 0)
     latest_close = "-"
     change_pct = "-"
@@ -7054,7 +6951,6 @@ def watchlist_row(item: dict[str, str], metadata: dict[str, object] | None) -> s
         "company": display_company,
         "sector": sector,
         "industry": industry,
-        "concepts": concepts,
         "marketCap": cap_text,
         "close": latest_close,
         "change": change_pct,
@@ -7141,7 +7037,6 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
       <div class="watch-detail-item"><span>Company</span><strong id="watch-detail-company">-</strong></div>
       <div class="watch-detail-item"><span>Market Cap</span><strong id="watch-detail-market">-</strong></div>
       <div class="watch-detail-item"><span>Industry</span><strong id="watch-detail-industry">-</strong></div>
-      <div class="watch-detail-item"><span>概念</span><strong id="watch-detail-concepts">-</strong></div>
       <div class="watch-detail-item"><span>加入日期</span><strong id="watch-detail-added">-</strong></div>
       <div class="watch-detail-item"><span>技术状态</span><strong id="watch-detail-tech">-</strong></div>
       <div class="watch-detail-item"><span>B / S</span><strong id="watch-detail-signal">-</strong></div>
@@ -7219,7 +7114,6 @@ function updateWatchDetail(button) {{
   document.getElementById("watch-detail-company").textContent = attr(button, "data-company");
   document.getElementById("watch-detail-market").textContent = attr(button, "data-marketCap");
   document.getElementById("watch-detail-industry").textContent = `${{attr(button, "data-sector")}} / ${{attr(button, "data-industry")}}`;
-  document.getElementById("watch-detail-concepts").textContent = attr(button, "data-concepts");
   document.getElementById("watch-detail-added").textContent = attr(button, "data-addedAt");
   document.getElementById("watch-detail-tech").textContent = `${{attr(button, "data-maStatus")}} / 距5MA ${{attr(button, "data-distMa")}} / 量比 ${{attr(button, "data-volRatio")}}`;
   document.getElementById("watch-detail-signal").textContent = `${{attr(button, "data-bStatus")}} / ${{attr(button, "data-sStatus")}}`;
