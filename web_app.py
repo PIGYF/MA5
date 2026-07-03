@@ -21,6 +21,7 @@ from backtest import (
     Bar,
     PRICE_CACHE_DIR,
     PRICE_CACHE_MAX_BARS,
+    SPLIT_CACHE_PATH,
     backtest,
     build_signal_detail_rows,
     calculate_kdj,
@@ -88,7 +89,7 @@ from ashare_lab import (
     scan_ashare_candidates,
     suggest_ashare_symbols,
 )
-from scan_next_b import SPLIT_CACHE_PATH, SignalResult, latest_b_signal, load_symbols, unique_symbols, write_html
+from scan_next_b import SignalResult, latest_b_signal, load_symbols, unique_symbols, write_html
 
 
 def load_local_env() -> None:
@@ -3983,6 +3984,7 @@ def run_strategy(params: dict[str, list[str]]) -> str:
         weak_ma20_reclaim_days=int(number_field(params, "weak_ma20_reclaim_days", 10)),
         weak_volume_down_multiplier=number_field(params, "weak_volume_down_multiplier", 1.5),
         weak_event_low_lookback=int(number_field(params, "weak_event_low_lookback", 27)),
+        symbol=symbol,
     )
     summary = summarize(trades, equity_curve, initial_cash)
     benchmark = build_benchmark(benchmark_symbol, start, end, initial_cash)
@@ -4211,6 +4213,7 @@ def run_batch_backtest(params: dict[str, list[str]]) -> str:
                 weak_ma20_reclaim_days=int(number_field(params, "weak_ma20_reclaim_days", 10)),
                 weak_volume_down_multiplier=number_field(params, "weak_volume_down_multiplier", 1.5),
                 weak_event_low_lookback=int(number_field(params, "weak_event_low_lookback", 27)),
+                symbol=symbol,
             )
             chart_summary = summarize(chart_trades, signal_curve, initial_cash)
             chart_path = REPORT_DIR / f"{safe_name(f'batch_{symbol}_{start}_{end}_{int(time.time())}')}.html"
@@ -6907,7 +6910,7 @@ def watchlist_row(item: dict[str, str], metadata: dict[str, object] | None) -> s
                 min_avg_dollar_volume=0,
             )
             b_status = "B点" if result else "-"
-            buy_signal, _, _, _, _, _ = build_ratchet_inputs(bars, 5, 20, 1.45, 4.5 / 100)
+            buy_signal, _, _, _, _, _ = build_ratchet_inputs(bars, 5, 20, 1.45, 4.5 / 100, symbol=symbol)
             recent_b = next((bars[idx].date for idx in range(len(buy_signal) - 1, -1, -1) if buy_signal[idx]), "")
             if recent_b and not result:
                 b_status = f"最近B {recent_b}"
@@ -7349,6 +7352,7 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
             b1_require_20ma_gt_50ma=b1_require_20ma_gt_50ma,
             require_ma5_rising=require_ma5_rising,
             require_5ma_gt_20ma=require_5ma_gt_20ma,
+            symbol=symbol,
         )
     except Exception as exc:
         return {"error": str(exc)}

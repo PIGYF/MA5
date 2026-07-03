@@ -3,16 +3,11 @@ from __future__ import annotations
 import argparse
 import csv
 import html
-import json
-import threading
-import time
 from dataclasses import dataclass
 from datetime import date, timedelta
-from functools import lru_cache
 from pathlib import Path
 
-from backtest import Bar, fetch_bars, recent_split_adjustment, rolling_sma, rolling_sum, score_signal_strength
-from ma5_config import DATA_DIR
+from backtest import Bar, fetch_bars, recent_yfinance_split, rolling_sma, rolling_sum, score_signal_strength
 
 
 DEFAULT_SYMBOLS = [
@@ -26,83 +21,6 @@ DEFAULT_SYMBOLS = [
     "LLY", "NVO", "ISRG", "VRTX", "REGN", "VRTX", "MRNA", "CRSP", "BEAM", "RXRX",
     "QQQ", "SPY", "IWM", "TQQQ", "SOXL", "ARKK",
 ]
-
-
-SPLIT_CACHE_PATH = DATA_DIR / "cache" / "corporate_actions.json"
-SPLIT_CACHE_SECONDS = 30 * 24 * 60 * 60
-SPLIT_CACHE_LOCK = threading.Lock()
-
-
-def read_split_cache() -> dict[str, object]:
-    if not SPLIT_CACHE_PATH.exists():
-        return {}
-    try:
-        payload = json.loads(SPLIT_CACHE_PATH.read_text(encoding="utf-8"))
-        return payload if isinstance(payload, dict) else {}
-    except Exception:
-        return {}
-
-
-def write_split_cache(payload: dict[str, object]) -> None:
-    SPLIT_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SPLIT_CACHE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-@lru_cache(maxsize=512)
-def recent_yfinance_split(symbol: str, start_date: str, end_date: str) -> tuple[str, float] | None:
-    cache_key = symbol.upper().strip()
-    now = time.time()
-    with SPLIT_CACHE_LOCK:
-        payload = read_split_cache()
-        entry = payload.get(cache_key)
-        if isinstance(entry, dict) and now - float(entry.get("checked_at", 0) or 0) < SPLIT_CACHE_SECONDS:
-            splits = entry.get("splits", [])
-            if isinstance(splits, list):
-                start_day = date.fromisoformat(start_date)
-                end_day = date.fromisoformat(end_date)
-                latest_cached: tuple[str, float] | None = None
-                for item in splits:
-                    if not isinstance(item, dict):
-                        continue
-                    try:
-                        split_day = date.fromisoformat(str(item.get("date", "")))
-                        ratio = float(item.get("ratio", 0) or 0)
-                    except Exception:
-                        continue
-                    if start_day <= split_day <= end_day and ratio > 1:
-                        latest_cached = split_day.isoformat(), ratio
-                return latest_cached
-    try:
-        import yfinance as yf
-
-        splits = yf.Ticker(symbol).splits
-    except Exception:
-        return None
-    if splits is None or getattr(splits, "empty", True):
-        return None
-    start_day = date.fromisoformat(start_date)
-    end_day = date.fromisoformat(end_date)
-    latest: tuple[str, float] | None = None
-    for idx, value in splits.items():
-        try:
-            split_day = idx.date()
-            ratio = float(value)
-        except Exception:
-            continue
-        if start_day <= split_day <= end_day and ratio > 1:
-            latest = split_day.isoformat(), ratio
-    with SPLIT_CACHE_LOCK:
-        payload = read_split_cache()
-        payload[cache_key] = {
-            "checked_at": now,
-            "splits": [
-                {"date": idx.date().isoformat(), "ratio": float(value)}
-                for idx, value in splits.items()
-                if float(value) > 1
-            ],
-        }
-        write_split_cache(payload)
-    return latest
 
 
 @dataclass
@@ -263,18 +181,14 @@ def latest_b_signal_with_reason(
     if len(bars) < max(ma_length, vol_length) + 10:
         return None, f"数据不足：需要至少 {max(ma_length, vol_length) + 10} 根日K，当前 {len(bars)} 根"
 
-    split_event = recent_split_adjustment(bars, lookback=max(35, vol_length + 10))
+    split_event = recent_yfinance_split(symbol, bars[max(0, len(bars) - max(35, vol_length + 10))].date, bars[-1].date)
     if split_event:
-        split_index = int(split_event["index"])
-        if len(bars) - 1 < split_index + vol_length:
-            action_start = bars[max(0, split_index - 5)].date
-            action = recent_yfinance_split(symbol, action_start, bars[-1].date)
-            split_date = action[0] if action else str(split_event["date"])
-            split_ratio = action[1] if action else float(split_event["ratio"])
+        split_date, split_ratio = split_event
+        split_index = next((idx for idx, item in enumerate(bars) if item.date >= split_date), -1)
+        if split_index >= 0 and len(bars) - 1 < split_index + vol_length:
             return None, (
-                "recent split adjustment: "
-                f"{split_date} approx {split_ratio:g}:1 "
-                f"({split_event['mode']}), wait for {vol_length} post-split bars"
+                "recent yfinance split: "
+                f"{split_date} {split_ratio:g}:1, wait for {vol_length} post-split bars"
             )
 
     closes = [bar.close for bar in bars]

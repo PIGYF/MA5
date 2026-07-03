@@ -4,9 +4,12 @@ import html
 import json
 import math
 import os
+import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -18,6 +21,9 @@ CLOSE_KEYS = ("close", "收盘", "收盘价")
 VOLUME_KEYS = ("volume", "vol", "成交量", "成交量(股)", "成交量(手)")
 PRICE_CACHE_DIR = Path(os.environ.get("MA5_PRICE_CACHE_DIR", Path(os.environ.get("MA5_DATA_DIR", Path(__file__).resolve().parent / "data")) / "cache" / "prices")).expanduser().resolve()
 PRICE_CACHE_MAX_BARS = 1300
+SPLIT_CACHE_PATH = PRICE_CACHE_DIR.parent / "corporate_actions.json"
+SPLIT_CACHE_SECONDS = 30 * 24 * 60 * 60
+SPLIT_CACHE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -316,65 +322,77 @@ def rolling_optional_sma(values: list[float | None], length: int) -> list[float 
     return result
 
 
-def median_float(values: list[float]) -> float:
-    clean = sorted(value for value in values if is_valid_number(value) and value > 0)
-    if not clean:
-        return 0.0
-    mid = len(clean) // 2
-    if len(clean) % 2:
-        return clean[mid]
-    return (clean[mid - 1] + clean[mid]) / 2
+def read_split_cache() -> dict[str, object]:
+    if not SPLIT_CACHE_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(SPLIT_CACHE_PATH.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
 
 
-def near_common_split_ratio(value: float, tolerance: float = 0.18) -> float:
-    if value <= 0:
-        return 0.0
-    for ratio in (2.0, 3.0, 4.0, 5.0, 10.0):
-        if abs(value - ratio) / ratio <= tolerance:
-            return ratio
-    return 0.0
+def write_split_cache(payload: dict[str, object]) -> None:
+    SPLIT_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SPLIT_CACHE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def recent_split_adjustment(
-    bars: list[Bar],
-    lookback: int = 35,
-    min_post_days: int = 2,
-) -> dict[str, object] | None:
-    if len(bars) < 25:
+@lru_cache(maxsize=512)
+def recent_yfinance_split(symbol: str, start_date: str, end_date: str) -> tuple[str, float] | None:
+    cache_key = str(symbol or "").upper().strip()
+    if not cache_key:
         return None
-    start = max(10, len(bars) - lookback)
-    for boundary in range(start, len(bars) - min_post_days + 1):
-        pre = bars[max(0, boundary - 20) : boundary]
-        post = bars[boundary : min(len(bars), boundary + 5)]
-        if len(pre) < 8 or len(post) < min_post_days:
-            continue
-        pre_price = median_float([bar.close for bar in pre[-8:]])
-        post_price = median_float([bar.close for bar in post])
-        pre_volume = median_float([bar.volume for bar in pre])
-        post_volume = median_float([bar.volume for bar in post])
-        if not all((pre_price, post_price, pre_volume, post_volume)):
-            continue
-        price_down_ratio = pre_price / post_price
-        volume_up_ratio = post_volume / pre_volume
-        price_split_ratio = near_common_split_ratio(price_down_ratio, 0.10)
-        if price_split_ratio and volume_up_ratio >= max(1.5, price_split_ratio * 0.35):
-            return {
-                "date": bars[boundary].date,
-                "index": boundary,
-                "ratio": price_split_ratio,
-                "mode": "price-volume",
-            }
-        volume_split_ratio = near_common_split_ratio(volume_up_ratio, 0.25)
-        price_continuous = 0.70 <= post_price / pre_price <= 1.35
-        if volume_split_ratio and price_continuous:
-            return {
-                "date": bars[boundary].date,
-                "index": boundary,
-                "ratio": volume_split_ratio,
-                "mode": "volume-only",
-            }
-    return None
+    now = time.time()
+    start_day = date.fromisoformat(start_date)
+    end_day = date.fromisoformat(end_date)
+    with SPLIT_CACHE_LOCK:
+        payload = read_split_cache()
+        entry = payload.get(cache_key)
+        if isinstance(entry, dict) and now - float(entry.get("checked_at", 0) or 0) < SPLIT_CACHE_SECONDS:
+            splits = entry.get("splits", [])
+            if isinstance(splits, list):
+                latest_cached: tuple[str, float] | None = None
+                for item in splits:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        split_day = date.fromisoformat(str(item.get("date", "")))
+                        ratio = float(item.get("ratio", 0) or 0)
+                    except Exception:
+                        continue
+                    if start_day <= split_day <= end_day and ratio > 1:
+                        latest_cached = split_day.isoformat(), ratio
+                return latest_cached
+    try:
+        import yfinance as yf
 
+        splits = yf.Ticker(cache_key).splits
+    except Exception:
+        return None
+    if splits is None or getattr(splits, "empty", True):
+        with SPLIT_CACHE_LOCK:
+            payload = read_split_cache()
+            payload[cache_key] = {"checked_at": now, "splits": []}
+            write_split_cache(payload)
+        return None
+    latest: tuple[str, float] | None = None
+    split_items: list[dict[str, object]] = []
+    for idx, value in splits.items():
+        try:
+            split_day = idx.date()
+            ratio = float(value)
+        except Exception:
+            continue
+        if ratio <= 1:
+            continue
+        split_items.append({"date": split_day.isoformat(), "ratio": ratio})
+        if start_day <= split_day <= end_day:
+            latest = split_day.isoformat(), ratio
+    with SPLIT_CACHE_LOCK:
+        payload = read_split_cache()
+        payload[cache_key] = {"checked_at": now, "splits": split_items}
+        write_split_cache(payload)
+    return latest
 
 def calculate_kdj(
     bars: list[Bar],
@@ -514,6 +532,7 @@ def build_ratchet_inputs(
     require_ma5_rising: bool = True,
     require_5ma_gt_20ma: bool = True,
     signal_volumes: list[float] | None = None,
+    symbol: str = "",
 ) -> tuple[list[bool], list[bool], list[float | None], list[float | None], list[float], list[str]]:
     closes = [bar.close for bar in bars]
     volumes = signal_volumes if signal_volumes is not None and len(signal_volumes) == len(bars) else [bar.volume for bar in bars]
@@ -529,13 +548,15 @@ def build_ratchet_inputs(
         vol_ma[i] is not None and volumes[i] >= vol_ma[i] * vol_multiplier
         for i in range(len(bars))
     ]
-    split_event = recent_split_adjustment(bars, lookback=max(35, vol_length + 10))
+    split_event = recent_yfinance_split(symbol, bars[0].date, bars[-1].date) if symbol else None
     if split_event:
-        split_index = int(split_event["index"])
-        suppress_until = min(len(bars), split_index + vol_length)
-        for idx in range(split_index, suppress_until):
-            is_vol_high[idx] = False
-            is_massive_vol[idx] = False
+        split_date, _ = split_event
+        split_index = next((idx for idx, bar in enumerate(bars) if bar.date >= split_date), -1)
+        if split_index >= 0:
+            suppress_until = min(len(bars), split_index + vol_length)
+            for idx in range(split_index, suppress_until):
+                is_vol_high[idx] = False
+                is_massive_vol[idx] = False
     massive_counts = rolling_sum([1 if x else 0 for x in is_massive_vol], massive_window)
 
     buy_signal = []
@@ -638,6 +659,7 @@ def backtest(
     weak_ma20_reclaim_days: int = 10,
     weak_volume_down_multiplier: float = 1.5,
     weak_event_low_lookback: int = 27,
+    symbol: str = "",
 ) -> tuple[list[Trade], list[dict[str, float | str]]]:
     if strategy_name == "ratchet":
         signal_volumes = adjust_limit_volumes(bars, limit_pct, buy_limit_tolerance_pct) if market == "cn" else None
@@ -656,6 +678,7 @@ def backtest(
             require_ma5_rising,
             require_5ma_gt_20ma,
             signal_volumes,
+            symbol,
         )
         sell_signal = [False] * len(bars)
         closes = [bar.close for bar in bars]
@@ -1990,6 +2013,7 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
       <button id="fit-chart">{labels['reset_view']}</button>
       <label class="chart-toggle"><input id="toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
       <label class="chart-toggle"><input id="toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
+      <label class="chart-toggle"><input id="toggle-signal-markers" type="checkbox">B/S信号日</label>
       <span>{labels['chart_hint']}</span>
     </div>
     <div class="price-chart-wrap">
@@ -2074,8 +2098,14 @@ function syncVisibleRange(source, target) {{
 }}
 syncVisibleRange(priceChart, kdjChart);
 syncVisibleRange(kdjChart, priceChart);
-const markerData = [...chartData.entryMarkers, ...chartData.exitMarkers, ...chartData.holdBuyMarkers, ...chartData.holdSellMarkers].sort((a, b) => a.time.localeCompare(b.time));
-candleSeries.setMarkers(markerData);
+function refreshMarkers() {{
+  const showSignals = document.getElementById('toggle-signal-markers')?.checked;
+  const signalMarkers = showSignals ? [...(chartData.holdBuyMarkers || []), ...(chartData.holdSellMarkers || [])] : [];
+  const markerData = [...(chartData.entryMarkers || []), ...(chartData.exitMarkers || []), ...signalMarkers].sort((a, b) => a.time.localeCompare(b.time));
+  candleSeries.setMarkers(markerData);
+}}
+refreshMarkers();
+document.getElementById('toggle-signal-markers')?.addEventListener('change', refreshMarkers);
 const rowByTime = new Map(chartData.rows.map(row => [row.time, row]));
 let holdingBandFrame = null;
 function scheduleHoldingBandsRender() {{
@@ -2219,6 +2249,7 @@ def main() -> None:
         stop_5ma_pct=args.stop_5ma_pct,
         hard_stop_pct=args.hard_stop_pct,
         reentry_pct=args.reentry_pct,
+        symbol=args.symbol or "",
     )
     summary = summarize(trades, equity_curve, args.initial_cash)
     report_title = args.symbol or args.csv.stem
