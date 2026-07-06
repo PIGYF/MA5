@@ -7079,6 +7079,7 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
     <div class="chart-toggle-row">
       <label class="chart-toggle"><input id="watch-toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
       <label class="chart-toggle"><input id="watch-toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
+      <label class="chart-toggle"><input id="watch-toggle-signal-markers" type="checkbox">B/S信号日</label>
     </div>
     <div class="watchlist-chart-shell">
       <div id="watchlist-chart" class="watchlist-chart watchlist-price-chart"></div>
@@ -7103,6 +7104,7 @@ const watchSubtitle = document.getElementById("watch-chart-subtitle");
 const watchLoading = document.getElementById("watch-chart-loading");
 const watchToggleMa5Stop25 = document.getElementById("watch-toggle-ma5-stop-25");
 const watchToggleMa5StopStrategy = document.getElementById("watch-toggle-ma5-stop-strategy");
+const watchToggleSignalMarkers = document.getElementById("watch-toggle-signal-markers");
 const watchStrategyOptions = document.getElementById("watch-strategy-options");
 const divergenceSymbolInput = document.getElementById("divergence-symbol-input");
 const divergenceList = document.getElementById("divergence-list");
@@ -7226,7 +7228,13 @@ function makeWatchChart(payload) {{
   }}
   syncWatchRange(watchChart, watchKdjChart);
   syncWatchRange(watchKdjChart, watchChart);
-  candle.setMarkers(payload.markers || []);
+  function refreshWatchMarkers() {{
+    const baseMarkers = payload.markers || [];
+    const signalMarkers = watchToggleSignalMarkers?.checked ? (payload.signalMarkers || []) : [];
+    candle.setMarkers([...baseMarkers, ...signalMarkers].sort((a, b) => String(a.time).localeCompare(String(b.time))));
+  }}
+  refreshWatchMarkers();
+  if (watchToggleSignalMarkers) watchToggleSignalMarkers.onchange = refreshWatchMarkers;
   const rowByTime = new Map(payload.rows.map(row => [row.time, row]));
   watchChart.subscribeCrosshairMove(param => {{
     if (!param.time || !param.point || param.point.x < 0 || param.point.y < 0 || param.point.x > watchChartEl.clientWidth || param.point.y > watchChartEl.clientHeight) {{ watchTooltip.style.display = "none"; return; }}
