@@ -3206,6 +3206,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     <div class="chart-toggle-row">
       <label class="chart-toggle"><input id="ashare-toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
       <label class="chart-toggle"><input id="ashare-toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
+      <label class="chart-toggle"><input id="ashare-toggle-signal-markers" type="checkbox" checked>B/S信号日</label>
     </div>
     <div class="watchlist-chart-shell" style="height:780px;">
       <div class="price-chart-wrap">
@@ -3228,6 +3229,7 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     const tooltip = document.getElementById("ashare-tooltip");
     const toggleMa5Stop25 = document.getElementById("ashare-toggle-ma5-stop-25");
     const toggleMa5StopStrategy = document.getElementById("ashare-toggle-ma5-stop-strategy");
+    const toggleSignalMarkers = document.getElementById("ashare-toggle-signal-markers");
     const toLine = rows => (rows || []).map(row => ({{ time: row.x, value: row.y }})).filter(row => row.value !== null && row.value !== undefined);
     const candleRows = ohlc.map(row => ({{ time: row.x, open: row.open, high: row.high, low: row.low, close: row.close }}));
     const volumeRows = volume.map(row => ({{ time: row.x, value: row.y, color: row.color }}));
@@ -3274,14 +3276,20 @@ def render_ashare_scanner(params: dict[str, list[str]]) -> str:
     const volMaSeries = mainChart.addLineSeries({{ color: "#2962ff", lineWidth: 1, priceScaleId: "", title: "成交量均线", priceLineVisible: false, lastValueVisible: false }});
     volMaSeries.setData(toLine(payload.volume_ma20));
     mainChart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
-    const markerRows = payload.markers || (payload.signals || []).map(row => ({{
+    const signalMarkerRows = (payload.signals || []).map(row => ({{
       time: row.x,
       position: "belowBar",
       color: "#16a34a",
       shape: "arrowUp",
       text: row.text || "B",
     }}));
-    candle.setMarkers(markerRows);
+    function refreshMarkers() {{
+      const baseMarkers = payload.markers || [];
+      const signalMarkers = toggleSignalMarkers?.checked ? signalMarkerRows : [];
+      candle.setMarkers([...baseMarkers, ...signalMarkers].sort((a, b) => String(a.time).localeCompare(String(b.time))));
+    }}
+    refreshMarkers();
+    toggleSignalMarkers?.addEventListener("change", refreshMarkers);
     const kLine = kdjChart.addLineSeries({{ color: "#2563eb", lineWidth: 1.5, title: "K", priceLineVisible: false }});
     kLine.setData(toLine(payload.k));
     const dLine = kdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "D", priceLineVisible: false }});
@@ -3663,6 +3671,7 @@ def render_ashare_watchlist_page(params: dict[str, list[str]] | None = None) -> 
     <div class="chart-toggle-row">
       <label class="chart-toggle"><input id="ashare-watch-toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
       <label class="chart-toggle"><input id="ashare-watch-toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
+      <label class="chart-toggle"><input id="ashare-watch-toggle-signal-markers" type="checkbox" checked>B/S信号日</label>
     </div>
     <div class="watchlist-chart-shell" style="height:780px;">
       <div class="price-chart-wrap">
@@ -3689,6 +3698,7 @@ const ashareTitle = document.getElementById("ashare-watch-title");
 const ashareSubtitle = document.getElementById("ashare-watch-subtitle");
 const ashareToggleMa5Stop25 = document.getElementById("ashare-watch-toggle-ma5-stop-25");
 const ashareToggleMa5StopStrategy = document.getElementById("ashare-watch-toggle-ma5-stop-strategy");
+const ashareToggleSignalMarkers = document.getElementById("ashare-watch-toggle-signal-markers");
 const ashareStrategyOptions = document.getElementById("ashare-watch-strategy-options");
 
 function clearAshareCharts() {{
@@ -3737,8 +3747,14 @@ function renderAshareWatchChart(payload) {{
   const volMa = ashareMainChart.addLineSeries({{ color: "#2962ff", lineWidth: 1, priceScaleId: "", title: "成交量均线", priceLineVisible: false, lastValueVisible: false }});
   volMa.setData(toLine(payload.volume_ma20));
   ashareMainChart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
-  const markerRows = payload.markers || (payload.signals || []).map(row => ({{ time: row.x, position: "belowBar", color: "#16a34a", shape: "arrowUp", text: row.text || "B" }}));
-  candle.setMarkers(markerRows);
+  const signalMarkerRows = (payload.signals || []).map(row => ({{ time: row.x, position: "belowBar", color: "#16a34a", shape: "arrowUp", text: row.text || "B" }}));
+  function refreshAshareMarkers() {{
+    const baseMarkers = payload.markers || [];
+    const signalMarkers = ashareToggleSignalMarkers?.checked ? signalMarkerRows : [];
+    candle.setMarkers([...baseMarkers, ...signalMarkers].sort((a, b) => String(a.time).localeCompare(String(b.time))));
+  }}
+  refreshAshareMarkers();
+  if (ashareToggleSignalMarkers) ashareToggleSignalMarkers.onchange = refreshAshareMarkers;
   ashareKdjChart.addLineSeries({{ color: "#2563eb", lineWidth: 1.5, title: "K", priceLineVisible: false }}).setData(toLine(payload.k));
   ashareKdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "D", priceLineVisible: false }}).setData(toLine(payload.d));
   ashareKdjChart.addLineSeries({{ color: "#7c3aed", lineWidth: 2, title: "J", priceLineVisible: false }}).setData(toLine(payload.j));
@@ -6785,6 +6801,7 @@ body {{ margin: 0; background: #fff; color: #131722; font-family: Inter, "Micros
   <div class="chart-toggle-row">
     <label class="chart-toggle"><input id="candidate-toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
     <label class="chart-toggle"><input id="candidate-toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
+    <label class="chart-toggle"><input id="candidate-toggle-signal-markers" type="checkbox" checked>B/S信号日</label>
   </div>
   <div id="price"></div>
   <div id="kdj"></div>
@@ -6827,7 +6844,13 @@ if (payload.error) {{
   chart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
   chart.addLineSeries({{ color: "#2962ff", lineWidth: 1, priceScaleId: "", title: "成交量均线", priceLineVisible: false, lastValueVisible: false }}).setData(payload.volMa || []);
   chart.addLineSeries({{ color: "#f97316", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, priceScaleId: "", title: `${{payload.volMultiplier || ""}}x Vol`, priceLineVisible: false, lastValueVisible: false }}).setData(payload.volThreshold || []);
-  candle.setMarkers(payload.markers || []);
+  function refreshMarkers() {{
+    const baseMarkers = payload.markers || [];
+    const signalMarkers = document.getElementById("candidate-toggle-signal-markers")?.checked ? (payload.signalMarkers || []) : [];
+    candle.setMarkers([...baseMarkers, ...signalMarkers].sort((a, b) => String(a.time).localeCompare(String(b.time))));
+  }}
+  refreshMarkers();
+  document.getElementById("candidate-toggle-signal-markers")?.addEventListener("change", refreshMarkers);
   const kdjChart = LightweightCharts.createChart(kdjEl, {{ ...baseOptions, width: kdjEl.clientWidth, height: kdjEl.clientHeight }});
   kdjChart.addLineSeries({{ color: "#2563eb", lineWidth: 1.5, title: "K", priceLineVisible: false }}).setData(payload.kdjK || []);
   kdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "D", priceLineVisible: false }}).setData(payload.kdjD || []);
