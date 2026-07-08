@@ -43,11 +43,13 @@ jobs:
           MA5_SSH_PORT: ${{ secrets.MA5_SSH_PORT }}
           MA5_SSH_USER: ${{ secrets.MA5_SSH_USER }}
           MA5_DEPLOY_PATH: ${{ secrets.MA5_DEPLOY_PATH }}
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
         run: |
           set -euo pipefail
           PORT="${MA5_SSH_PORT:-22}"
           DEPLOY_PATH="${MA5_DEPLOY_PATH:-/root/MA5_site}"
-          ssh -p "$PORT" -o StrictHostKeyChecking=yes "$MA5_SSH_USER@$MA5_SSH_HOST" "set -euo pipefail; DEPLOY_PATH='$DEPLOY_PATH'; echo '---REMOTE_DEPLOY_PATH---'; echo \"\$DEPLOY_PATH\"; test -d \"\$DEPLOY_PATH/.git\"; cd \"\$DEPLOY_PATH\"; echo '---REMOTE_BEFORE_PULL---'; pwd; ls -la; git pull --ff-only origin main; echo '---REMOTE_AFTER_PULL---'; git rev-parse --short HEAD; ls -la; test -f deploy/deploy.sh; bash \"\$DEPLOY_PATH/deploy/deploy.sh\""
+          REMOTE_FMP_API_KEY="$(printf '%q' "${FMP_API_KEY:-}")"
+          ssh -p "$PORT" -o StrictHostKeyChecking=yes "$MA5_SSH_USER@$MA5_SSH_HOST" "set -euo pipefail; DEPLOY_PATH='$DEPLOY_PATH'; echo '---REMOTE_DEPLOY_PATH---'; echo \"\$DEPLOY_PATH\"; test -d \"\$DEPLOY_PATH/.git\"; cd \"\$DEPLOY_PATH\"; echo '---REMOTE_BEFORE_PULL---'; pwd; ls -la; git pull --ff-only origin main; echo '---REMOTE_AFTER_PULL---'; git rev-parse --short HEAD; ls -la; test -f deploy/deploy.sh; FMP_API_KEY=${REMOTE_FMP_API_KEY} bash \"\$DEPLOY_PATH/deploy/deploy.sh\""
 
       - name: Post summary
         if: success()

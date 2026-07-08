@@ -13,6 +13,7 @@ HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8764/health}"
 SERVICES="${SERVICES:-ma5-web-app.service ma5-web-site.service}"
 ROLLBACK_ON_FAIL="${ROLLBACK_ON_FAIL:-1}"
 VENV_DIR="${VENV_DIR:-${PROJECT_DIR}/.venv}"
+FMP_API_KEY="${FMP_API_KEY:-}"
 
 mkdir -p "${STATE_DIR}" "${LOG_DIR}"
 LOG_FILE="${LOG_DIR}/deploy-$(date +%Y%m%d-%H%M%S).log"
@@ -97,6 +98,21 @@ if [[ "${#PY_FILES[@]}" -eq 0 ]]; then
 fi
 
 "${PYTHON_BIN}" -m py_compile "${PY_FILES[@]}"
+
+if [[ -n "${FMP_API_KEY}" ]]; then
+  echo "[INFO] Configuring FMP_API_KEY for systemd services."
+  ESCAPED_FMP_API_KEY="${FMP_API_KEY//\\/\\\\}"
+  ESCAPED_FMP_API_KEY="${ESCAPED_FMP_API_KEY//\"/\\\"}"
+  for svc in ${SERVICES}; do
+    DROPIN_DIR="/etc/systemd/system/${svc}.d"
+    mkdir -p "${DROPIN_DIR}"
+    cat > "${DROPIN_DIR}/10-ma5-env.conf" <<EOF
+[Service]
+Environment="FMP_API_KEY=${ESCAPED_FMP_API_KEY}"
+EOF
+  done
+  systemctl daemon-reload
+fi
 
 echo "[INFO] 重启服务：${SERVICES}"
 for svc in ${SERVICES}; do

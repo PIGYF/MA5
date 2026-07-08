@@ -1292,9 +1292,37 @@ def page_shell(content: str, active: str = "backtest", market: str = "us") -> by
 <title>MA5 Strategy Lab</title>
 <style>
 * {{ box-sizing: border-box; }}
-body {{ margin: 0; background: #f0f3f7; color: #131722; font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", Arial, sans-serif; font-size: 14px; }}
+:root {{
+  --bg: #f8fafc;
+  --surface: #ffffff;
+  --surface-muted: #f1f5f9;
+  --surface-soft: #f8fbff;
+  --text: #0f172a;
+  --text-muted: #64748b;
+  --text-subtle: #94a3b8;
+  --border: #dbe3ef;
+  --border-strong: #c7d2e1;
+  --primary: #1e40af;
+  --primary-hover: #1d4ed8;
+  --primary-soft: #eff6ff;
+  --secondary: #3b82f6;
+  --accent: #d97706;
+  --success: #089981;
+  --success-soft: rgba(8, 153, 129, .10);
+  --danger: #dc2626;
+  --danger-soft: #fff5f6;
+  --warning-soft: #fff7ed;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, .05);
+  --shadow-md: 0 10px 24px rgba(15, 23, 42, .10);
+  --ring: rgba(30, 64, 175, .28);
+}}
+html {{ color-scheme: light; }}
+body {{ margin: 0; background: var(--bg); color: var(--text); font-family: "Fira Sans", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", Arial, sans-serif; font-size: 14px; line-height: 1.45; }}
 main {{ width: 100%; max-width: 1680px; margin: 0 auto; padding: 0 16px 24px; }}
-.app-topbar {{ position: sticky; top: 0; z-index: 20; display: flex; justify-content: space-between; align-items: center; gap: 16px; height: 54px; margin: 0 -16px 16px; padding: 0 18px; background: #131722; border-bottom: 1px solid #2a2e39; box-shadow: 0 1px 3px rgba(19, 23, 34, .18); }}
+.app-topbar {{ position: sticky; top: 0; z-index: 20; display: flex; justify-content: space-between; align-items: center; gap: 16px; height: 54px; margin: 0 -16px 16px; padding: 0 18px; background: linear-gradient(90deg, #0f172a, #172554); border-bottom: 1px solid rgba(219, 234, 254, .18); box-shadow: 0 1px 3px rgba(15, 23, 42, .22); }}
 .brand {{ display: flex; flex-direction: column; line-height: 1.1; color: #f8fafc; font-weight: 800; letter-spacing: 0; }}
 .brand span {{ color: #9ca3af; font-size: 11px; font-weight: 600; margin-top: 3px; }}
 .topbar-actions {{ display: flex; align-items: center; gap: 14px; min-width: 0; }}
@@ -1306,11 +1334,11 @@ main {{ width: 100%; max-width: 1680px; margin: 0 auto; padding: 0 16px 24px; }}
 .tabs a {{ padding: 8px 12px; border: 1px solid transparent; border-radius: 4px; color: #d1d4dc; text-decoration: none; font-size: 13px; font-weight: 700; }}
 .tabs a:hover {{ background: #1f2430; color: #fff; }}
 .tabs a.active {{ background: #2962ff; color: #fff; border-color: #2962ff; }}
-h1 {{ margin: 0 0 6px; font-size: 22px; line-height: 1.25; letter-spacing: 0; }}
+h1 {{ margin: 0 0 6px; font-size: 22px; line-height: 1.25; letter-spacing: 0; color: var(--text); }}
 h2 {{ margin: 18px 0 10px; font-size: 16px; }}
-.hint {{ color: #5d6675; font-size: 13px; margin: 0 0 14px; line-height: 1.55; }}
-.form {{ display: grid; grid-template-columns: repeat(8, minmax(116px, 1fr)); gap: 10px; align-items: end; background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
-label {{ display: block; font-size: 12px; color: #5d6675; font-weight: 700; }}
+.hint {{ color: var(--text-muted); font-size: 13px; margin: 0 0 14px; line-height: 1.55; }}
+.form {{ display: grid; grid-template-columns: repeat(8, minmax(116px, 1fr)); gap: 10px; align-items: end; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 12px; margin-bottom: 14px; box-shadow: var(--shadow-sm); }}
+label {{ display: block; font-size: 12px; color: var(--text-muted); font-weight: 700; }}
 .checkbox-label {{ display: flex; align-items: center; gap: 8px; min-height: 38px; color: #334155; }}
 .checkbox-label input {{ width: auto; margin: 0; }}
 .form-options {{ grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding-top: 8px; margin-top: 2px; border-top: 1px solid #e3e7ee; }}
@@ -1319,8 +1347,13 @@ label {{ display: block; font-size: 12px; color: #5d6675; font-weight: 700; }}
 .form-section-title {{ grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin-top: 4px; padding-top: 8px; border-top: 1px solid #e3e7ee; color: #131722; font-size: 12px; font-weight: 900; }}
 .form-section-title:first-child {{ margin-top: 0; padding-top: 0; border-top: 0; }}
 .form-section-title span {{ color: #64748b; font-weight: 700; }}
-input, select, textarea {{ width: 100%; margin-top: 6px; padding: 8px 9px; border: 1px solid #c7ccd5; border-radius: 4px; background: #fff; color: #131722; font-family: inherit; font-size: 13px; outline: none; }}
-input:focus, select:focus, textarea:focus {{ border-color: #2962ff; box-shadow: 0 0 0 2px rgba(41, 98, 255, .12); }}
+.form-advanced {{ grid-column: 1 / -1; border: 1px solid var(--border); border-radius: var(--radius-lg); background: #fbfdff; padding: 0; }}
+.form-advanced summary {{ cursor: pointer; padding: 10px 12px; color: var(--text); font-size: 12px; font-weight: 900; }}
+.form-advanced summary span {{ margin-left: 8px; color: var(--text-muted); font-weight: 700; }}
+.form-advanced-grid {{ display: grid; grid-template-columns: repeat(8, minmax(116px, 1fr)); gap: 10px; align-items: end; padding: 0 12px 12px; }}
+.form-advanced .form-section-title {{ margin-top: 0; }}
+input, select, textarea {{ width: 100%; margin-top: 6px; padding: 8px 9px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font-family: inherit; font-size: 13px; outline: none; }}
+input:focus, select:focus, textarea:focus {{ border-color: var(--primary); box-shadow: 0 0 0 2px var(--ring); }}
 textarea {{ min-height: 78px; resize: vertical; line-height: 1.45; }}
 .ashare-symbol-field {{ grid-column: span 2; }}
 .ashare-suggest-panel {{ position: absolute; z-index: 1000; max-height: 240px; overflow-y: auto; border: 1px solid #c7ccd5; border-radius: 6px; background: #fff; box-shadow: 0 12px 30px rgba(19, 23, 34, .16); padding: 3px; }}
@@ -1330,13 +1363,13 @@ textarea {{ min-height: 78px; resize: vertical; line-height: 1.45; }}
 .ashare-suggest-symbol {{ font-weight: 900; color: #2962ff; font-size: 12px; }}
 .ashare-suggest-name {{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 800; font-size: 12px; }}
 .ashare-suggest-meta {{ color: #64748b; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }}
-button, .btn {{ display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 8px 13px; border: 1px solid #2962ff; border-radius: 4px; background: #2962ff; color: #fff; font: inherit; font-size: 13px; font-weight: 800; line-height: 1.2; text-decoration: none; cursor: pointer; transition: background-color .12s ease, border-color .12s ease, color .12s ease, box-shadow .12s ease, transform .06s ease; }}
-button:hover, .btn:hover {{ filter: none; background: #1e53e5; border-color: #1e53e5; color: #fff; text-decoration: none; }}
+button, .btn {{ display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 8px 13px; border: 1px solid var(--primary); border-radius: var(--radius-sm); background: var(--primary); color: #fff; font: inherit; font-size: 13px; font-weight: 800; line-height: 1.2; text-decoration: none; cursor: pointer; transition: background-color .14s ease, border-color .14s ease, color .14s ease, box-shadow .14s ease, transform .08s ease; }}
+button:hover, .btn:hover {{ filter: none; background: var(--primary-hover); border-color: var(--primary-hover); color: #fff; text-decoration: none; }}
 button:active, .btn:active {{ transform: translateY(1px); }}
-button:focus-visible, .btn:focus-visible {{ outline: none; box-shadow: 0 0 0 2px rgba(41, 98, 255, .18); }}
+button:focus-visible, .btn:focus-visible, a:focus-visible, .chart-toggle:focus-within, .check-inline:focus-within {{ outline: 2px solid var(--ring); outline-offset: 2px; box-shadow: none; }}
 button:disabled, .btn.disabled {{ cursor: not-allowed; opacity: .62; transform: none; }}
-button.secondary, .btn-secondary {{ background: #fff; color: #334155; border-color: #c7ccd5; }}
-button.secondary:hover, .btn-secondary:hover {{ background: #f8fafc; border-color: #aeb7c5; color: #131722; }}
+button.secondary, .btn-secondary {{ background: var(--surface); color: #334155; border-color: var(--border-strong); }}
+button.secondary:hover, .btn-secondary:hover {{ background: var(--surface-muted); border-color: #aeb7c5; color: var(--text); }}
 button.success, .btn-success {{ background: #089981; border-color: #089981; }}
 button.success:hover, .btn-success:hover {{ background: #067a6b; border-color: #067a6b; }}
 button.danger, .btn-danger {{ background: #fff; border-color: #f3a6ad; color: #d12030; }}
@@ -1347,12 +1380,12 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .symbol-button:hover {{ background: rgba(41, 98, 255, .08); border-color: rgba(41, 98, 255, .16); color: #1e53e5; text-decoration: none; }}
 .wide {{ grid-column: span 3; }}
 .page-head {{ display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 12px; }}
-.mode-pill {{ background: #131722; color: #f8fafc; border-radius: 999px; padding: 6px 10px; font-size: 12px; white-space: nowrap; }}
+.mode-pill {{ background: #0f172a; color: #f8fafc; border-radius: 999px; padding: 6px 10px; font-size: 12px; white-space: nowrap; box-shadow: var(--shadow-sm); }}
 .status-strip {{ display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 8px; margin: 0 0 14px; }}
-.stat-card {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 10px 12px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
-.stat-label {{ color: #6b7280; font-size: 11px; font-weight: 800; text-transform: uppercase; margin-bottom: 6px; }}
-.stat-value {{ color: #131722; font-size: 18px; font-weight: 800; }}
-.market-bar {{ display: grid; grid-template-columns: minmax(280px, .9fr) minmax(360px, 1.3fr); align-items: start; gap: 14px; border: 1px solid #d6dbe3; border-left-width: 4px; border-radius: 6px; background: #fff; padding: 10px 12px; margin: 0 0 14px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
+.stat-card {{ background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 10px 12px; box-shadow: var(--shadow-sm); }}
+.stat-label {{ color: var(--text-muted); font-size: 11px; font-weight: 800; text-transform: uppercase; margin-bottom: 6px; }}
+.stat-value {{ color: var(--text); font-size: 18px; font-weight: 900; font-variant-numeric: tabular-nums; }}
+.market-bar {{ display: grid; grid-template-columns: minmax(280px, .9fr) minmax(360px, 1.3fr); align-items: start; gap: 14px; min-width: 0; border: 1px solid #d6dbe3; border-left-width: 4px; border-radius: 6px; background: #fff; padding: 10px 12px; margin: 0 0 14px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
 .market-bar .market-main > div, .macro-box > div:first-child {{ display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }}
 .market-bar strong {{ font-size: 15px; }}
 .market-bar span, .market-bar p {{ color: #5d6675; font-size: 13px; margin: 0; line-height: 1.45; }}
@@ -1381,7 +1414,7 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .cache-actions {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }}
 .cache-actions form {{ margin: 0; }}
 .cache-actions button {{ min-height: 30px; padding: 6px 10px; font-size: 12px; }}
-.notice {{ background: #eefbf7; border: 1px solid #9fd8cc; color: #067a6b; padding: 10px 12px; border-radius: 6px; margin: 0 0 12px; font-weight: 800; }}
+.notice {{ background: #eefbf7; border: 1px solid #9fd8cc; color: #067a6b; padding: 10px 12px; border-radius: var(--radius-md); margin: 0 0 12px; font-weight: 800; }}
 .scan-result-alert {{ border-left: 4px solid #2962ff; background: #f8fbff; box-shadow: 0 8px 20px rgba(41,98,255,.08); }}
 .scan-result-alert .toolbar {{ margin-bottom: 0; }}
 .scan-result-alert strong, .scan-result-alert h2 {{ color: #1e53e5; }}
@@ -1409,6 +1442,21 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .condition-note {{ margin-top: 10px; color: #64748b; font-size: 12px; line-height: 1.5; }}
 .risk-note {{ display: flex; align-items: flex-start; gap: 8px; margin: 10px 14px 0; padding: 9px 10px; border: 1px solid #fed7aa; background: #fff7ed; color: #9a4f00; border-radius: 6px; font-size: 12px; line-height: 1.45; font-weight: 700; }}
 .risk-note strong {{ color: #7c3f00; }}
+.candidate-decision-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin: 0 0 12px; }}
+.candidate-card {{ border: 1px solid var(--border); border-radius: var(--radius-lg); background: #fff; padding: 11px; box-shadow: var(--shadow-sm); }}
+.candidate-card:hover {{ border-color: var(--border-strong); box-shadow: 0 6px 18px rgba(15, 23, 42, .06); }}
+.candidate-card-head {{ display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; margin-bottom: 8px; }}
+.candidate-symbol {{ display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; }}
+.candidate-symbol strong {{ font-size: 16px; }}
+.candidate-symbol span {{ color: var(--text-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }}
+.candidate-card-meta {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 8px 0; }}
+.candidate-card-meta div {{ border: 1px solid #e3e7ee; border-radius: var(--radius-md); background: #f8fafc; padding: 6px 7px; min-width: 0; }}
+.candidate-card-meta span {{ display: block; color: var(--text-muted); font-size: 11px; font-weight: 800; margin-bottom: 3px; }}
+.candidate-card-meta b {{ display: block; color: var(--text); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.candidate-card-actions {{ display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin-top: 9px; }}
+.detail-disclosure {{ margin: 0 0 12px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: rgba(255,255,255,.7); }}
+.detail-disclosure summary {{ cursor: pointer; padding: 8px 10px; color: var(--text-muted); font-size: 12px; font-weight: 900; }}
+.detail-disclosure[open] summary {{ border-bottom: 1px solid var(--border); }}
 .inline-actions {{ display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }}
 .delete-form {{ display: inline; margin: 0; }}
 .delete-link {{ display: inline-flex; align-items: center; justify-content: center; min-height: 26px; padding: 4px 8px; border: 1px solid #f3a6ad; border-radius: 4px; background: #fff; color: #d12030; font-size: 12px; font-weight: 800; cursor: pointer; text-decoration: none; }}
@@ -1428,19 +1476,19 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .earnings-watch {{ color: #915d00; background: rgba(245, 158, 11, .16); }}
 .earnings-danger {{ color: #b42332; background: rgba(242, 54, 69, .13); }}
 .earnings-unknown {{ color: #64748b; background: #f1f5f9; }}
-.error {{ background: #fff5f6; border: 1px solid #ffc9cf; color: #b42332; padding: 12px; border-radius: 6px; white-space: pre-wrap; }}
-.result {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; margin-top: 14px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
+.error {{ background: var(--danger-soft); border: 1px solid #ffc9cf; color: #b42332; padding: 12px; border-radius: var(--radius-md); white-space: pre-wrap; }}
+.result {{ background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 12px; margin-top: 14px; margin-bottom: 14px; box-shadow: var(--shadow-sm); }}
 .candidate-detail {{ margin-top: 14px; }}
 .candidate-detail iframe {{ height: 980px; }}
 .candidate-detail iframe.candidate-chart-frame {{ height: 800px; }}
-.watchlist-grid {{ display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 14px; align-items: start; }}
-.watchlist-panel {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
+.watchlist-grid {{ display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 14px; align-items: start; min-width: 0; }}
+.watchlist-panel {{ min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 12px; box-shadow: var(--shadow-sm); }}
 .watchlist-chart-shell {{ position: relative; height: 880px; min-width: 520px; }}
 .watchlist-chart {{ width: 100%; height: 100%; }}
 .watchlist-price-chart {{ height: 640px; }}
 .watchlist-kdj-chart {{ height: 200px; margin-top: 12px; border-top: 1px solid #eef1f5; }}
 .chart-toggle-row {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 10px; }}
-.chart-toggle {{ display: inline-flex; align-items: center; gap: 5px; min-height: 28px; border: 1px solid #d6dbe3; background: #fff; color: #334155; border-radius: 4px; padding: 0 8px; font-size: 12px; font-weight: 800; cursor: pointer; }}
+.chart-toggle {{ display: inline-flex; align-items: center; gap: 5px; min-height: 28px; border: 1px solid var(--border); background: var(--surface); color: #334155; border-radius: var(--radius-sm); padding: 0 8px; font-size: 12px; font-weight: 800; cursor: pointer; }}
 .chart-toggle input {{ margin: 0; }}
 .price-chart-wrap {{ position: relative; height: 560px; }}
 .price-chart-wrap .watchlist-chart {{ height: 100%; }}
@@ -1449,12 +1497,22 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .watchlist-list-wrap {{ max-height: 760px; overflow: auto; }}
 .watch-row-button {{ width: 100%; justify-content: flex-start; border: 0; background: transparent; color: #131722; padding: 0; min-height: 0; text-align: left; }}
 .watch-row-button:hover {{ background: transparent; color: #2962ff; }}
+.watch-row-button.is-active {{ color: var(--primary); }}
 .watch-row-cell {{ min-width: 220px; }}
 .watch-row-head {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }}
 .watch-row-actions {{ display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }}
 .watch-row-actions .delete-link {{ min-height: 22px; padding: 2px 6px; font-size: 11px; }}
 .watch-symbol-line {{ display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 900; }}
 .watch-meta-line {{ margin-top: 4px; color: #64748b; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }}
+.watchlist-panel-head {{ display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; margin-bottom: 10px; }}
+.watchlist-panel-head strong {{ display: block; font-size: 14px; }}
+.watchlist-panel-head span {{ display: block; margin-top: 3px; color: var(--text-muted); font-size: 12px; }}
+.watchlist-count-pill {{ display: inline-flex; align-items: center; justify-content: center; min-width: 34px; height: 24px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--primary-soft); color: var(--primary); font-weight: 900; font-size: 12px; }}
+.watchlist-chart-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 10px; }}
+.watchlist-chart-head .hint {{ margin-bottom: 0; }}
+.chart-control-panel {{ border: 1px solid var(--border); border-radius: var(--radius-lg); background: #fbfdff; padding: 10px; margin-bottom: 10px; }}
+.chart-control-title {{ display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--text-muted); font-size: 12px; font-weight: 900; margin-bottom: 8px; }}
+.chart-control-title span:last-child {{ color: var(--text-subtle); font-weight: 800; }}
 .watch-detail-grid {{ display: grid; grid-template-columns: repeat(4, minmax(110px, 1fr)); gap: 8px; margin: 10px 0 12px; }}
 .watch-detail-item {{ border: 1px solid #e3e7ee; background: #f8fafc; border-radius: 6px; padding: 8px 9px; }}
 .watch-detail-item span {{ display: block; color: #64748b; font-size: 11px; font-weight: 800; margin-bottom: 4px; }}
@@ -1498,16 +1556,34 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .chart-tooltip .down {{ color: #f23645; }}
 @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
 @keyframes toastIn {{ to {{ opacity: 1; transform: translateY(0); }} }}
-.progress-box {{ display: none; background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; margin-top: 14px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
+.progress-box {{ display: none; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 12px; margin-top: 14px; box-shadow: var(--shadow-sm); }}
 .progress-box.active {{ display: block; }}
 .progress-track {{ height: 8px; background: #e6eaf0; border-radius: 999px; overflow: hidden; margin: 8px 0; }}
-.progress-bar {{ height: 100%; width: 0%; background: #2962ff; transition: width .2s ease; }}
+.progress-bar {{ height: 100%; width: 0%; background: var(--primary); transition: width .2s ease; }}
 .progress-meta {{ color: #475569; font-size: 13px; }}
 .progress-actions {{ display: flex; gap: 8px; margin-top: 10px; }}
 .progress-actions button[hidden] {{ display: none; }}
-.dashboard-grid {{ display: grid; grid-template-columns: repeat(2, minmax(280px, 1fr)); gap: 14px; }}
-.dashboard-panel {{ background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 12px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
-.dashboard-panel h2 {{ margin-top: 0; }}
+.dashboard-grid {{ display: grid; grid-template-columns: repeat(2, minmax(280px, 1fr)); gap: 14px; align-items: start; min-width: 0; }}
+.dashboard-panel {{ min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px; box-shadow: var(--shadow-sm); }}
+.dashboard-panel h2 {{ margin: 0 0 10px; }}
+.dashboard-panel:hover {{ box-shadow: 0 6px 18px rgba(15, 23, 42, .06); }}
+details.dashboard-panel summary {{ cursor: pointer; list-style-position: inside; color: var(--text); font-weight: 900; }}
+details.dashboard-panel summary .panel-kicker {{ display: inline; margin-left: 8px; font-weight: 800; }}
+details.dashboard-panel[open] summary {{ margin-bottom: 10px; }}
+.action-overview {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 14px; color: var(--text-muted); font-size: 12px; }}
+.action-overview span {{ display: inline-flex; align-items: center; min-height: 24px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 999px; background: rgba(255,255,255,.58); }}
+.action-overview b {{ margin-left: 4px; color: #475569; font-weight: 800; font-variant-numeric: tabular-nums; }}
+.panel-head {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 10px; }}
+.panel-head h2 {{ margin: 0; }}
+.panel-kicker {{ color: var(--text-muted); font-size: 12px; font-weight: 800; }}
+.workflow-rail {{ margin: 0 0 14px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: rgba(255,255,255,.52); color: var(--text-muted); }}
+.workflow-rail summary {{ cursor: pointer; padding: 8px 10px; font-size: 12px; font-weight: 800; }}
+.workflow-rail summary:hover {{ color: var(--primary); }}
+.workflow-step-list {{ display: flex; flex-wrap: wrap; gap: 6px; padding: 0 10px 10px; }}
+.workflow-step {{ display: inline-flex; gap: 4px; align-items: baseline; min-height: 24px; border: 1px solid var(--border); border-radius: 999px; background: #fff; padding: 3px 8px; }}
+.workflow-step span {{ color: var(--text-subtle); font-size: 11px; font-weight: 900; text-transform: uppercase; }}
+.workflow-step strong {{ color: #475569; font-size: 12px; }}
+.workflow-step p {{ display: none; }}
 .quick-actions {{ display: flex; flex-wrap: wrap; gap: 8px; }}
 .checkbox-row {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; }}
 .check-inline {{ display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 5px 9px; border: 1px solid #d6dbe3; border-radius: 6px; background: #fff; color: #131722; font-size: 13px; font-weight: 800; cursor: pointer; }}
@@ -1515,21 +1591,22 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .links {{ margin: 0 0 12px; font-size: 13px; }}
 .links a {{ color: #2962ff; text-decoration: none; margin-right: 12px; font-weight: 700; }}
 .links a:hover {{ text-decoration: underline; }}
-iframe {{ width: 100%; height: 1320px; border: 1px solid #d6dbe3; border-radius: 6px; background: #fff; }}
+iframe {{ width: 100%; height: 1320px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }}
 table {{ width: 100%; border-collapse: separate; border-spacing: 0; background: #fff; }}
-.table-wrap {{ width: 100%; overflow: auto; border: 1px solid #d6dbe3; border-radius: 6px; background: #fff; max-height: 680px; }}
+.table-wrap {{ width: 100%; max-width: 100%; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); max-height: 680px; box-shadow: var(--shadow-sm); }}
 .table-wrap table {{ width: max-content; min-width: 100%; table-layout: auto; }}
 th, td {{ padding: 8px 10px; border-bottom: 1px solid #eef1f5; text-align: right; font-size: 12px; white-space: nowrap; }}
 tbody tr:hover td {{ background: #f8fafc; }}
-th {{ background: #f5f7fa; color: #5d6675; position: sticky; top: 0; z-index: 8; font-size: 11px; font-weight: 800; text-transform: uppercase; border-bottom: 1px solid #d6dbe3; }}
+th {{ background: #f5f7fa; color: var(--text-muted); position: sticky; top: 0; z-index: 8; font-size: 11px; font-weight: 800; text-transform: uppercase; border-bottom: 1px solid var(--border); }}
 th:first-child, td:first-child {{ position: sticky; left: 0; background: #fff; z-index: 3; box-shadow: 1px 0 0 #eef1f5; }}
 th:first-child {{ background: #f5f7fa; z-index: 10; }}
 th.resizable {{ position: sticky; user-select: none; }}
 .col-resizer {{ position: absolute; top: 0; right: -3px; width: 6px; height: 100%; cursor: col-resize; z-index: 2; }}
 th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5), th:nth-child(6), td:nth-child(6), th:nth-child(7), td:nth-child(7) {{ text-align: left; }}
 .empty {{ text-align: center; color: #607080; }}
-@media (max-width: 1200px) {{ .form {{ grid-template-columns: repeat(4, 1fr); }} .watchlist-grid {{ grid-template-columns: 1fr; }} .watchlist-chart-shell {{ min-width: 0; }} .divergence-form {{ grid-template-columns: repeat(2, minmax(140px, 1fr)); }} .condition-grid {{ grid-template-columns: repeat(2, minmax(220px, 1fr)); }} .condition-card:nth-child(2) {{ border-right: 0; }} .condition-card:nth-child(-n+2) {{ border-bottom: 1px solid #e3e7ee; }} }}
-@media (max-width: 760px) {{ main {{ padding: 0 10px 18px; }} .app-topbar {{ margin: 0 -10px 12px; height: auto; padding: 10px; align-items: flex-start; flex-direction: column; }} .topbar-actions {{ width: 100%; flex-direction: column; align-items: stretch; gap: 8px; }} .market-switch, .tabs {{ width: 100%; overflow-x: auto; }} .form, .status-strip {{ grid-template-columns: repeat(2, 1fr); }} .wide {{ grid-column: span 2; }} .page-head {{ display: block; }} .condition-grid {{ grid-template-columns: 1fr; }} .condition-card, .condition-card:nth-child(2) {{ border-right: 0; border-bottom: 1px solid #e3e7ee; }} .condition-card:last-child {{ border-bottom: 0; }} }}
+@media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{ animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; }} }}
+@media (max-width: 1200px) {{ .form, .form-advanced-grid {{ grid-template-columns: repeat(4, 1fr); }} .watchlist-grid {{ grid-template-columns: 1fr; }} .watchlist-chart-shell {{ min-width: 0; }} .divergence-form {{ grid-template-columns: repeat(2, minmax(140px, 1fr)); }} .condition-grid {{ grid-template-columns: repeat(2, minmax(220px, 1fr)); }} .condition-card:nth-child(2) {{ border-right: 0; }} .condition-card:nth-child(-n+2) {{ border-bottom: 1px solid #e3e7ee; }} .workflow-rail, .action-overview {{ grid-template-columns: repeat(2, minmax(180px, 1fr)); }} }}
+@media (max-width: 760px) {{ main {{ padding: 0 10px 18px; overflow-x: hidden; }} .app-topbar {{ margin: 0 -10px 12px; height: auto; padding: 10px; align-items: flex-start; flex-direction: column; }} .topbar-actions {{ width: 100%; flex-direction: column; align-items: stretch; gap: 8px; }} .market-switch, .tabs {{ width: 100%; overflow-x: auto; }} .market-bar {{ grid-template-columns: 1fr; }} .macro-box {{ border-left: 0; padding-left: 0; border-top: 1px solid #e3e7ee; padding-top: 10px; }} .form, .form-advanced-grid, .status-strip, .dashboard-grid, .workflow-rail, .action-overview {{ grid-template-columns: minmax(0, 1fr); }} .wide {{ grid-column: span 1; }} .page-head {{ display: block; }} .mode-pill {{ display: inline-flex; margin-top: 6px; }} .condition-grid {{ grid-template-columns: 1fr; }} .condition-card, .condition-card:nth-child(2) {{ border-right: 0; border-bottom: 1px solid #e3e7ee; }} .condition-card:last-child {{ border-bottom: 0; }} button, .btn, input, select, textarea {{ min-height: 40px; }} }}
 </style>
 </head>
 <body><main>
@@ -1605,10 +1682,22 @@ window.initializeConditionPanels();
 window.initializeSecondaryFilters = function(root = document) {{
   root.querySelectorAll("[data-secondary-filter-table]").forEach(table => {{
     const wrap = table.closest(".table-wrap");
-    const panel = wrap?.previousElementSibling;
+    let search = wrap;
+    let panel = null;
+    while (search && !panel && search !== root) {{
+      let cursor = search.previousElementSibling;
+      while (cursor && !panel) {{
+        if (cursor.matches?.("[data-secondary-filter-panel]")) panel = cursor;
+        cursor = cursor.previousElementSibling;
+      }}
+      search = search.parentElement;
+    }}
     if (!panel || !panel.matches("[data-secondary-filter-panel]") || panel.dataset.secondaryReady === "1") return;
     panel.dataset.secondaryReady = "1";
-    const rows = Array.from(table.querySelectorAll("[data-secondary-row]"));
+    const tableRows = Array.from(table.querySelectorAll("[data-secondary-row]"));
+    const cardGrid = panel.nextElementSibling?.matches("[data-secondary-card-grid]") ? panel.nextElementSibling : null;
+    const cardRows = cardGrid ? Array.from(cardGrid.querySelectorAll("[data-secondary-row]")) : [];
+    const rows = [...tableRows, ...cardRows];
     const filters = Array.from(panel.querySelectorAll("[data-secondary-filter]"));
     const totalEl = panel.querySelector("[data-secondary-total]");
     const visibleEl = panel.querySelector("[data-secondary-visible]");
@@ -1618,7 +1707,7 @@ window.initializeSecondaryFilters = function(root = document) {{
       const activeFilters = filters.filter(input => input.checked).map(input => input.getAttribute("data-secondary-filter") || "");
       const counts = Object.fromEntries(countEls.map(el => [el.getAttribute("data-secondary-count") || "", 0]));
       let visible = 0;
-      for (const row of rows) {{
+      for (const row of tableRows) {{
         for (const key of Object.keys(counts)) {{
           if (row.getAttribute(`data-filter-${{key.replaceAll("_", "-")}}`) === "1") counts[key] += 1;
         }}
@@ -1626,7 +1715,11 @@ window.initializeSecondaryFilters = function(root = document) {{
         row.hidden = !show;
         if (show) visible += 1;
       }}
-      if (totalEl) totalEl.textContent = String(rows.length);
+      for (const row of cardRows) {{
+        const show = activeFilters.every(key => row.getAttribute(`data-filter-${{key.replaceAll("_", "-")}}`) === "1");
+        row.hidden = !show;
+      }}
+      if (totalEl) totalEl.textContent = String(tableRows.length);
       if (visibleEl) visibleEl.textContent = String(visible);
       countEls.forEach(el => {{
         const key = el.getAttribute("data-secondary-count") || "";
@@ -1810,6 +1903,9 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
   <label>初始资金<input name="initial_cash" value="{value("initial_cash", "100000")}"></label>
   <label>手续费 %<input name="commission_pct" value="{value("commission_pct", "0.1")}"></label>
   <label>滑点 %<input name="slippage_pct" value="{value("slippage_pct", "0")}"></label>
+  <details class="form-advanced">
+    <summary>高级参数 <span>策略、风控和可选买入条件</span></summary>
+    <div class="form-advanced-grid">
   <div class="form-section-title">信号参数 <span>B1/B2、放量和回踩距离</span></div>
   <label>均线周期<input name="ma_length" value="{value("ma_length", "5")}"></label>
   <label>均量周期<input name="vol_length" id="vol_length" value="{value("vol_length", "20")}"></label>
@@ -1847,6 +1943,8 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
     <input type="hidden" name="secondary_above_ma5_3d" value="0">
     <label class="checkbox-label"><input type="checkbox" name="secondary_above_ma5_3d" value="1"{secondary_above_ma5_checked}> 连续三天&gt;MA5</label>
   </div>
+    </div>
+  </details>
   <button type="submit">运行回测</button>
 </form>
 <script>
@@ -1931,6 +2029,7 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
     cn_scanned = int(cn_summary.get("scanned", 0) or 0) if cn_latest else 0
     cn_watch_count = len(load_ashare_watchlist_items())
     cache = cache_dashboard_summary()
+    cache_total_mb = sum(float(item.get("size_mb", 0) or 0) for item in cache.values())
     notice = field(params, "cache_message", "").strip()
     notice_html = f'<section class="notice">{html.escape(notice)}</section>' if notice else ""
 
@@ -2010,19 +2109,49 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
       </tr>"""
         for item in history
     ) or '<tr><td colspan="7" class="empty">还没有扫描任务历史。</td></tr>'
+    today_focus_items = []
+    if active_jobs:
+        today_focus_items.append(f'<span class="scan-fact"><span>进行中</span>{len(active_jobs)} 个任务</span>')
+    if us_candidates:
+        today_focus_items.append(f'<span class="scan-fact"><span>美股候选</span>{us_candidates} 只待看图</span>')
+    if cn_candidates:
+        today_focus_items.append(f'<span class="scan-fact"><span>A股候选</span>{cn_candidates} 只待看图</span>')
+    if not today_focus_items:
+        today_focus_items.append('<span class="scan-fact"><span>当前</span>暂无新的候选任务</span>')
+    today_focus_html = "".join(today_focus_items)
 
     return f"""
 <section class="page-head">
   <div>
     <h1>行动台</h1>
-    <p class="hint">先选择市场工作区，再进入选股、自选池或回测。这里保留两边市场的最新状态和最短路径。</p>
+    <p class="hint">按日常交易流程组织：扫描候选、加入自选、看图复盘、回测验证、维护缓存。</p>
   </div>
   <div class="mode-pill">Global | Action Desk</div>
 </section>
 {notice_html}
+<section class="result latest-scan-card">
+  <div class="toolbar">
+    <div>
+      <h2>今日待处理</h2>
+      <div class="scan-facts">{today_focus_html}</div>
+    </div>
+    <div class="quick-actions">
+      <a class="btn btn-secondary" href="/us/scan/latest">美股候选</a>
+      <a class="btn btn-secondary" href="/cn/scan/latest">A股候选</a>
+      <a class="btn btn-secondary" href="/us/watchlist">美股自选</a>
+      <a class="btn btn-secondary" href="/cn/watchlist">A股自选</a>
+    </div>
+  </div>
+</section>
 <section class="dashboard-grid">
   <div class="dashboard-panel">
-    <h2>美股</h2>
+    <div class="panel-head">
+      <div>
+        <h2>美股工作区</h2>
+        <div class="panel-kicker">选股结果 + 公司信息 + 回测</div>
+      </div>
+      <a class="btn btn-secondary btn-small" href="/us/scanner">进入</a>
+    </div>
     <section class="status-strip">
       <div class="stat-card"><div class="stat-label">信号日</div><div class="stat-value">{html.escape(us_signal)}</div></div>
       <div class="stat-card"><div class="stat-label">候选</div><div class="stat-value">{us_candidates}</div></div>
@@ -2030,15 +2159,21 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
       <div class="stat-card"><div class="stat-label">自选</div><div class="stat-value">{us_watch_count}</div></div>
     </section>
     <div class="quick-actions">
-      <a class="btn" href="/us/scanner">进入美股选股器</a>
       <a class="btn btn-secondary" href="/us/scanner">选股器</a>
       <a class="btn btn-secondary" href="/us/watchlist">自选池</a>
       <a class="btn btn-secondary" href="/us/backtest">回测</a>
+      <a class="btn btn-secondary" href="/us/batch">批量回测</a>
     </div>
     {us_company_profile_html}
   </div>
   <div class="dashboard-panel">
-    <h2>A股</h2>
+    <div class="panel-head">
+      <div>
+        <h2>A股工作区</h2>
+        <div class="panel-kicker">扫描候选 + 首字母检索 + A股图表</div>
+      </div>
+      <a class="btn btn-secondary btn-small" href="/cn/scanner">进入</a>
+    </div>
     <section class="status-strip">
       <div class="stat-card"><div class="stat-label">信号日</div><div class="stat-value">{html.escape(cn_signal)}</div></div>
       <div class="stat-card"><div class="stat-label">候选</div><div class="stat-value">{cn_candidates}</div></div>
@@ -2046,15 +2181,33 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
       <div class="stat-card"><div class="stat-label">自选</div><div class="stat-value">{cn_watch_count}</div></div>
     </section>
     <div class="quick-actions">
-      <a class="btn" href="/cn/scanner">进入A股选股器</a>
       <a class="btn btn-secondary" href="/cn/scanner">选股器</a>
       <a class="btn btn-secondary" href="/cn/watchlist">自选池</a>
       <a class="btn btn-secondary" href="/cn/backtest">回测</a>
     </div>
   </div>
-  <div class="dashboard-panel">
-    <h2>缓存维护</h2>
-    <p class="hint">清理的是服务器本地缓存和生成报告，不会删除美股/A股自选池。</p>
+</section>
+<section class="action-overview" aria-label="辅助状态">
+  <span>运行任务 <b>{len(active_jobs)}</b></span>
+  <span>美股候选/自选 <b>{us_candidates}/{us_watch_count}</b></span>
+  <span>A股候选/自选 <b>{cn_candidates}/{cn_watch_count}</b></span>
+  <span>公司信息缓存 <b>{int(us_profile_summary["count"])}</b></span>
+  <span>缓存体积 <b>{cache_total_mb:.1f} MB</b></span>
+</section>
+<details class="workflow-rail">
+  <summary>查看日常流程提示</summary>
+  <div class="workflow-step-list">
+    <div class="workflow-step"><span>Step 1</span><strong>扫描</strong><p>先跑对应市场，生成当天候选。</p></div>
+    <div class="workflow-step"><span>Step 2</span><strong>筛选</strong><p>看 Strong/Medium、行业和财报风险。</p></div>
+    <div class="workflow-step"><span>Step 3</span><strong>自选</strong><p>把明天值得盯的票加入池子。</p></div>
+    <div class="workflow-step"><span>Step 4</span><strong>看图</strong><p>确认 B 点、持仓区间和防守线。</p></div>
+    <div class="workflow-step"><span>Step 5</span><strong>维护</strong><p>缓存变大或数据异常时再清理。</p></div>
+  </div>
+</details>
+<section class="dashboard-grid">
+  <details class="dashboard-panel">
+    <summary>缓存维护 <span class="panel-kicker">需要时再处理，部署网页后也在服务器侧执行</span></summary>
+    <p class="hint">清理的是服务器本地缓存和生成报告，不会删除美股/A股自选池；下次打开会自动重拉数据。</p>
     <div class="scan-facts">
       {cache_fact("reports", "报告")}
       {cache_fact("prices", "行情缓存")}
@@ -2069,9 +2222,14 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
       {clear_form("ashare", "清理A股缓存")}
       {clear_form("latest", "清理扫描结果", True)}
     </div>
-  </div>
+  </details>
   <div class="dashboard-panel">
-    <h2>任务状态</h2>
+    <div class="panel-head">
+      <div>
+        <h2>任务状态</h2>
+        <div class="panel-kicker">扫描和公司信息补全</div>
+      </div>
+    </div>
     <div class="scan-facts">
       {active_job_html}
     </div>
@@ -2490,6 +2648,9 @@ def render_ashare_backtest_form(params: dict[str, list[str]] | None = None) -> s
   <label>卖出印花税 %<input name="stamp_duty_pct" value="{value("stamp_duty_pct", defaults["stamp_duty_pct"])}"></label>
   <label>滑点 %<input name="slippage_pct" value="{value("slippage_pct", defaults["slippage_pct"])}"></label>
   <label>最高可追高开 %<input name="max_buy_gap_pct" value="{value("max_buy_gap_pct", defaults["max_buy_gap_pct"])}"></label>
+  <details class="form-advanced">
+    <summary>高级参数 <span>信号、止损、弱趋势和可选条件</span></summary>
+    <div class="form-advanced-grid">
   <label>巨量倍数<input name="vol_multiplier" value="{value("vol_multiplier", defaults["vol_multiplier"])}"></label>
   <label>跌破MA5止损 %<input name="stop_5ma_pct" value="{value("stop_5ma_pct", defaults["stop_5ma_pct"])}"></label>
   <label>连续跌破20MA天数<input name="below_20ma_stop_days" value="{value("below_20ma_stop_days", defaults["below_20ma_stop_days"])}"></label>
@@ -2518,6 +2679,8 @@ def render_ashare_backtest_form(params: dict[str, list[str]] | None = None) -> s
     <input type="hidden" name="secondary_above_ma5_3d" value="0">
     <label class="checkbox-label"><input type="checkbox" name="secondary_above_ma5_3d" value="1"{secondary_above_ma5_checked}> 连续三天&gt;MA5</label>
   </div>
+    </div>
+  </details>
   <button type="submit">运行 A 股回测</button>
 </form>
 {render_ashare_symbol_autocomplete()}
@@ -2763,6 +2926,7 @@ def render_ashare_scan_result(
 ) -> str:
     params = params or {}
     rows = []
+    cards = []
     rating_class = {"Strong": "score-Strong", "Medium": "score-Medium", "Watch": "score-Medium"}
 
     for row in candidates:
@@ -2786,18 +2950,49 @@ def render_ashare_scan_result(
             f"<td>{html.escape(row.data_source)}</td>"
             "</tr>"
         )
+        reason_html = render_ashare_candidate_reason_tags(row)
+        cards.append(
+            f'<article class="candidate-card" data-secondary-row {filter_attrs}>'
+            f'<div class="candidate-card-head">'
+            f'<div class="candidate-symbol"><strong>{html.escape(row.symbol)}</strong><span>{html.escape(row.name or "-")}</span></div>'
+            f'<span class="score-badge {cls}">{html.escape(row.candidate_rating)}</span>'
+            f'</div>'
+            f'<div class="candidate-card-meta">'
+            f'<div><span>B点</span><b>{html.escape(row.signal_type or "-")}</b></div>'
+            f'<div><span>量比</span><b>{row.volume_ratio:.2f}x</b></div>'
+            f'<div><span>量能分</span><b>{row.volume_score:.1f}/5</b></div>'
+            f'<div><span>20日额</span><b>{row.avg_amount_20d / 100_000_000:.2f}亿</b></div>'
+            f'<div><span>收盘</span><b>{row.close:.2f}</b></div>'
+            f'<div><span>交易日</span><b>{html.escape(row.latest_date)}</b></div>'
+            f'</div>'
+            f'<div class="condition-tags">{reason_html}</div>'
+            f'<div class="candidate-card-actions">'
+            f'<a class="btn btn-secondary btn-small" href="/cn/watchlist/add?symbol={quote(row.symbol)}&name={quote(row.name or "")}">加入自选</a>'
+            f'<button type="button" class="mini-action" data-ashare-candidate-symbol="{html.escape(row.symbol)}">看图</button>'
+            f'<span class="hint" style="margin:0;">{html.escape(row.data_source)}</span>'
+            f'</div>'
+            f'</article>'
+        )
     table_html = (
         """
-  <div class="table-wrap">
-    <table class="sortable resizable-table" data-secondary-filter-table>
-      <thead><tr><th>操作</th><th>代码</th><th>名称</th><th>B点</th><th>入选原因</th><th>评级</th><th>收盘</th><th>量比</th><th>20日均成交额</th><th>交易日</th><th>数据源</th></tr></thead>
-      <tbody>
+  <section class="candidate-decision-grid" data-secondary-card-grid>
+"""
+        + "\n".join(cards)
+        + """
+  </section>
+  <details class="detail-disclosure">
+    <summary>查看明细表格</summary>
+    <div class="table-wrap">
+      <table class="sortable resizable-table" data-secondary-filter-table>
+        <thead><tr><th>操作</th><th>代码</th><th>名称</th><th>B点</th><th>入选原因</th><th>评级</th><th>收盘</th><th>量比</th><th>20日均成交额</th><th>交易日</th><th>数据源</th></tr></thead>
+        <tbody>
 """
         + "\n".join(rows)
         + """
-      </tbody>
-    </table>
-  </div>
+        </tbody>
+      </table>
+    </div>
+  </details>
 """
         if rows
         else '<p class="hint">本次没有筛出候选。可以降低市值/扫描数量限制，或等待 MA5/B 点信号形成后再试。</p>'
@@ -3604,19 +3799,23 @@ def render_ashare_watchlist_page(params: dict[str, list[str]] | None = None) -> 
         group = item.get("group", "") or "观察"
         note = item.get("note", "") or "-"
         added_at = item.get("added_at", "") or "-"
+        meta = " · ".join(part for part in (name, sector, group) if part and part != "-")
+        note_text = note if note and note != "-" else added_at
         rows.append(
             "<tr>"
-            f"<td><a class=\"symbol-button\" href=\"#\" data-ashare-symbol=\"{html.escape(symbol)}\">{html.escape(symbol)}</a></td>"
-            f"<td>{html.escape(name)}</td>"
-            f"<td>{html.escape(sector)}</td>"
-            f"<td>{html.escape(group)}</td>"
-            f"<td>{html.escape(note)}</td>"
-            f"<td>{html.escape(added_at)}</td>"
-            f"<td><button class=\"btn btn-secondary btn-small\" type=\"button\" data-ashare-symbol=\"{html.escape(symbol)}\">看图</button> "
-            f"<a class=\"delete-link\" href=\"/cn/watchlist/delete?symbol={quote(symbol)}\" onclick=\"return confirm('确认删除 {html.escape(symbol)}？');\">删除</a></td>"
+            '<td class="watch-row-cell">'
+            '<div class="watch-row-head">'
+            f'<button type="button" class="watch-row-button" data-ashare-symbol="{html.escape(symbol)}">'
+            f'<span class="watch-symbol-line"><span>{html.escape(symbol)}</span><span>{html.escape(group)}</span></span>'
+            f'<span class="watch-meta-line">{html.escape(meta or name)}</span>'
+            f'<span class="watch-meta-line">{html.escape(note_text)}</span>'
+            '</button>'
+            f'<span class="watch-row-actions"><a class="delete-link" href="/cn/watchlist/delete?symbol={quote(symbol)}" onclick="return confirm(\'确认删除 {html.escape(symbol)}？\');">删除</a></span>'
+            '</div>'
+            '</td>'
             "</tr>"
         )
-    table_rows = "\n".join(rows) if rows else '<tr><td colspan="7" class="empty">暂无 A 股自选。可以先添加代码，或从 A 股选股结果加入。</td></tr>'
+    table_rows = "\n".join(rows) if rows else '<tr><td class="empty">暂无 A 股自选。可以先添加代码，或从 A 股选股结果加入。</td></tr>'
     default_symbol = items[0]["symbol"] if items else ""
     return f"""
 <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
@@ -3642,15 +3841,22 @@ def render_ashare_watchlist_page(params: dict[str, list[str]] | None = None) -> 
 </section>
 <section class="watchlist-grid">
   <div class="watchlist-panel">
+    <div class="watchlist-panel-head">
+      <div>
+        <strong>A股自选列表</strong>
+        <span>点击任意股票后在右侧看图</span>
+      </div>
+      <div class="watchlist-count-pill">{len(items)}</div>
+    </div>
     <div class="table-wrap watchlist-list-wrap">
       <table class="sortable resizable-table">
-        <thead><tr><th>代码</th><th>名称</th><th>行业</th><th>分组</th><th>备注</th><th>加入日期</th><th>操作</th></tr></thead>
+        <thead><tr><th>自选</th></tr></thead>
         <tbody>{table_rows}</tbody>
       </table>
     </div>
   </div>
   <div class="watchlist-panel">
-    <div class="toolbar">
+    <div class="watchlist-chart-head">
       <div>
         <strong id="ashare-watch-title">{html.escape(default_symbol) if default_symbol else "选择一只 A 股"}</strong>
         <p class="hint" id="ashare-watch-subtitle">点击左侧代码或“看图”后，在这里显示策略图表。</p>
@@ -3662,16 +3868,18 @@ def render_ashare_watchlist_page(params: dict[str, list[str]] | None = None) -> 
       <div class="watch-detail-item"><span>数据源</span><strong id="ashare-detail-source">-</strong></div>
       <div class="watch-detail-item"><span>交易日数量</span><strong id="ashare-detail-count">-</strong></div>
     </div>
-    <div class="chart-toggle-row" id="ashare-watch-strategy-options">
-      <span class="hint" style="margin:0;font-weight:800;">图表条件</span>
-      <label class="chart-toggle"><input data-ashare-watch-condition="require_ma5_rising" type="checkbox">MA5向上</label>
-      <label class="chart-toggle"><input data-ashare-watch-condition="require_5ma_gt_20ma" type="checkbox">MA5&gt;MA20</label>
-      <label class="chart-toggle"><input data-ashare-watch-condition="b1_require_20ma_gt_50ma" type="checkbox">20MA&gt;50MA</label>
-    </div>
-    <div class="chart-toggle-row">
-      <label class="chart-toggle"><input id="ashare-watch-toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
-      <label class="chart-toggle"><input id="ashare-watch-toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
-      <label class="chart-toggle"><input id="ashare-watch-toggle-signal-markers" type="checkbox" checked>B/S信号日</label>
+    <div class="chart-control-panel">
+      <div class="chart-control-title"><span>图表显示</span><span>条件只影响图上信号，不改自选列表</span></div>
+      <div class="chart-toggle-row" id="ashare-watch-strategy-options">
+        <label class="chart-toggle"><input data-ashare-watch-condition="require_ma5_rising" type="checkbox">MA5向上</label>
+        <label class="chart-toggle"><input data-ashare-watch-condition="require_5ma_gt_20ma" type="checkbox">MA5&gt;MA20</label>
+        <label class="chart-toggle"><input data-ashare-watch-condition="b1_require_20ma_gt_50ma" type="checkbox">20MA&gt;50MA</label>
+      </div>
+      <div class="chart-toggle-row">
+        <label class="chart-toggle"><input id="ashare-watch-toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
+        <label class="chart-toggle"><input id="ashare-watch-toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
+        <label class="chart-toggle"><input id="ashare-watch-toggle-signal-markers" type="checkbox">B/S信号日</label>
+      </div>
     </div>
     <div class="watchlist-chart-shell" style="height:780px;">
       <div class="price-chart-wrap">
@@ -3868,12 +4076,16 @@ document.addEventListener("click", event => {{
   const target = event.target.closest("[data-ashare-symbol]");
   if (!target) return;
   event.preventDefault();
+  document.querySelectorAll("[data-ashare-symbol]").forEach(item => item.classList.remove("is-active"));
+  target.classList.add("is-active");
   loadAshareWatchChart(target.getAttribute("data-ashare-symbol"));
 }});
 ashareStrategyOptions?.addEventListener("change", event => {{
   if (!event.target.closest("[data-ashare-watch-condition]")) return;
   loadAshareWatchChart(ashareCurrentSymbol);
 }});
+const initialAshareButton = document.querySelector(`[data-ashare-symbol="${{ashareInitialSymbol}}"]`) || document.querySelector("[data-ashare-symbol]");
+if (initialAshareButton) initialAshareButton.classList.add("is-active");
 if (ashareInitialSymbol) loadAshareWatchChart(ashareInitialSymbol);
 </script>
 """
@@ -6388,6 +6600,7 @@ def render_candidate_table(rows: list[SignalResult], params: dict[str, list[str]
         return f'<span class="score-badge {cls}">{row.technical_score:.0f}</span>'
 
     rendered_rows = []
+    rendered_cards = []
     for r in rows:
         filter_attrs = " ".join(
             f'{result_filter_attr(key)}="{1 if result_filter_value(r, key) else 0}"'
@@ -6407,6 +6620,9 @@ def render_candidate_table(rows: list[SignalResult], params: dict[str, list[str]
             if part
         )
         market_cap = float(cached.get("market_cap") or r.market_cap or 0)
+        signal_label = html.escape({'B1_trend_confirm': 'B1', 'B2_reentry': 'B2'}.get(r.signal_type, r.signal_type or '-'))
+        reasons_html = render_us_candidate_reason_tags(r)
+        score_html = technical_score_badge(r)
         rendered_rows.append(
             f'<tr data-secondary-row {filter_attrs}>'
             f'<td class="action-cell">'
@@ -6417,26 +6633,55 @@ def render_candidate_table(rows: list[SignalResult], params: dict[str, list[str]
             f"<td>{html.escape(sector)}</td>"
             f"<td>{html.escape(industry)}</td>"
             f"<td>{html.escape(r.signal_date)}</td>"
-            f"<td>{html.escape({'B1_trend_confirm': 'B1', 'B2_reentry': 'B2'}.get(r.signal_type, r.signal_type or '-'))}</td>"
-            f"<td>{technical_score_badge(r)}</td>"
-            f'<td><span class="condition-tags" style="justify-content:flex-start;">{render_us_candidate_reason_tags(r)}</span></td>'
+            f"<td>{signal_label}</td>"
+            f"<td>{score_html}</td>"
+            f'<td><span class="condition-tags" style="justify-content:flex-start;">{reasons_html}</span></td>'
             f"<td>{earnings_badge(r)}</td>"
             f"<td>{r.close:.2f}</td>"
             f"<td>{r.volume_ratio:.2f}x</td>"
             f"<td>{market_cap / 1_000_000_000:.2f}</td>"
             f"</tr>"
         )
+        rendered_cards.append(
+            f'<article class="candidate-card" data-secondary-row {filter_attrs}>'
+            f'<div class="candidate-card-head">'
+            f'<div class="candidate-symbol"><strong>{html.escape(r.symbol)}</strong><span title="{html.escape(company_title)}">{html.escape(company_display_name)}</span></div>'
+            f'{score_html}'
+            f'</div>'
+            f'<div class="candidate-card-meta">'
+            f'<div><span>B点</span><b>{signal_label}</b></div>'
+            f'<div><span>财报</span><b>{earnings_badge(r)}</b></div>'
+            f'<div><span>量比</span><b>{r.volume_ratio:.2f}x</b></div>'
+            f'<div><span>板块</span><b>{html.escape(sector)}</b></div>'
+            f'<div><span>行业</span><b>{html.escape(industry)}</b></div>'
+            f'<div><span>市值</span><b>{market_cap / 1_000_000_000:.2f}B</b></div>'
+            f'</div>'
+            f'<div class="condition-tags">{reasons_html}</div>'
+            f'<div class="candidate-card-actions">'
+            f'<button type="button" class="mini-action" data-add-watchlist="{html.escape(r.symbol)}" data-watch-note="{html.escape(watch_note)}">加自选</button>'
+            f'<button type="button" class="mini-action" data-candidate-symbol="{html.escape(r.symbol)}">看图</button>'
+            f'<span class="hint" style="margin:0;">信号日 {html.escape(r.signal_date)} · 收盘 {r.close:.2f}</span>'
+            f'</div>'
+            f'</article>'
+        )
     table_rows = "\n".join(rendered_rows)
     if not table_rows:
         table_rows = '<tr><td colspan="13" class="empty">No visible candidates.</td></tr>'
+    card_rows = "\n".join(rendered_cards) if rendered_cards else '<p class="hint">No visible candidates.</p>'
     return f"""
 {render_result_filter_panel(params, len(rows))}
-<div class="table-wrap">
-<table class="resizable-table" data-secondary-filter-table>
-  <thead><tr><th>操作</th><th>代码</th><th>公司</th><th>板块</th><th>行业</th><th>信号日</th><th>B点</th><th>技术分</th><th>入选原因</th><th>财报</th><th>收盘</th><th>量比</th><th>市值$B</th></tr></thead>
-  <tbody>{table_rows}</tbody>
-</table>
-</div>
+<section class="candidate-decision-grid" data-secondary-card-grid>
+{card_rows}
+</section>
+<details class="detail-disclosure">
+  <summary>查看明细表格</summary>
+  <div class="table-wrap">
+  <table class="resizable-table" data-secondary-filter-table>
+    <thead><tr><th>操作</th><th>代码</th><th>公司</th><th>板块</th><th>行业</th><th>信号日</th><th>B点</th><th>技术分</th><th>入选原因</th><th>财报</th><th>收盘</th><th>量比</th><th>市值$B</th></tr></thead>
+    <tbody>{table_rows}</tbody>
+  </table>
+  </div>
+</details>
 """
 
 
@@ -6801,7 +7046,7 @@ body {{ margin: 0; background: #fff; color: #131722; font-family: Inter, "Micros
   <div class="chart-toggle-row">
     <label class="chart-toggle"><input id="candidate-toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
     <label class="chart-toggle"><input id="candidate-toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
-    <label class="chart-toggle"><input id="candidate-toggle-signal-markers" type="checkbox" checked>B/S信号日</label>
+    <label class="chart-toggle"><input id="candidate-toggle-signal-markers" type="checkbox">B/S信号日</label>
   </div>
   <div id="price"></div>
   <div id="kdj"></div>
@@ -7045,6 +7290,13 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
 <p class="hint">缓存用于减少重复拉取行情：打开图表或扫描时会自动补最新日 K；每只股票最多保留约 {cache["max_bars"]} 根，避免长期膨胀。</p>
 <section class="watchlist-grid">
   <div class="watchlist-panel">
+    <div class="watchlist-panel-head">
+      <div>
+        <strong>美股自选列表</strong>
+        <span>点击 Symbol 后在右侧看图和检查风险</span>
+      </div>
+      <div class="watchlist-count-pill">{len(symbols)}</div>
+    </div>
     <div class="table-wrap watchlist-list-wrap">
       <table id="watchlist-table">
         <thead><tr><th>自选</th><th>Close</th><th>Tags</th></tr></thead>
@@ -7053,7 +7305,7 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
     </div>
   </div>
   <div class="watchlist-panel">
-    <div class="toolbar">
+    <div class="watchlist-chart-head">
       <div>
         <strong id="watch-chart-title">{html.escape(default_symbol) if default_symbol else "选择一个股票"}</strong>
         <p class="hint" id="watch-chart-subtitle">周期可切换，数据为已完成日 K。</p>
@@ -7085,24 +7337,26 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
       </form>
       <div class="divergence-list" id="divergence-list">{render_divergence_event_list(default_symbol) if default_symbol else '<div class="divergence-empty">先选择一个股票。</div>'}</div>
     </div>
-    <div class="period-tabs" id="watch-periods">
-      <button type="button" data-preset="1m">1M</button>
-      <button type="button" data-preset="3m">3M</button>
-      <button type="button" data-preset="6m">6M</button>
-      <button type="button" data-preset="1y" class="active">1Y</button>
-      <button type="button" data-preset="3y">3Y</button>
-      <button type="button" data-preset="5y">5Y</button>
-    </div>
-    <div class="chart-toggle-row" id="watch-strategy-options">
-      <span class="hint" style="margin:0;font-weight:800;">图表条件</span>
-      <label class="chart-toggle"><input data-watch-condition="require_ma5_rising" type="checkbox">MA5向上</label>
-      <label class="chart-toggle"><input data-watch-condition="require_5ma_gt_20ma" type="checkbox">MA5&gt;MA20</label>
-      <label class="chart-toggle"><input data-watch-condition="b1_require_20ma_gt_50ma" type="checkbox">20MA&gt;50MA</label>
-    </div>
-    <div class="chart-toggle-row">
-      <label class="chart-toggle"><input id="watch-toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
-      <label class="chart-toggle"><input id="watch-toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
-      <label class="chart-toggle"><input id="watch-toggle-signal-markers" type="checkbox">B/S信号日</label>
+    <div class="chart-control-panel">
+      <div class="chart-control-title"><span>图表显示</span><span>拖动/缩放不会改变数据</span></div>
+      <div class="period-tabs" id="watch-periods">
+        <button type="button" data-preset="1m">1M</button>
+        <button type="button" data-preset="3m">3M</button>
+        <button type="button" data-preset="6m">6M</button>
+        <button type="button" data-preset="1y" class="active">1Y</button>
+        <button type="button" data-preset="3y">3Y</button>
+        <button type="button" data-preset="5y">5Y</button>
+      </div>
+      <div class="chart-toggle-row" id="watch-strategy-options">
+        <label class="chart-toggle"><input data-watch-condition="require_ma5_rising" type="checkbox">MA5向上</label>
+        <label class="chart-toggle"><input data-watch-condition="require_5ma_gt_20ma" type="checkbox">MA5&gt;MA20</label>
+        <label class="chart-toggle"><input data-watch-condition="b1_require_20ma_gt_50ma" type="checkbox">20MA&gt;50MA</label>
+      </div>
+      <div class="chart-toggle-row">
+        <label class="chart-toggle"><input id="watch-toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
+        <label class="chart-toggle"><input id="watch-toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
+        <label class="chart-toggle"><input id="watch-toggle-signal-markers" type="checkbox">B/S信号日</label>
+      </div>
     </div>
     <div class="watchlist-chart-shell">
       <div id="watchlist-chart" class="watchlist-chart watchlist-price-chart"></div>
@@ -7323,6 +7577,8 @@ document.addEventListener("click", event => {{
   const button = event.target.closest("[data-watch-symbol]");
   if (!button) return;
   event.preventDefault();
+  document.querySelectorAll("[data-watch-symbol]").forEach(item => item.classList.remove("is-active"));
+  button.classList.add("is-active");
   updateWatchDetail(button);
   loadWatchChart(button.dataset.watchSymbol, watchCurrentPreset);
 }});
@@ -7340,7 +7596,10 @@ watchStrategyOptions?.addEventListener("change", event => {{
 if (window.initializeResizableTables) initializeResizableTables(document);
 if (window.initializeSortableTables) initializeSortableTables(document);
 const initialWatchButton = document.querySelector(`[data-watch-symbol="${{watchInitialSymbol}}"]`) || document.querySelector("[data-watch-symbol]");
-if (initialWatchButton) updateWatchDetail(initialWatchButton);
+if (initialWatchButton) {{
+  initialWatchButton.classList.add("is-active");
+  updateWatchDetail(initialWatchButton);
+}}
 if (watchInitialSymbol) loadWatchChart(watchInitialSymbol, "1y");
 </script>
 """
