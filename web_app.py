@@ -393,6 +393,38 @@ def render_health_tag(label: str, value: str, cls: str = "condition-primary") ->
     return f'<span class="condition-tag {cls}">{html.escape(label)} {html.escape(value)}</span>'
 
 
+ICON_SVG: dict[str, str] = {
+    "home": '<path d="M3 10.8 12 3l9 7.8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/>',
+    "scan": '<path d="M4 7V4h3"/><path d="M17 4h3v3"/><path d="M20 17v3h-3"/><path d="M7 20H4v-3"/><path d="M8 12h8"/><path d="M12 8v8"/>',
+    "star": '<path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1L12 16.9l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9L12 3z"/>',
+    "chart": '<path d="M4 19h16"/><path d="M6 15l4-4 3 3 5-7"/><path d="M18 7h-4"/><path d="M18 7v4"/>',
+    "candles": '<path d="M7 4v16"/><path d="M17 4v16"/><rect x="5" y="8" width="4" height="7" rx="1"/><rect x="15" y="6" width="4" height="10" rx="1"/>',
+    "layers": '<path d="m12 3 9 5-9 5-9-5 9-5z"/><path d="m3 13 9 5 9-5"/>',
+    "download": '<path d="M12 3v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/>',
+    "trash": '<path d="M4 7h16"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M6 7l1 14h10l1-14"/><path d="M9 7V4h6v3"/>',
+    "plus": '<path d="M12 5v14"/><path d="M5 12h14"/>',
+    "play": '<path d="M8 5v14l11-7-11-7z"/>',
+    "pause": '<path d="M8 5v14"/><path d="M16 5v14"/>',
+    "refresh": '<path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v6h-6"/>',
+    "stop": '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+    "back": '<path d="M19 12H5"/><path d="m12 5-7 7 7 7"/>',
+    "check": '<path d="m5 12 4 4L19 6"/>',
+    "alert": '<path d="M12 3 2.8 19h18.4L12 3z"/><path d="M12 8v5"/><path d="M12 17h.01"/>',
+    "globe": '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18"/><path d="M12 3a14 14 0 0 0 0 18"/>',
+}
+
+
+def icon_svg(name: str, cls: str = "icon") -> str:
+    body = ICON_SVG.get(name, "")
+    if not body:
+        return ""
+    return f'<svg class="{html.escape(cls)}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">{body}</svg>'
+
+
+def icon_label(name: str, label: str, cls: str = "icon") -> str:
+    return f'{icon_svg(name, cls)}<span>{html.escape(label)}</span>'
+
+
 def render_data_health_panel(market: str) -> str:
     if market == "cn":
         packages = [("pytdx", "pytdx"), ("yfinance备用", "yfinance")]
@@ -520,10 +552,24 @@ def schedule_market_environment_refresh(symbols: list[str], end: date) -> None:
     threading.Thread(target=refresh, daemon=True).start()
 
 
+def ensure_market_environment_cache(symbols: list[str], end: date, min_bars: int = 50) -> None:
+    start = end - timedelta(days=180)
+    for symbol in symbols:
+        try:
+            cached = [bar for bar in read_price_cache(symbol) if date.fromisoformat(bar.date) <= end]
+            if len(cached) >= min_bars and max((bar.date for bar in cached), default="") >= end.isoformat():
+                continue
+            fetch_bars("yfinance", symbol, start.isoformat(), end.isoformat(), "qfq", None)
+        except Exception:
+            continue
+
+
 def market_environment(symbol: str = "QQQ") -> dict[str, object]:
     end = default_scan_end_date()
     macro = macro_risk_state(date.today())
-    schedule_market_environment_refresh([symbol, "^VIX"], end)
+    env_symbols = [symbol, "^VIX"]
+    ensure_market_environment_cache(env_symbols, end)
+    schedule_market_environment_refresh(env_symbols, end)
     try:
         bars = [bar for bar in read_price_cache(symbol) if date.fromisoformat(bar.date) <= end]
         bars = bars[-120:]
@@ -616,6 +662,8 @@ def macro_day_label(event_date: date, today: date) -> str:
 def render_market_environment_bar(env: dict[str, object] | None = None) -> str:
     env = env or market_environment()
     tone = html.escape(str(env.get("tone", "neutral")))
+    tone_name = str(env.get("tone", "neutral"))
+    state_icon = "check" if tone_name == "good" else "alert" if tone_name in {"bad", "warn"} else "globe"
     macro = env.get("macro") if isinstance(env.get("macro"), dict) else {}
     macro_tone = html.escape(str(macro.get("tone", "neutral")))
     macro_events = macro.get("events", [])
@@ -641,14 +689,14 @@ def render_market_environment_bar(env: dict[str, object] | None = None) -> str:
 <section class="market-bar market-{tone}">
   <div class="market-main">
     <div>
-      <strong>{html.escape(str(env.get("state", "Unavailable")))}</strong>
+      <strong>{icon_svg(state_icon)}{html.escape(str(env.get("state", "Unavailable")))}</strong>
       <span>{html.escape(str(env.get("symbol", "QQQ")))} {html.escape(str(env.get("date", "-")))}</span>
     </div>
     <p>{html.escape(str(env.get("symbol", "QQQ")))} 距20MA {float(env.get("dist20", 0.0)):.2f}% / 距50MA {float(env.get("dist50", 0.0)):.2f}% / 20MA {html.escape(str(env.get("ma20_direction", "-")))} / VIX {float(env.get("vix", 0.0)):.1f} {html.escape(str(env.get("vix_label", "")))}。{html.escape(str(env.get("message", "")))}</p>
   </div>
   <div class="macro-box macro-tone-{macro_tone}">
     <div>
-      <strong>{html.escape(str(macro.get("label", "宏观日历")))}</strong>
+      <strong>{icon_svg("alert" if macro_tone in {"bad", "warn"} else "check")}{html.escape(str(macro.get("label", "宏观日历")))}</strong>
       <span>{html.escape(str(macro.get("message", "")))}</span>
     </div>
     <div class="macro-events">{"".join(event_chips)}</div>
@@ -1276,12 +1324,12 @@ def page_shell(content: str, active: str = "backtest", market: str = "us") -> by
     cn_market_active = " active" if market == "cn" else ""
     subnav = ""
     if market in ("us", "cn"):
-        batch_link = f'<a class="{batch_active}" href="{prefix}/batch">批量回测</a>' if market == "us" else ""
+        batch_link = f'<a class="{batch_active}" href="{prefix}/batch">{icon_label("layers", "批量")}</a>' if market == "us" else ""
         subnav = f"""
     <nav class="tabs" aria-label="市场功能">
-      <a class="{scanner_active}" href="{prefix}/scanner">选股器</a>
-      <a class="{watchlist_active}" href="{prefix}/watchlist">自选池</a>
-      <a class="{backtest_active}" href="{prefix}/backtest">回测</a>
+      <a class="{scanner_active}" href="{prefix}/scanner">{icon_label("scan", "选股")}</a>
+      <a class="{watchlist_active}" href="{prefix}/watchlist">{icon_label("star", "自选")}</a>
+      <a class="{backtest_active}" href="{prefix}/backtest">{icon_label("chart", "回测")}</a>
       {batch_link}
     </nav>"""
     text = f"""<!doctype html>
@@ -1322,20 +1370,25 @@ def page_shell(content: str, active: str = "backtest", market: str = "us") -> by
 html {{ color-scheme: light; }}
 body {{ margin: 0; background: var(--bg); color: var(--text); font-family: "Fira Sans", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", Arial, sans-serif; font-size: 14px; line-height: 1.45; }}
 main {{ width: 100%; max-width: 1680px; margin: 0 auto; padding: 0 16px 24px; }}
+.icon {{ width: 14px; height: 14px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }}
+.icon-sm {{ width: 12px; height: 12px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }}
+.icon-lg {{ width: 16px; height: 16px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }}
+.nav-icon-label, button > span, .btn > span, .mini-action > span, .delete-link > span {{ display: inline-flex; align-items: center; gap: 5px; min-width: 0; }}
 .app-topbar {{ position: sticky; top: 0; z-index: 20; display: flex; justify-content: space-between; align-items: center; gap: 16px; height: 54px; margin: 0 -16px 16px; padding: 0 18px; background: linear-gradient(90deg, #0f172a, #172554); border-bottom: 1px solid rgba(219, 234, 254, .18); box-shadow: 0 1px 3px rgba(15, 23, 42, .22); }}
-.brand {{ display: flex; flex-direction: column; line-height: 1.1; color: #f8fafc; font-weight: 800; letter-spacing: 0; }}
+.brand {{ display: flex; flex-direction: row; align-items: center; gap: 8px; line-height: 1.1; color: #f8fafc; font-weight: 800; letter-spacing: 0; }}
+.brand-text {{ display: flex; flex-direction: column; }}
 .brand span {{ color: #9ca3af; font-size: 11px; font-weight: 600; margin-top: 3px; }}
 .topbar-actions {{ display: flex; align-items: center; gap: 14px; min-width: 0; }}
 .market-switch {{ display: flex; gap: 2px; padding: 2px; border: 1px solid #2a2e39; border-radius: 6px; background: #0f131d; }}
-.market-switch a {{ padding: 6px 10px; border-radius: 4px; color: #d1d4dc; text-decoration: none; font-size: 12px; font-weight: 900; white-space: nowrap; }}
+.market-switch a {{ display: inline-flex; align-items: center; gap: 5px; padding: 6px 10px; border-radius: 4px; color: #d1d4dc; text-decoration: none; font-size: 12px; font-weight: 900; white-space: nowrap; }}
 .market-switch a:hover {{ background: #1f2430; color: #fff; }}
 .market-switch a.active {{ background: #2962ff; color: #fff; }}
 .tabs {{ display: flex; gap: 2px; margin: 0; }}
-.tabs a {{ padding: 8px 12px; border: 1px solid transparent; border-radius: 4px; color: #d1d4dc; text-decoration: none; font-size: 13px; font-weight: 700; }}
+.tabs a {{ display: inline-flex; align-items: center; gap: 5px; padding: 8px 12px; border: 1px solid transparent; border-radius: 4px; color: #d1d4dc; text-decoration: none; font-size: 13px; font-weight: 700; }}
 .tabs a:hover {{ background: #1f2430; color: #fff; }}
 .tabs a.active {{ background: #2962ff; color: #fff; border-color: #2962ff; }}
-h1 {{ margin: 0 0 6px; font-size: 22px; line-height: 1.25; letter-spacing: 0; color: var(--text); }}
-h2 {{ margin: 18px 0 10px; font-size: 16px; }}
+h1 {{ margin: 0 0 5px; font-size: 20px; line-height: 1.22; letter-spacing: 0; color: var(--text); font-weight: 900; }}
+h2 {{ margin: 16px 0 9px; font-size: 15px; font-weight: 900; }}
 .hint {{ color: var(--text-muted); font-size: 13px; margin: 0 0 14px; line-height: 1.55; }}
 .form {{ display: grid; grid-template-columns: repeat(8, minmax(116px, 1fr)); gap: 10px; align-items: end; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 12px; margin-bottom: 14px; box-shadow: var(--shadow-sm); }}
 label {{ display: block; font-size: 12px; color: var(--text-muted); font-weight: 700; }}
@@ -1382,12 +1435,24 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .page-head {{ display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 12px; }}
 .mode-pill {{ background: #0f172a; color: #f8fafc; border-radius: 999px; padding: 6px 10px; font-size: 12px; white-space: nowrap; box-shadow: var(--shadow-sm); }}
 .status-strip {{ display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 8px; margin: 0 0 14px; }}
+.tv-workbench {{ padding: 0; overflow: hidden; background: #fff; }}
+.tv-workbench-head {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 11px; border-bottom: 1px solid #e3e7ee; background: #f8fafc; }}
+.tv-workbench-title {{ display: flex; align-items: baseline; gap: 10px; min-width: 0; }}
+.tv-workbench-title strong {{ font-size: 14px; color: #131722; }}
+.tv-workbench-title span {{ color: #64748b; font-size: 12px; white-space: nowrap; }}
+.tv-workbench-actions {{ display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; align-items: center; }}
+.tv-workbench-actions .links {{ margin: 0; }}
+.tv-summary-strip {{ display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px; margin: 0; border-bottom: 1px solid #e3e7ee; background: #fff; }}
+.tv-summary-strip .stat-card {{ display: inline-flex; align-items: center; gap: 7px; min-height: 28px; padding: 4px 8px; border-radius: 4px; box-shadow: none; background: #f8fafc; }}
+.tv-summary-strip .stat-label {{ margin: 0; font-size: 10px; }}
+.tv-summary-strip .stat-value {{ font-size: 13px; }}
+.tv-workbench-body {{ padding: 10px; }}
 .stat-card {{ background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 10px 12px; box-shadow: var(--shadow-sm); }}
 .stat-label {{ color: var(--text-muted); font-size: 11px; font-weight: 800; text-transform: uppercase; margin-bottom: 6px; }}
 .stat-value {{ color: var(--text); font-size: 18px; font-weight: 900; font-variant-numeric: tabular-nums; }}
 .market-bar {{ display: grid; grid-template-columns: minmax(280px, .9fr) minmax(360px, 1.3fr); align-items: start; gap: 14px; min-width: 0; border: 1px solid #d6dbe3; border-left-width: 4px; border-radius: 6px; background: #fff; padding: 10px 12px; margin: 0 0 14px; box-shadow: 0 1px 2px rgba(19, 23, 34, .04); }}
 .market-bar .market-main > div, .macro-box > div:first-child {{ display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }}
-.market-bar strong {{ font-size: 15px; }}
+.market-bar strong {{ display: inline-flex; align-items: center; gap: 5px; font-size: 15px; }}
 .market-bar span, .market-bar p {{ color: #5d6675; font-size: 13px; margin: 0; line-height: 1.45; }}
 .market-good {{ border-left-color: #089981; }}
 .market-warn {{ border-left-color: #f59e0b; }}
@@ -1442,20 +1507,24 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .condition-note {{ margin-top: 10px; color: #64748b; font-size: 12px; line-height: 1.5; }}
 .risk-note {{ display: flex; align-items: flex-start; gap: 8px; margin: 10px 14px 0; padding: 9px 10px; border: 1px solid #fed7aa; background: #fff7ed; color: #9a4f00; border-radius: 6px; font-size: 12px; line-height: 1.45; font-weight: 700; }}
 .risk-note strong {{ color: #7c3f00; }}
-.candidate-decision-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin: 0 0 12px; }}
-.candidate-card {{ border: 1px solid var(--border); border-radius: var(--radius-lg); background: #fff; padding: 11px; box-shadow: var(--shadow-sm); }}
-.candidate-card:hover {{ border-color: var(--border-strong); box-shadow: 0 6px 18px rgba(15, 23, 42, .06); }}
-.candidate-card-head {{ display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; margin-bottom: 8px; }}
-.candidate-symbol {{ display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; }}
-.candidate-symbol strong {{ font-size: 16px; }}
-.candidate-symbol span {{ color: var(--text-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }}
-.candidate-card-meta {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 8px 0; }}
-.candidate-card-meta div {{ border: 1px solid #e3e7ee; border-radius: var(--radius-md); background: #f8fafc; padding: 6px 7px; min-width: 0; }}
-.candidate-card-meta span {{ display: block; color: var(--text-muted); font-size: 11px; font-weight: 800; margin-bottom: 3px; }}
-.candidate-card-meta b {{ display: block; color: var(--text); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-.candidate-card-actions {{ display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin-top: 9px; }}
-.detail-disclosure {{ margin: 0 0 12px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: rgba(255,255,255,.7); }}
-.detail-disclosure summary {{ cursor: pointer; padding: 8px 10px; color: var(--text-muted); font-size: 12px; font-weight: 900; }}
+.candidate-decision-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; margin: 0 0 10px; }}
+.candidate-card {{ border: 1px solid var(--border); border-radius: 6px; background: #fff; padding: 8px 9px; box-shadow: none; }}
+.candidate-card:hover {{ border-color: var(--border-strong); box-shadow: 0 4px 12px rgba(15, 23, 42, .05); }}
+.candidate-card-head {{ display: flex; justify-content: space-between; gap: 8px; align-items: center; margin-bottom: 5px; }}
+.candidate-symbol {{ display: inline-flex; align-items: baseline; gap: 5px; min-width: 0; }}
+.candidate-symbol strong {{ font-size: 14px; }}
+.candidate-symbol span {{ color: var(--text-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 130px; }}
+.candidate-card-meta {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; margin: 5px 0; }}
+.candidate-card-meta div {{ border: 1px solid #e3e7ee; border-radius: 5px; background: #f8fafc; padding: 4px 5px; min-width: 0; }}
+.candidate-card-meta span {{ display: block; color: var(--text-muted); font-size: 10px; font-weight: 800; margin-bottom: 1px; }}
+.candidate-card-meta b {{ display: block; color: var(--text); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.candidate-card .condition-tags {{ gap: 4px; }}
+.candidate-card .condition-tag {{ padding: 2px 5px; font-size: 10px; border-radius: 4px; }}
+.candidate-card-actions {{ display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 6px; }}
+.candidate-card-actions .mini-action {{ min-height: 24px; padding: 3px 7px; font-size: 11px; }}
+.candidate-card-actions .hint {{ font-size: 11px; }}
+.detail-disclosure {{ margin: 10px 0 0; border: 1px solid var(--border); border-radius: 6px; background: rgba(255,255,255,.7); }}
+.detail-disclosure summary {{ cursor: pointer; padding: 7px 9px; color: var(--text-muted); font-size: 12px; font-weight: 900; }}
 .detail-disclosure[open] summary {{ border-bottom: 1px solid var(--border); }}
 .inline-actions {{ display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }}
 .delete-form {{ display: inline; margin: 0; }}
@@ -1463,6 +1532,9 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .delete-link:hover {{ background: #fff5f6; border-color: #f23645; color: #b42332; text-decoration: none; filter: none; }}
 .mini-action {{ min-height: 26px; padding: 4px 8px; font-size: 12px; border-color: #c7ccd5; background: #fff; color: #2962ff; }}
 .mini-action.added {{ color: #089981; border-color: #9fd8cc; background: rgba(8,153,129,.08); }}
+.icon-action {{ padding-left: 8px; padding-right: 9px; }}
+.delete-link .icon, .delete-link .icon-sm {{ color: #d12030; }}
+.mini-action .icon, .btn-secondary .icon, button.secondary .icon {{ color: currentColor; }}
 .rating {{ display: inline-block; min-width: 64px; text-align: center; border-radius: 4px; padding: 3px 8px; font-weight: 800; font-size: 12px; }}
 .rating-Strong {{ color: #067a6b; background: rgba(8, 153, 129, .12); }}
 .rating-Medium {{ color: #b26b00; background: rgba(245, 158, 11, .16); }}
@@ -1514,10 +1586,17 @@ button.danger:hover, .btn-danger:hover {{ background: #fff5f6; border-color: #f2
 .chart-control-title {{ display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--text-muted); font-size: 12px; font-weight: 900; margin-bottom: 8px; }}
 .chart-control-title span:last-child {{ color: var(--text-subtle); font-weight: 800; }}
 .watch-detail-grid {{ display: grid; grid-template-columns: repeat(4, minmax(110px, 1fr)); gap: 8px; margin: 10px 0 12px; }}
-.watch-detail-item {{ border: 1px solid #e3e7ee; background: #f8fafc; border-radius: 6px; padding: 8px 9px; }}
-.watch-detail-item span {{ display: block; color: #64748b; font-size: 11px; font-weight: 800; margin-bottom: 4px; }}
-.watch-detail-item strong {{ font-size: 13px; }}
+.watch-detail-item {{ border: 1px solid #e3e7ee; background: #f8fafc; border-radius: 6px; padding: 6px 8px; min-width: 0; }}
+.watch-detail-item span {{ display: block; color: #64748b; font-size: 10px; font-weight: 900; margin-bottom: 2px; }}
+.watch-detail-item strong {{ display: block; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.watchlist-page .page-head {{ margin-bottom: 8px; }}
+.watchlist-page .form {{ margin-bottom: 10px; }}
+.watchlist-page .status-strip {{ margin-bottom: 10px; }}
+.watchlist-page .chart-control-panel {{ padding: 8px; }}
 .divergence-panel {{ border: 1px solid #e3e7ee; background: #f8fafc; border-radius: 6px; padding: 10px; margin: 0 0 12px; }}
+.divergence-panel summary {{ cursor: pointer; list-style-position: inside; }}
+.divergence-panel:not([open]) {{ padding: 8px 10px; }}
+.divergence-panel:not([open]) .divergence-head {{ margin-bottom: 0; }}
 .divergence-head {{ display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 8px; }}
 .divergence-head strong {{ font-size: 14px; }}
 .divergence-form {{ display: grid; grid-template-columns: 130px 110px 140px 100px minmax(160px, 1fr) auto; gap: 8px; align-items: end; }}
@@ -1611,12 +1690,12 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(4
 </head>
 <body><main>
 <header class="app-topbar">
-  <div class="brand">MA5 Strategy Lab<span>选股 | 自选 | 回测</span></div>
+  <div class="brand">{icon_svg("candles", "icon-lg")}<div class="brand-text">MA5 Strategy Lab<span>选股 | 自选 | 回测</span></div></div>
   <div class="topbar-actions">
     <nav class="market-switch" aria-label="一级菜单">
-      <a class="{action_active}" href="/">行动台</a>
-      <a class="{us_market_active}" href="/us/scanner">美股</a>
-      <a class="{cn_market_active}" href="/cn/scanner">A股</a>
+      <a class="{action_active}" href="/">{icon_label("home", "行动台")}</a>
+      <a class="{us_market_active}" href="/us/scanner">{icon_label("globe", "美股")}</a>
+      <a class="{cn_market_active}" href="/cn/scanner">{icon_label("candles", "A股")}</a>
     </nav>
     {subnav}
   </div>
@@ -1695,7 +1774,7 @@ window.initializeSecondaryFilters = function(root = document) {{
     if (!panel || !panel.matches("[data-secondary-filter-panel]") || panel.dataset.secondaryReady === "1") return;
     panel.dataset.secondaryReady = "1";
     const tableRows = Array.from(table.querySelectorAll("[data-secondary-row]"));
-    const cardGrid = panel.nextElementSibling?.matches("[data-secondary-card-grid]") ? panel.nextElementSibling : null;
+    const cardGrid = panel.parentElement?.querySelector("[data-secondary-card-grid]") || null;
     const cardRows = cardGrid ? Array.from(cardGrid.querySelectorAll("[data-secondary-row]")) : [];
     const rows = [...tableRows, ...cardRows];
     const filters = Array.from(panel.querySelectorAll("[data-secondary-filter]"));
@@ -1945,7 +2024,7 @@ def render_backtest_form(params: dict[str, list[str]] | None = None) -> str:
   </div>
     </div>
   </details>
-  <button type="submit">运行回测</button>
+  <button type="submit">{icon_label("play", "运行")}</button>
 </form>
 <script>
 const preset = document.getElementById("preset");
@@ -2042,7 +2121,7 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
         return f"""
       <form action="/cache/clear" method="get" onsubmit="return confirm('确认清理{html.escape(label)}？自选池不会被删除，但下次打开会重新拉取相关数据。');">
         <input type="hidden" name="area" value="{html.escape(area)}">
-        <button class="{cls}" type="submit">{html.escape(label)}</button>
+        <button class="{cls}" type="submit">{icon_label("trash" if danger else "refresh", label)}</button>
       </form>"""
 
     us_company_profile_html = f"""
@@ -2059,7 +2138,7 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
         <p class="hint" style="margin:6px 0 0;">只补全当前选股结果里缺失的信息；有 FMP_API_KEY 时会补英文公司名、行业、官网和业务简介。</p>
       </div>
       <form action="/us/company-profiles/update" method="get" onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='更新中...';">
-        <button class="secondary" type="submit">更新当前结果公司信息</button>
+        <button class="secondary" type="submit">{icon_label("refresh", "更新公司信息")}</button>
       </form>
     </div>
     <script>
@@ -2136,10 +2215,10 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
       <div class="scan-facts">{today_focus_html}</div>
     </div>
     <div class="quick-actions">
-      <a class="btn btn-secondary" href="/us/scan/latest">美股候选</a>
-      <a class="btn btn-secondary" href="/cn/scan/latest">A股候选</a>
-      <a class="btn btn-secondary" href="/us/watchlist">美股自选</a>
-      <a class="btn btn-secondary" href="/cn/watchlist">A股自选</a>
+      <a class="btn btn-secondary icon-action" href="/us/scan/latest">{icon_label("scan", "美股候选")}</a>
+      <a class="btn btn-secondary icon-action" href="/cn/scan/latest">{icon_label("scan", "A股候选")}</a>
+      <a class="btn btn-secondary icon-action" href="/us/watchlist">{icon_label("star", "美股自选")}</a>
+      <a class="btn btn-secondary icon-action" href="/cn/watchlist">{icon_label("star", "A股自选")}</a>
     </div>
   </div>
 </section>
@@ -2150,7 +2229,7 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
         <h2>美股工作区</h2>
         <div class="panel-kicker">选股结果 + 公司信息 + 回测</div>
       </div>
-      <a class="btn btn-secondary btn-small" href="/us/scanner">进入</a>
+      <a class="btn btn-secondary btn-small icon-action" href="/us/scanner">{icon_label("scan", "进入")}</a>
     </div>
     <section class="status-strip">
       <div class="stat-card"><div class="stat-label">信号日</div><div class="stat-value">{html.escape(us_signal)}</div></div>
@@ -2159,10 +2238,10 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
       <div class="stat-card"><div class="stat-label">自选</div><div class="stat-value">{us_watch_count}</div></div>
     </section>
     <div class="quick-actions">
-      <a class="btn btn-secondary" href="/us/scanner">选股器</a>
-      <a class="btn btn-secondary" href="/us/watchlist">自选池</a>
-      <a class="btn btn-secondary" href="/us/backtest">回测</a>
-      <a class="btn btn-secondary" href="/us/batch">批量回测</a>
+      <a class="btn btn-secondary icon-action" href="/us/scanner">{icon_label("scan", "选股")}</a>
+      <a class="btn btn-secondary icon-action" href="/us/watchlist">{icon_label("star", "自选")}</a>
+      <a class="btn btn-secondary icon-action" href="/us/backtest">{icon_label("chart", "回测")}</a>
+      <a class="btn btn-secondary icon-action" href="/us/batch">{icon_label("layers", "批量")}</a>
     </div>
     {us_company_profile_html}
   </div>
@@ -2172,7 +2251,7 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
         <h2>A股工作区</h2>
         <div class="panel-kicker">扫描候选 + 首字母检索 + A股图表</div>
       </div>
-      <a class="btn btn-secondary btn-small" href="/cn/scanner">进入</a>
+      <a class="btn btn-secondary btn-small icon-action" href="/cn/scanner">{icon_label("scan", "进入")}</a>
     </div>
     <section class="status-strip">
       <div class="stat-card"><div class="stat-label">信号日</div><div class="stat-value">{html.escape(cn_signal)}</div></div>
@@ -2181,9 +2260,9 @@ def render_action_dashboard(params: dict[str, list[str]] | None = None) -> str:
       <div class="stat-card"><div class="stat-label">自选</div><div class="stat-value">{cn_watch_count}</div></div>
     </section>
     <div class="quick-actions">
-      <a class="btn btn-secondary" href="/cn/scanner">选股器</a>
-      <a class="btn btn-secondary" href="/cn/watchlist">自选池</a>
-      <a class="btn btn-secondary" href="/cn/backtest">回测</a>
+      <a class="btn btn-secondary icon-action" href="/cn/scanner">{icon_label("scan", "选股")}</a>
+      <a class="btn btn-secondary icon-action" href="/cn/watchlist">{icon_label("star", "自选")}</a>
+      <a class="btn btn-secondary icon-action" href="/cn/backtest">{icon_label("chart", "回测")}</a>
     </div>
   </div>
 </section>
@@ -4336,7 +4415,7 @@ def render_batch_form(params: dict[str, list[str]] | None = None) -> str:
   <label>放量下跌倍数<input name="weak_volume_down_multiplier" value="{value("weak_volume_down_multiplier", "1.5")}"></label>
   <label>事件低点窗口<input name="weak_event_low_lookback" value="{value("weak_event_low_lookback", "27")}"></label>
   <label>反抽距离 %<input name="reentry_pct" value="{value("reentry_pct", "4.5")}"></label>
-  <button type="submit">运行批量回测</button>
+  <button type="submit">{icon_label("play", "运行")}</button>
 </form>
 <script>
 (function() {{
@@ -6207,10 +6286,10 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
       </div>
     </div>
     <div class="inline-actions links">
-      <a href="/scan/latest">查看当前结果</a>
-      <a href="{html.escape(str(latest_scan.get("csv", "#")))}" target="_blank">下载 CSV</a>
+      <a href="/scan/latest">{icon_label("chart", "结果")}</a>
+      <a href="{html.escape(str(latest_scan.get("csv", "#")))}" target="_blank">{icon_label("download", "CSV")}</a>
       <form class="delete-form" action="/scan/delete" method="get" onsubmit="return confirm('确认删除当前扫描结果？删除后页面将恢复为未扫描状态。');">
-        <button type="submit" class="delete-link">删除结果</button>
+        <button type="submit" class="delete-link">{icon_label("trash", "删除")}</button>
       </form>
     </div>
   </div>
@@ -6312,16 +6391,16 @@ def render_scanner_form(params: dict[str, list[str]] | None = None) -> str:
     <input type="hidden" name="secondary_above_ma5_3d" value="0">
     <label class="checkbox-label"><input type="checkbox" name="secondary_above_ma5_3d" value="1"{secondary_above_ma5_checked}> 连续三天&gt;MA5</label>
   </div>
-  <button type="submit">开始选股</button>
+  <button type="submit">{icon_label("scan", "开始")}</button>
 </form>
 <section class="progress-box" id="scan-progress">
   <div class="progress-meta" id="scan-status">准备开始</div>
   <div class="progress-track"><div class="progress-bar" id="scan-bar"></div></div>
   <div class="progress-meta" id="scan-detail"></div>
   <div class="progress-actions">
-    <button type="button" class="secondary" id="pause-scan" hidden>暂停</button>
-    <button type="button" class="success" id="resume-scan" hidden>继续</button>
-    <button type="button" class="danger" id="stop-scan" hidden>终止</button>
+    <button type="button" class="secondary icon-action" id="pause-scan" hidden>{icon_label("pause", "暂停")}</button>
+    <button type="button" class="success icon-action" id="resume-scan" hidden>{icon_label("play", "继续")}</button>
+    <button type="button" class="danger icon-action" id="stop-scan" hidden>{icon_label("stop", "终止")}</button>
   </div>
 </section>
 <section id="scan-result"></section>
@@ -6626,7 +6705,7 @@ def render_candidate_table(rows: list[SignalResult], params: dict[str, list[str]
         rendered_rows.append(
             f'<tr data-secondary-row {filter_attrs}>'
             f'<td class="action-cell">'
-            f'<button type="button" class="mini-action" data-add-watchlist="{html.escape(r.symbol)}" data-watch-note="{html.escape(watch_note)}">加自选</button>'
+            f'<button type="button" class="mini-action icon-action" data-add-watchlist="{html.escape(r.symbol)}" data-watch-note="{html.escape(watch_note)}">{icon_label("star", "自选")}</button>'
             f'</td>'
             f'<td><button type="button" class="symbol-button" data-candidate-symbol="{html.escape(r.symbol)}">{html.escape(r.symbol)}</button></td>'
             f'<td title="{html.escape(company_title)}">{html.escape(company_display_name)}</td>'
@@ -6658,8 +6737,8 @@ def render_candidate_table(rows: list[SignalResult], params: dict[str, list[str]
             f'</div>'
             f'<div class="condition-tags">{reasons_html}</div>'
             f'<div class="candidate-card-actions">'
-            f'<button type="button" class="mini-action" data-add-watchlist="{html.escape(r.symbol)}" data-watch-note="{html.escape(watch_note)}">加自选</button>'
-            f'<button type="button" class="mini-action" data-candidate-symbol="{html.escape(r.symbol)}">看图</button>'
+            f'<button type="button" class="mini-action icon-action" data-add-watchlist="{html.escape(r.symbol)}" data-watch-note="{html.escape(watch_note)}">{icon_label("star", "自选")}</button>'
+            f'<button type="button" class="mini-action icon-action" data-candidate-symbol="{html.escape(r.symbol)}">{icon_label("chart", "图")}</button>'
             f'<span class="hint" style="margin:0;">信号日 {html.escape(r.signal_date)} · 收盘 {r.close:.2f}</span>'
             f'</div>'
             f'</article>'
@@ -6670,17 +6749,17 @@ def render_candidate_table(rows: list[SignalResult], params: dict[str, list[str]
     card_rows = "\n".join(rendered_cards) if rendered_cards else '<p class="hint">No visible candidates.</p>'
     return f"""
 {render_result_filter_panel(params, len(rows))}
-<section class="candidate-decision-grid" data-secondary-card-grid>
-{card_rows}
-</section>
+<div class="table-wrap">
+<table class="resizable-table" data-secondary-filter-table>
+  <thead><tr><th>操作</th><th>代码</th><th>公司</th><th>板块</th><th>行业</th><th>信号日</th><th>B点</th><th>技术分</th><th>入选原因</th><th>财报</th><th>收盘</th><th>量比</th><th>市值$B</th></tr></thead>
+  <tbody>{table_rows}</tbody>
+</table>
+</div>
 <details class="detail-disclosure">
-  <summary>查看明细表格</summary>
-  <div class="table-wrap">
-  <table class="resizable-table" data-secondary-filter-table>
-    <thead><tr><th>操作</th><th>代码</th><th>公司</th><th>板块</th><th>行业</th><th>信号日</th><th>B点</th><th>技术分</th><th>入选原因</th><th>财报</th><th>收盘</th><th>量比</th><th>市值$B</th></tr></thead>
-    <tbody>{table_rows}</tbody>
-  </table>
-  </div>
+  <summary>卡片视图</summary>
+  <section class="candidate-decision-grid" data-secondary-card-grid>
+  {card_rows}
+  </section>
 </details>
 """
 
@@ -6771,13 +6850,13 @@ def render_scan_summary(
     signal_date = date.fromisoformat(end)
     plan_date = next_market_weekday(signal_date)
     return f"""
-<section class="status-strip">
+<section class="status-strip tv-summary-strip">
   <div class="stat-card"><div class="stat-label">信号日期</div><div class="stat-value">{html.escape(end)}</div></div>
   <div class="stat-card"><div class="stat-label">计划买入日</div><div class="stat-value">{plan_date.isoformat()}</div></div>
   <div class="stat-card"><div class="stat-label">扫描 / 技术候选</div><div class="stat-value">{symbols_count} / {technical_count}</div></div>
   <div class="stat-card"><div class="stat-label">显示 / 失败</div><div class="stat-value">{visible_count} / {errors_count}</div></div>
 </section>
-<p class="hint">股票池：{html.escape(source)}。这里只使用已完成的日 K 线；信号日期出现 B 点，代表策略可在下一交易日开盘执行。</p>
+<p class="hint" style="margin:8px 10px 0;">股票池：{html.escape(source)}。这里只使用已完成的日 K 线；信号日期出现 B 点，代表策略可在下一交易日开盘执行。</p>
 """
 
 
@@ -6794,7 +6873,7 @@ def latest_scan_to_html() -> str:
 </section>
 <section class="result">
   <div class="inline-actions links">
-    <a href="/us/scanner">返回选股器</a>
+    <a href="/us/scanner">{icon_label("back", "返回选股")}</a>
   </div>
 </section>
 """
@@ -6823,20 +6902,26 @@ def latest_scan_to_html() -> str:
   </div>
   <div class="mode-pill">Daily Close</div>
 </section>
-<section class="result">
-  <div class="toolbar">
-    <div class="inline-actions links">
-      <a href="/us/scanner">返回选股器</a>
-      <a href="{report}" target="_blank">打开扫描报告</a>
-      <a href="{csv_url}" target="_blank">下载 CSV</a>
+<section class="result tv-workbench">
+  <div class="tv-workbench-head">
+    <div class="tv-workbench-title">
+      <strong>候选列表</strong>
+      <span>{len(candidates)} symbols · Daily Close</span>
+    </div>
+    <div class="tv-workbench-actions inline-actions links">
+      <a href="/us/scanner">{icon_label("back", "选股")}</a>
+      <a href="{report}" target="_blank">{icon_label("chart", "报告")}</a>
+      <a href="{csv_url}" target="_blank">{icon_label("download", "CSV")}</a>
       <form class="delete-form" action="/scan/delete" method="get" onsubmit="return confirm('确认删除当前扫描结果？删除后页面将恢复为未扫描状态。');">
-        <button type="submit" class="delete-link">删除结果</button>
+        <button type="submit" class="delete-link">{icon_label("trash", "删除")}</button>
       </form>
     </div>
   </div>
   {render_scan_summary(source, int(summary.get("scanned", 0)), int(summary.get("technical_candidates", 0)), int(summary.get("visible_candidates", len(candidates))), int(summary.get("failed", len(errors))), end)}
-  {render_candidate_table(candidates, saved_params)}
-  {render_failure_table(errors)}
+  <div class="tv-workbench-body">
+    {render_candidate_table(candidates, saved_params)}
+    {render_failure_table(errors)}
+  </div>
 </section>
 {render_candidate_table_script(saved_params)}
 <script>
@@ -6954,10 +7039,10 @@ def run_scanner(params: dict[str, list[str]]) -> str:
 <section class="result">
   <div class="toolbar">
     <div class="inline-actions links">
-      <a href="/reports/{quote(html_path.name)}" target="_blank">打开扫描报告</a>
-      <a href="/reports/{quote(csv_path.name)}" target="_blank">下载 CSV</a>
+      <a href="/reports/{quote(html_path.name)}" target="_blank">{icon_label("chart", "报告")}</a>
+      <a href="/reports/{quote(csv_path.name)}" target="_blank">{icon_label("download", "CSV")}</a>
       <form class="delete-form" action="/scan/delete" method="get" onsubmit="return confirm('确认删除当前扫描结果？删除后页面将恢复为未扫描状态。');">
-        <button type="submit" class="delete-link">删除结果</button>
+        <button type="submit" class="delete-link">{icon_label("trash", "删除")}</button>
       </form>
     </div>
   </div>
@@ -7245,7 +7330,7 @@ def watchlist_row(item: dict[str, str], metadata: dict[str, object] | None) -> s
         '<td class="watch-row-cell">'
         '<div class="watch-row-head">'
         f'<button type="button" class="watch-row-button" data-watch-symbol="{html.escape(symbol)}" {data_attrs}><span class="watch-symbol-line"><span>{html.escape(symbol)}</span><span>{html.escape(change_pct)}</span></span><span class="watch-meta-line">{html.escape(display_company)} · {html.escape(group)}</span></button>'
-        f'<span class="watch-row-actions"><a class="delete-link" href="/watchlist/delete?symbol={quote(symbol)}" onclick="return confirm(\'确认从自选池删除 {html.escape(symbol)}？\');">删除</a></span>'
+        f'<span class="watch-row-actions"><a class="delete-link" href="/watchlist/delete?symbol={quote(symbol)}" onclick="return confirm(\'确认从自选池删除 {html.escape(symbol)}？\');">{icon_label("trash", "删")}</a></span>'
         "</div>"
         "</td>"
         f"<td>{latest_close}</td>"
@@ -7268,32 +7353,30 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
     default_event_date = default_scan_end_date().isoformat()
     return f"""
 <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+<div class="watchlist-page">
 <section class="page-head">
   <div>
     <h1>自选池</h1>
-    <p class="hint">维护你关注的股票。点击 Symbol 后在右侧查看可缩放、可拖动的日 K 图；图表数据通过 JSON 返回，不生成报告文件。</p>
   </div>
   <div class="mode-pill">Watchlist | Daily</div>
 </section>
 <form class="form" action="/watchlist/add" method="get">
-  <label>添加股票代码<input name="symbol" value="{html.escape(field(params, "symbol", ""))}" placeholder="NVDA"></label>
+  <label>代码<input name="symbol" value="{html.escape(field(params, "symbol", ""))}" placeholder="NVDA"></label>
   <label>分组<input name="group" value="{html.escape(field(params, "group", "观察"))}" placeholder="AI / 半导体 / 观察"></label>
-  <label class="wide">备注<input name="note" value="{html.escape(field(params, "note", ""))}" placeholder="关注原因、财报催化、阻力位等"></label>
-  <button type="submit">添加到自选</button>
+  <label class="wide">备注<input name="note" value="{html.escape(field(params, "note", ""))}" placeholder="关注原因"></label>
+  <button type="submit">{icon_label("plus", "添加")}</button>
 </form>
 <section class="status-strip">
-  <div class="stat-card"><div class="stat-label">自选数量</div><div class="stat-value">{len(symbols)}</div></div>
-  <div class="stat-card"><div class="stat-label">行情可加速</div><div class="stat-value">{cache["cached_symbols"]}/{len(symbols)}</div></div>
-  <div class="stat-card"><div class="stat-label">数据最新至</div><div class="stat-value">{html.escape(str(cache["latest"]))}</div></div>
-  <div class="stat-card"><div class="stat-label">缓存容量</div><div class="stat-value">{float(cache["size_mb"]):.1f} MB</div></div>
+  <div class="stat-card"><div class="stat-label">数量</div><div class="stat-value">{len(symbols)}</div></div>
+  <div class="stat-card"><div class="stat-label">缓存</div><div class="stat-value">{cache["cached_symbols"]}/{len(symbols)}</div></div>
+  <div class="stat-card"><div class="stat-label">最新</div><div class="stat-value">{html.escape(str(cache["latest"]))}</div></div>
+  <div class="stat-card"><div class="stat-label">容量</div><div class="stat-value">{float(cache["size_mb"]):.1f} MB</div></div>
 </section>
-<p class="hint">缓存用于减少重复拉取行情：打开图表或扫描时会自动补最新日 K；每只股票最多保留约 {cache["max_bars"]} 根，避免长期膨胀。</p>
 <section class="watchlist-grid">
   <div class="watchlist-panel">
     <div class="watchlist-panel-head">
       <div>
-        <strong>美股自选列表</strong>
-        <span>点击 Symbol 后在右侧看图和检查风险</span>
+        <strong>列表</strong>
       </div>
       <div class="watchlist-count-pill">{len(symbols)}</div>
     </div>
@@ -7308,23 +7391,25 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
     <div class="watchlist-chart-head">
       <div>
         <strong id="watch-chart-title">{html.escape(default_symbol) if default_symbol else "选择一个股票"}</strong>
-        <p class="hint" id="watch-chart-subtitle">周期可切换，数据为已完成日 K。</p>
+        <p class="hint" id="watch-chart-subtitle"></p>
       </div>
     </div>
     <div class="watch-detail-grid" id="watch-detail-grid">
-      <div class="watch-detail-item"><span>Company</span><strong id="watch-detail-company">-</strong></div>
-      <div class="watch-detail-item"><span>Market Cap</span><strong id="watch-detail-market">-</strong></div>
-      <div class="watch-detail-item"><span>Industry</span><strong id="watch-detail-industry">-</strong></div>
-      <div class="watch-detail-item"><span>加入日期</span><strong id="watch-detail-added">-</strong></div>
-      <div class="watch-detail-item"><span>技术状态</span><strong id="watch-detail-tech">-</strong></div>
-      <div class="watch-detail-item"><span>B / S</span><strong id="watch-detail-signal">-</strong></div>
+      <div class="watch-detail-item"><span>公司</span><strong id="watch-detail-company">-</strong></div>
+      <div class="watch-detail-item"><span>市值</span><strong id="watch-detail-market">-</strong></div>
+      <div class="watch-detail-item"><span>行业</span><strong id="watch-detail-industry">-</strong></div>
+      <div class="watch-detail-item"><span>加入</span><strong id="watch-detail-added">-</strong></div>
+      <div class="watch-detail-item"><span>技术</span><strong id="watch-detail-tech">-</strong></div>
+      <div class="watch-detail-item"><span>信号</span><strong id="watch-detail-signal">-</strong></div>
       <div class="watch-detail-item"><span>财报</span><strong id="watch-detail-earnings">-</strong></div>
       <div class="watch-detail-item"><span>备注</span><strong id="watch-detail-note">-</strong></div>
     </div>
-    <div class="divergence-panel">
+    <details class="divergence-panel">
+      <summary class="divergence-head">
+        <strong>{icon_label("alert", "分歧事件")}</strong>
+      </summary>
       <div class="divergence-head">
-        <strong>市场分歧事件</strong>
-        <span class="hint">按 D+13 到 D+27 交易日作为观察窗口</span>
+        <span class="hint">D+13 到 D+27</span>
       </div>
       <form class="divergence-form" action="/watchlist/divergence/add" method="get">
         <input type="hidden" name="symbol" id="divergence-symbol-input" value="{html.escape(default_symbol)}">
@@ -7333,12 +7418,12 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
         <label>分歧类型<select name="divergence_type"><option value="good_news_ignored">利好未涨</option><option value="bad_news_resilient">利空不跌</option></select></label>
         <label>级别<select name="importance"><option value="major">重大</option><option value="medium">中等</option><option value="minor">一般</option></select></label>
         <label>备注<input name="note" placeholder="财报、政策、合同、监管等"></label>
-        <button type="submit">保存事件</button>
+        <button type="submit">{icon_label("plus", "保存")}</button>
       </form>
       <div class="divergence-list" id="divergence-list">{render_divergence_event_list(default_symbol) if default_symbol else '<div class="divergence-empty">先选择一个股票。</div>'}</div>
-    </div>
+    </details>
     <div class="chart-control-panel">
-      <div class="chart-control-title"><span>图表显示</span><span>拖动/缩放不会改变数据</span></div>
+      <div class="chart-control-title"><span>显示</span></div>
       <div class="period-tabs" id="watch-periods">
         <button type="button" data-preset="1m">1M</button>
         <button type="button" data-preset="3m">3M</button>
@@ -7362,10 +7447,11 @@ def render_watchlist_page(params: dict[str, list[str]] | None = None) -> str:
       <div id="watchlist-chart" class="watchlist-chart watchlist-price-chart"></div>
       <div id="watchlist-kdj-chart" class="watchlist-chart watchlist-kdj-chart"></div>
       <div id="watchlist-tooltip" class="chart-tooltip"></div>
-      <div id="watch-chart-loading" class="loading-overlay"><div class="spinner"></div><div>正在拉取日 K 数据</div></div>
+      <div id="watch-chart-loading" class="loading-overlay"><div class="spinner"></div><div>加载中</div></div>
     </div>
   </div>
 </section>
+</div>
 <script>
 const watchInitialSymbol = {json.dumps(default_symbol)};
 let watchCurrentSymbol = watchInitialSymbol;
@@ -7407,7 +7493,7 @@ function updateWatchDetail(button) {{
 function renderDivergenceEvents(events) {{
   if (!divergenceList) return;
   if (!events || !events.length) {{
-    divergenceList.innerHTML = '<div class="divergence-empty">当前股票还没有记录分歧事件。</div>';
+    divergenceList.innerHTML = '<div class="divergence-empty">暂无事件</div>';
     return;
   }}
   divergenceList.innerHTML = events.map(event => {{
@@ -7423,7 +7509,7 @@ function renderDivergenceEvents(events) {{
       <div><strong>${{eventDate}} · ${{importance}} ${{divergenceType}}</strong>
       <span>D+${{dayCount}} · ${{statusLabel}} · ${{score}}/5</span></div>
       <p>${{note}}</p>
-      <a class="delete-link" href="/watchlist/divergence/delete?id=${{encodeURIComponent(event.id)}}&symbol=${{encodeURIComponent(event.symbol || watchCurrentSymbol)}}" onclick="return confirm('确认删除这条分歧事件？');">删除</a>
+      <a class="delete-link" href="/watchlist/divergence/delete?id=${{encodeURIComponent(event.id)}}&symbol=${{encodeURIComponent(event.symbol || watchCurrentSymbol)}}" onclick="return confirm('确认删除这条分歧事件？');">{icon_label("trash", "删")}</a>
     </div>`;
   }}).join("");
 }}
@@ -7545,7 +7631,7 @@ async function loadWatchChart(symbol, preset = watchCurrentPreset) {{
   watchCurrentSymbol = symbol;
   watchCurrentPreset = preset;
   watchTitle.textContent = symbol;
-  watchSubtitle.textContent = "正在加载...";
+  watchSubtitle.textContent = "加载中";
   watchLoading?.classList.add("active");
   try {{
     const params = new URLSearchParams({{ symbol, preset }});
@@ -7560,7 +7646,7 @@ async function loadWatchChart(symbol, preset = watchCurrentPreset) {{
       window.showToast?.(payload.error, "error");
       return;
     }}
-    watchSubtitle.textContent = `${{payload.start}} 到 ${{payload.end}}，日 K`;
+    watchSubtitle.textContent = `${{payload.start}} - ${{payload.end}}`;
     renderDivergenceEvents(payload.divergenceEvents || []);
     makeWatchChart(payload);
   }} catch (error) {{
