@@ -9,6 +9,8 @@ LAST_SUCCESS_FILE="${STATE_DIR}/last_success_commit"
 REPO_DIR="${REPO_DIR:-${PROJECT_DIR}}"
 SERVICES="${SERVICES:-ma5-web-app.service ma5-web-site.service}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8764/health}"
+APP_HEALTH_URL="${APP_HEALTH_URL:-http://127.0.0.1:8765/api/health}"
+FRONTEND_URL="${FRONTEND_URL:-http://127.0.0.1:8765/app/}"
 
 TARGET_COMMIT="${1:-}"
 if [[ -z "${TARGET_COMMIT}" ]]; then
@@ -42,19 +44,25 @@ for svc in ${SERVICES}; do
   systemctl is-active --quiet "${svc}"
 done
 
-HEALTH_OK=0
-for i in {1..20}; do
-  if curl -fsS --max-time 5 "${HEALTH_URL}" >/dev/null; then
-    HEALTH_OK=1
-    break
-  fi
-  sleep 2
-done
+wait_for_url() {
+  local name="$1"
+  local url="$2"
+  echo "[INFO] 回滚后检查 ${name}：${url}"
+  for i in {1..20}; do
+    if curl -fsS --max-time 5 "${url}" >/dev/null; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "[ERROR] 回滚后 ${name} 检查失败，请人工介入。"
+  return 1
+}
 
-if [[ "${HEALTH_OK}" -ne 1 ]]; then
-  echo "[ERROR] 回滚后健康检查失败，请人工介入。"
-  exit 3
+if [[ -f "${REPO_DIR}/frontend/dist/index.html" ]]; then
+  wait_for_url "业务服务" "${APP_HEALTH_URL}"
+  wait_for_url "新版前端" "${FRONTEND_URL}"
 fi
+wait_for_url "登录入口" "${HEALTH_URL}"
 
 echo "${TARGET_COMMIT}" > "${LAST_SUCCESS_FILE}"
 echo "[INFO] 回滚完成。"

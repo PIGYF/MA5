@@ -3,6 +3,8 @@ __pycache__/
 *.zip
 .venv/
 .env*
+frontend/node_modules/
+.learnings/
 
 # Generated reports, scans, and local cache files
 reports/

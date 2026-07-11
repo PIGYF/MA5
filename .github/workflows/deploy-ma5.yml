@@ -1,5 +1,8 @@
 name: Deploy MA5 Site
 
+permissions:
+  contents: read
+
 on:
   push:
     branches:
@@ -8,13 +11,64 @@ on:
 
 concurrency:
   group: deploy-ma5-main
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
+  validate:
+    name: Validate application
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        working-directory: frontend
+        run: pnpm build
+
+      - name: Verify committed frontend assets
+        run: |
+          set -euo pipefail
+          test -f frontend/dist/index.html
+          test -n "$(find frontend/dist/assets -maxdepth 1 -type f -name '*.js' -print -quit)"
+          test -n "$(find frontend/dist/assets -maxdepth 1 -type f -name '*.css' -print -quit)"
+          git diff --exit-code -- frontend/dist
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate Python and deploy scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' PY_FILES < <(find . -maxdepth 3 -type f -name '*.py' -not -path './.venv/*' -not -path '*/__pycache__/*' -print0)
+          test "${#PY_FILES[@]}" -gt 0
+          python -m py_compile "${PY_FILES[@]}"
+          bash -n deploy/deploy.sh
+          bash -n deploy/rollback.sh
+
   deploy:
     name: Deploy to Aliyun
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    needs: validate
 
     steps:
       - name: Checkout

@@ -19,21 +19,32 @@ C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\
 浏览器打开：
 
 ```text
-http://127.0.0.1:8765/
+http://127.0.0.1:8765/app/
 ```
 
 也可以双击 `start_strategy_tester.bat`。
 
+工作台使用 React + Vite，Python 服务提供策略、扫描任务、缓存、自选池 API，以及图表和回测报告端点。日常使用直接打开 `/app/`；旧页面地址会自动跳转到新版对应功能。
+
+修改 `frontend/` 后需要重新构建：
+
+```powershell
+cd frontend
+pnpm install
+pnpm build
+```
+
+`main` 分支的 GitHub Actions 会先重新构建前端，并检查 `frontend/dist` 是否与源码一致；验证通过后才会连接阿里云执行部署。提交前必须把最新的 `frontend/dist` 一起提交。
+
 ## 常用入口
 
-- `/`：行动台
-- `/us/scanner`：美股选股器
-- `/us/watchlist`：美股自选池
-- `/us/backtest`：美股回测
-- `/us/batch`：美股批量回测
-- `/cn/scanner`：A股选股器
-- `/cn/watchlist`：A股自选池
-- `/cn/backtest`：A股回测
+- `/app/scan`：新版美股选股器
+- `/app/watchlist`：新版美股自选池
+- `/app/backtest`：新版美股回测
+- `/app/batch`：新版美股批量回测
+- `/app/cn/scan`：新版A股选股器
+- `/app/cn/watchlist`：新版A股自选池
+- `/app/cn/backtest`：新版A股回测
 
 ## 数据和缓存
 

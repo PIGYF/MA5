@@ -4,6 +4,7 @@ import csv
 import html
 import importlib.util
 import json
+import mimetypes
 import os
 import random
 import re
@@ -11,6 +12,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -119,6 +121,7 @@ SCAN_JOBS_LOCK = threading.Lock()
 TASK_HISTORY_PATH = SCAN_DIR / "task_history.json"
 TASK_HISTORY_LIMIT = 80
 TASK_HISTORY_LOCK = threading.Lock()
+FRONTEND_DIST_DIR = Path(__file__).resolve().parent / "frontend" / "dist"
 ACTIVE_SCAN_STATUSES = {"queued", "running", "pausing", "paused", "stopping"}
 FINISHED_SCAN_STATUSES = {"done", "stopped", "error"}
 ASHARE_DEFAULT_MAX_SCAN_SYMBOLS = 6000
@@ -391,6 +394,143 @@ def file_health(path: Path, max_age_seconds: int | None = None) -> tuple[str, st
 
 def render_health_tag(label: str, value: str, cls: str = "condition-primary") -> str:
     return f'<span class="condition-tag {cls}">{html.escape(label)} {html.escape(value)}</span>'
+
+
+def json_safe(value: object) -> object:
+    if is_dataclass(value) and not isinstance(value, type):
+        return json_safe(asdict(value))
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if hasattr(value, "__dict__") and value.__class__.__module__ != "builtins":
+        return json_safe(vars(value))
+    return value
+
+
+def signal_result_api_row(row: SignalResult | dict[str, object]) -> dict[str, object]:
+    data = dict(row.__dict__ if isinstance(row, SignalResult) else row)
+    symbol = str(data.get("symbol", "")).upper()
+    cached = merge_us_company_profile(data, symbol) if symbol else data
+    data["symbol"] = symbol
+    data["company_display_name"] = us_company_display_name(symbol, str(cached.get("company_name") or data.get("company_name") or ""))
+    data["sector_zh"] = us_sector_zh(str(cached.get("sector") or data.get("sector") or ""))
+    data["industry_zh"] = us_industry_zh(str(cached.get("industry") or data.get("industry") or ""))
+    data["market_cap_billion"] = round(float(cached.get("market_cap") or data.get("market_cap") or 0) / 1_000_000_000, 2)
+    data["signal_label"] = {"B1_trend_confirm": "B1", "B2_reentry": "B2"}.get(str(data.get("signal_type") or ""), str(data.get("signal_type") or "-"))
+    data["watch_note"] = " ".join(part for part in (str(data.get("technical_rating") or ""), str(data.get("signal_label") or "")) if part)
+    return json_safe(data)  # type: ignore[return-value]
+
+
+def latest_scan_api_payload() -> dict[str, object]:
+    latest = load_latest_scan()
+    if not latest:
+        return {"ok": True, "has_result": False, "latest": None}
+    candidates = [
+        signal_result_api_row(row)
+        for row in latest.get("candidates", [])
+        if isinstance(row, dict)
+    ]
+    return {
+        "ok": True,
+        "has_result": True,
+        "latest": {
+            "signal_date": latest.get("signal_date", ""),
+            "planned_trade_date": latest.get("planned_trade_date", ""),
+            "created_at": latest.get("created_at", ""),
+            "source": latest.get("source", ""),
+            "summary": latest.get("summary", {}),
+            "report": latest.get("report", ""),
+            "csv": latest.get("csv", ""),
+            "params": latest.get("params", {}),
+            "candidates": candidates,
+            "errors": latest.get("errors", []),
+        },
+    }
+
+
+def scanner_bootstrap_api_payload(params: dict[str, list[str]]) -> dict[str, object]:
+    scan_end = default_scan_end_date()
+    return {
+        "ok": True,
+        "defaults": {
+            "universe_source": "auto",
+            "asset_type": "stocks",
+            "min_market_cap_billion": DEFAULT_MIN_MARKET_CAP_100M_USD,
+            "max_market_cap_billion": 0,
+            "min_screener_volume": 500000,
+            "max_symbols": DEFAULT_MAX_SCAN_SYMBOLS,
+            "max_workers": 6,
+            "start": default_scan_start_date(scan_end).isoformat(),
+            "end": scan_end.isoformat(),
+            "min_price": 5,
+            "min_avg_dollar_volume": 20000000,
+            "earnings_filter": "show",
+            "hide_weak": DEFAULT_HIDE_WEAK_CANDIDATES,
+            "ma_length": 5,
+            "vol_length": 20,
+            "vol_high_days": 3,
+            "vol_high_multiplier": 1.0,
+            "vol_multiplier": 1.45,
+            "massive_window": 7,
+            "massive_min_count": 1,
+            "reentry_pct": 4.5,
+            "require_ma5_rising": False,
+            "require_5ma_gt_20ma": False,
+            "b1_require_20ma_gt_50ma": False,
+            "secondary_big_red_b1": False,
+            "secondary_above_ma5_3d": False,
+        },
+        "market_environment": json_safe(market_environment()),
+        "latest_scan": latest_scan_api_payload(),
+    }
+
+
+def ashare_latest_scan_api_payload() -> dict[str, object]:
+    latest = load_latest_ashare_scan()
+    return {"ok": True, "latest": json_safe(latest) if latest else None}
+
+
+def ashare_scanner_bootstrap_api_payload() -> dict[str, object]:
+    latest = load_latest_ashare_scan()
+    signal_date = str((latest or {}).get("signal_date", ashare_required_latest_date(date.today()).isoformat()))
+    return {
+        "ok": True,
+        "defaults": {
+            "min_market_cap": 50,
+            "max_symbols": ASHARE_DEFAULT_MAX_SCAN_SYMBOLS,
+            "max_workers": 6,
+            "min_avg_amount_20d_100m": 1,
+            "min_control_amount_20d_100m": 2,
+            "j_threshold": 14,
+            "vol_high_days": 2,
+            "vol_high_multiplier": 1.0,
+            "vol_multiplier": 1.45,
+            "massive_window": 7,
+            "massive_min_count": 1,
+            "reentry_pct": 4.5,
+            "strong_volume_score": 4.0,
+            "medium_volume_score": 2.5,
+            "boards": list(ASHARE_BOARD_LABELS),
+            "require_ma5_rising": False,
+            "require_5ma_gt_20ma": False,
+            "b1_require_20ma_gt_50ma": False,
+            "secondary_big_red_b1": False,
+            "secondary_above_ma5_3d": False,
+        },
+        "boards": [{"value": key, "label": label} for key, label in ASHARE_BOARD_LABELS.items()],
+        "market_environment": {
+            "state": "盘后复盘",
+            "symbol": "A股",
+            "date": signal_date,
+            "tone": "neutral",
+        },
+        "latest_scan": ashare_latest_scan_api_payload(),
+    }
 
 
 ICON_SVG: dict[str, str] = {
@@ -1831,6 +1971,21 @@ document.addEventListener("submit", event => {{
 </main></body>
 </html>"""
     return text.encode("utf-8")
+
+
+def frame_shell(content: str, active: str = "backtest", market: str = "us") -> bytes:
+    text = page_shell(content, active, market).decode("utf-8")
+    frame_css = """
+html, body { background: #fff; }
+body > main { padding: 10px 12px 18px; max-width: none; }
+.app-topbar { display: none !important; }
+.page-head { margin-top: 0; }
+.mode-pill { display: none; }
+.chart-only-frame > .result > :not(.result) { display: none !important; }
+.chart-only-frame > .result { margin: 0 !important; padding: 0 !important; border: 0 !important; box-shadow: none !important; }
+.chart-only-frame > .result > .result { margin: 0 !important; border: 0 !important; }
+"""
+    return text.replace("<style>", f"<style>{frame_css}", 1).encode("utf-8")
 
 
 def render_us_strategy_condition_panel(params: dict[str, list[str]], context: str = "scanner") -> str:
@@ -8306,14 +8461,39 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
         raw_path = parsed.path
+        legacy_pages = {
+            "/": "/app/",
+            "/us": "/app/scan",
+            "/us/": "/app/scan",
+            "/us/scanner": "/app/scan",
+            "/us/scan": "/app/scan",
+            "/us/scan/latest": "/app/scan",
+            "/us/watchlist": "/app/watchlist",
+            "/us/backtest": "/app/backtest",
+            "/us/batch": "/app/batch",
+            "/cn": "/app/cn/scan",
+            "/cn/": "/app/cn/scan",
+            "/cn/scanner": "/app/cn/scan",
+            "/cn/scan/latest": "/app/cn/scan",
+            "/cn/watchlist": "/app/cn/watchlist",
+            "/cn/backtest": "/app/cn/backtest",
+            "/cn/batch": "/app/cn/batch",
+            ASHARE_ROUTE: "/app/cn/scan",
+        }
+        if raw_path in legacy_pages:
+            self.redirect(legacy_pages[raw_path])
+            return
+        if raw_path == "/app" or raw_path.startswith("/app/"):
+            self.send_frontend_app(raw_path)
+            return
+        if raw_path.startswith("/api/"):
+            self.handle_api(raw_path, params)
+            return
         market = "us"
         route_path = raw_path
-        if raw_path == "/" or raw_path == "/cache/clear":
+        if raw_path == "/cache/clear":
             market = "global"
             route_path = raw_path
-        elif raw_path == ASHARE_ROUTE:
-            market = "cn"
-            route_path = "/scanner"
         elif raw_path == "/us" or raw_path.startswith("/us/"):
             market = "us"
             route_path = raw_path[3:] or "/"
@@ -8322,18 +8502,18 @@ class Handler(BaseHTTPRequestHandler):
             route_path = raw_path[3:] or "/"
         try:
             if market == "global":
-                if route_path == "/cache/clear":
-                    self.clear_cache(params)
-                else:
-                    self.send_bytes(page_shell(render_action_dashboard(params), "home", "global"))
+                self.clear_cache(params)
             elif market == "cn":
-                if route_path in ("/", ""):
-                    self.redirect("/cn/scanner")
-                elif route_path == "/suggest":
+                if route_path == "/suggest":
                     self.send_json({"suggestions": suggest_ashare_symbols(field(params, "q", ""), int(number_field(params, "limit", 12)))})
-                elif route_path == "/scanner":
-                    content = render_ashare_scanner(params)
-                    self.send_bytes(content.encode("utf-8") if field(params, "embed", "0") == "1" else page_shell(content, "scanner", "cn"))
+                elif route_path == "/scanner/frame":
+                    self.send_bytes(frame_shell(render_ashare_scanner(params), "scanner", "cn"))
+                elif route_path == "/candidate/chart":
+                    chart_params = {key: list(values) for key, values in params.items()}
+                    chart_params["mode"] = ["single"]
+                    chart_params["embed"] = ["1"]
+                    chart_content = f'<div class="chart-only-frame">{render_ashare_scanner(chart_params)}</div>'
+                    self.send_bytes(frame_shell(chart_content, "scanner", "cn"))
                 elif route_path == "/scan/start":
                     self.start_ashare_scan_job(params)
                 elif route_path == "/scan/status":
@@ -8342,44 +8522,32 @@ class Handler(BaseHTTPRequestHandler):
                     self.ashare_scan_job_active()
                 elif route_path == "/scan/stop":
                     self.stop_ashare_scan_job(params)
-                elif route_path == "/scan/latest":
-                    self.send_bytes(page_shell(latest_ashare_scan_to_html(), "scanner", "cn"))
                 elif route_path == "/scan/delete":
                     self.delete_ashare_scan_result()
-                elif route_path == "/watchlist":
-                    self.send_bytes(page_shell(render_ashare_watchlist_page(params), "watchlist", "cn"))
+                elif route_path == "/watchlist/frame":
+                    self.send_bytes(frame_shell(render_ashare_watchlist_page(params), "watchlist", "cn"))
                 elif route_path == "/watchlist/add":
                     self.add_ashare_watchlist_item(params)
                 elif route_path == "/watchlist/delete":
                     self.delete_ashare_watchlist_item(params)
                 elif route_path == "/watchlist/chart":
                     self.ashare_watchlist_chart(params)
-                elif route_path == "/backtest":
-                    self.send_bytes(page_shell(render_ashare_backtest_form(params), "backtest", "cn"))
-                elif route_path == "/run":
-                    self.send_bytes(page_shell(run_ashare_strategy(params), "backtest", "cn"))
-                elif route_path == "/batch":
-                    self.send_bytes(page_shell(render_market_placeholder("batch"), "batch", "cn"))
+                elif route_path == "/backtest/frame":
+                    self.send_bytes(frame_shell(render_ashare_backtest_form(params), "backtest", "cn"))
+                elif route_path == "/run/frame":
+                    self.send_bytes(frame_shell(run_ashare_strategy(params), "backtest", "cn"))
                 else:
                     self.send_error(404)
-            elif route_path == "/":
-                self.redirect("/us/scanner")
             elif route_path == "/company-profiles/update":
                 self.update_us_company_profiles(params)
             elif route_path == "/company-profiles/status":
                 self.us_company_profiles_status(params)
             elif route_path == "/company-profiles/stop":
                 self.stop_us_company_profiles_job(params)
-            elif route_path == "/backtest":
-                self.send_bytes(page_shell(render_backtest_form(params), "backtest", "us"))
-            elif route_path == "/run":
-                self.send_bytes(page_shell(run_strategy(params), "backtest", "us"))
-            elif route_path == "/batch":
-                self.send_bytes(page_shell(render_batch_form(params), "batch", "us"))
-            elif route_path == "/batch/run":
-                self.send_bytes(page_shell(run_batch_backtest(params), "batch", "us"))
-            elif route_path == "/watchlist":
-                self.send_bytes(page_shell(render_watchlist_page(params), "watchlist", "us"))
+            elif route_path == "/run/frame":
+                self.send_bytes(frame_shell(run_strategy(params), "backtest", "us"))
+            elif route_path == "/batch/run/frame":
+                self.send_bytes(frame_shell(run_batch_backtest(params), "batch", "us"))
             elif route_path == "/watchlist/add":
                 self.add_watchlist_item(params)
             elif route_path == "/watchlist/add.json":
@@ -8394,12 +8562,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.delete_watchlist_divergence_event(params)
             elif route_path == "/watchlist/chart":
                 self.send_json(watchlist_chart_payload(params))
-            elif route_path == "/scanner":
-                self.send_bytes(page_shell(render_scanner_form(params), "scanner", "us"))
-            elif route_path == "/scan":
-                self.send_bytes(page_shell(run_scanner(params), "scanner", "us"))
-            elif route_path == "/scan/latest":
-                self.send_bytes(page_shell(latest_scan_to_html(), "scanner", "us"))
             elif route_path == "/scan/delete":
                 self.delete_scan_result()
             elif route_path == "/scan/start":
@@ -8414,8 +8576,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.scan_job_status(params)
             elif route_path == "/scan/active":
                 self.scan_job_active()
-            elif route_path == "/candidate":
-                self.send_bytes(render_candidate_detail(params).encode("utf-8"))
             elif route_path == "/candidate/chart":
                 self.send_bytes(render_candidate_chart_frame(params))
             elif route_path.startswith("/reports/"):
@@ -8423,9 +8583,106 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_error(404)
         except Exception as exc:
-            active = "scanner" if route_path in ("/scanner", "/scan") or route_path.startswith("/scan/") else "watchlist" if route_path.startswith("/watchlist") else "batch" if route_path.startswith("/batch") else "home" if route_path in ("/", "") else "backtest"
-            form = render_action_dashboard(params) if market == "global" else render_ashare_scanner(params) if market == "cn" and active in ("scanner", "home") else render_ashare_watchlist_page(params) if market == "cn" and active == "watchlist" else render_market_placeholder(active) if market == "cn" else render_scanner_form(params) if active in ("scanner", "home") else render_watchlist_page(params) if active == "watchlist" else render_batch_form(params) if active == "batch" else render_backtest_form(params)
-            self.send_bytes(page_shell(form + f'<div class="error">{html.escape(str(exc))}</div>', active, market), 500)
+            self.send_error(500, explain=str(exc))
+
+    def handle_api(self, route_path: str, params: dict[str, list[str]]) -> None:
+        try:
+            if route_path == "/api/health":
+                self.send_json({"ok": True, "status": "ok"})
+            elif route_path == "/api/us/scanner/bootstrap":
+                self.send_json(scanner_bootstrap_api_payload(params))
+            elif route_path == "/api/us/scan/latest":
+                self.send_json(latest_scan_api_payload())
+            elif route_path == "/api/us/scan/start":
+                self.start_scan_job(params)
+            elif route_path == "/api/us/scan/status":
+                self.scan_job_status({"id": params.get("id", params.get("job_id", [""]))})
+            elif route_path == "/api/us/scan/active":
+                self.scan_job_active()
+            elif route_path == "/api/us/scan/pause":
+                self.pause_scan_job({"id": params.get("id", params.get("job_id", [""]))})
+            elif route_path == "/api/us/scan/resume":
+                self.resume_scan_job({"id": params.get("id", params.get("job_id", [""]))})
+            elif route_path == "/api/us/scan/stop":
+                self.stop_scan_job({"id": params.get("id", params.get("job_id", [""]))})
+            elif route_path == "/api/us/watchlist":
+                self.send_json({"ok": True, "items": load_watchlist_items()})
+            elif route_path == "/api/us/watchlist/add":
+                self.add_watchlist_item_json(params)
+            elif route_path == "/api/us/watchlist/delete":
+                symbol = field(params, "symbol", "")
+                delete_watchlist_symbol(symbol)
+                self.send_json({"ok": True, "items": load_watchlist_items()})
+            elif route_path == "/api/us/watchlist/chart":
+                self.send_json(watchlist_chart_payload(params))
+            elif route_path == "/api/cn/scanner/bootstrap":
+                self.send_json(ashare_scanner_bootstrap_api_payload())
+            elif route_path == "/api/cn/scan/latest":
+                self.send_json(ashare_latest_scan_api_payload())
+            elif route_path == "/api/cn/scan/start":
+                self.start_ashare_scan_job(params)
+            elif route_path == "/api/cn/scan/status":
+                self.ashare_scan_job_status({"job_id": params.get("job_id", params.get("id", [""]))})
+            elif route_path == "/api/cn/scan/active":
+                self.ashare_scan_job_active()
+            elif route_path == "/api/cn/scan/stop":
+                self.stop_ashare_scan_job({"job_id": params.get("job_id", params.get("id", [""]))})
+            elif route_path == "/api/cn/watchlist":
+                self.send_json({"ok": True, "items": load_ashare_watchlist_items()})
+            elif route_path == "/api/cn/watchlist/add":
+                items = add_ashare_watchlist_symbol(
+                    field(params, "symbol", ""),
+                    field(params, "group", "观察"),
+                    field(params, "note", ""),
+                    field(params, "name", ""),
+                    field(params, "sector", ""),
+                )
+                self.send_json({"ok": True, "items": items})
+            elif route_path == "/api/cn/watchlist/delete":
+                items = delete_ashare_watchlist_symbol(field(params, "symbol", ""))
+                self.send_json({"ok": True, "items": items})
+            else:
+                self.send_json({"ok": False, "error": "API route not found"}, status=404)
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=500)
+
+    def send_frontend_app(self, request_path: str) -> None:
+        if not FRONTEND_DIST_DIR.exists():
+            body = (
+                "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\">"
+                "<title>MA5 App</title><body style=\"font-family:system-ui;padding:24px\">"
+                "<h1>前端尚未构建</h1><p>请在 frontend 目录运行 pnpm install && pnpm build。</p>"
+                "</body></html>"
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        relative = request_path.removeprefix("/app").lstrip("/")
+        target = FRONTEND_DIST_DIR / (relative or "index.html")
+        target = target.resolve()
+        dist_root = FRONTEND_DIST_DIR.resolve()
+        try:
+            target.relative_to(dist_root)
+        except ValueError:
+            target = dist_root / "index.html"
+        if not target.exists() or target.is_dir():
+            target = dist_root / "index.html"
+        content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        if target.suffix.lower() == ".js":
+            content_type = "application/javascript"
+        elif target.suffix.lower() == ".css":
+            content_type = "text/css"
+        elif target.suffix.lower() == ".html":
+            content_type = "text/html; charset=utf-8"
+        body = target.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def clear_cache(self, params: dict[str, list[str]]) -> None:
         area = field(params, "area", "")

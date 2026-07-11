@@ -10,6 +10,8 @@ LAST_SUCCESS_FILE="${STATE_DIR}/last_success_commit"
 REPO_DIR="${REPO_DIR:-${PROJECT_DIR}}"
 DEPLOY_BRANCH="${DEPLOY_BRANCH:-main}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8764/health}"
+APP_HEALTH_URL="${APP_HEALTH_URL:-http://127.0.0.1:8765/api/health}"
+FRONTEND_URL="${FRONTEND_URL:-http://127.0.0.1:8765/app/}"
 SERVICES="${SERVICES:-ma5-web-app.service ma5-web-site.service}"
 ROLLBACK_ON_FAIL="${ROLLBACK_ON_FAIL:-1}"
 VENV_DIR="${VENV_DIR:-${PROJECT_DIR}/.venv}"
@@ -75,6 +77,11 @@ git -C "${REPO_DIR}" pull --ff-only origin "${DEPLOY_BRANCH}"
 NEW_COMMIT="$(git -C "${REPO_DIR}" rev-parse HEAD)"
 echo "[INFO] 更新后提交：${NEW_COMMIT}"
 
+echo "[INFO] 检查前端构建产物。"
+[[ -f "${REPO_DIR}/frontend/dist/index.html" ]]
+find "${REPO_DIR}/frontend/dist/assets" -maxdepth 1 -type f -name "*.js" -print -quit | grep -q .
+find "${REPO_DIR}/frontend/dist/assets" -maxdepth 1 -type f -name "*.css" -print -quit | grep -q .
+
 if [[ -f "${REPO_DIR}/requirements.txt" ]]; then
   echo "[INFO] 检测到 requirements.txt，开始安装/更新依赖。"
   if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
@@ -123,20 +130,23 @@ for svc in ${SERVICES}; do
   systemctl is-active --quiet "${svc}"
 done
 
-echo "[INFO] 健康检查：${HEALTH_URL}"
-HEALTH_OK=0
-for i in {1..20}; do
-  if curl -fsS --max-time 5 "${HEALTH_URL}" >/dev/null; then
-    HEALTH_OK=1
-    break
-  fi
-  sleep 2
-done
+wait_for_url() {
+  local name="$1"
+  local url="$2"
+  echo "[INFO] 健康检查 ${name}：${url}"
+  for i in {1..20}; do
+    if curl -fsS --max-time 5 "${url}" >/dev/null; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "[ERROR] ${name} 健康检查失败。"
+  return 1
+}
 
-if [[ "${HEALTH_OK}" -ne 1 ]]; then
-  echo "[ERROR] 健康检查失败。"
-  exit 4
-fi
+wait_for_url "业务服务" "${APP_HEALTH_URL}"
+wait_for_url "新版前端" "${FRONTEND_URL}"
+wait_for_url "登录入口" "${HEALTH_URL}"
 
 echo "${NEW_COMMIT}" > "${LAST_SUCCESS_FILE}"
 echo "[INFO] 部署成功：${NEW_COMMIT}"
