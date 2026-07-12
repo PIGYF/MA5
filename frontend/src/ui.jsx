@@ -34,6 +34,8 @@ const pages = [
 export function Shell({ route, navigate, marketEnvironment, children }) {
   const market = route.market;
   const environment = marketEnvironment || {};
+  const [riskOpen, setRiskOpen] = React.useState(false);
+  const action = environment.tone === "bad" ? "暂停追高" : environment.tone === "warn" ? "降低仓位" : "正常复盘";
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -51,13 +53,19 @@ export function Shell({ route, navigate, marketEnvironment, children }) {
             </a>
           ))}
         </nav>
-        <div className={`market-state tone-${environment.tone || "neutral"}`}>
+        <button type="button" className={`market-state tone-${environment.tone || "neutral"}`} onClick={() => setRiskOpen((open) => !open)} aria-expanded={riskOpen} title="市场风险参考">
           <i />
           <span>{environment.state || (market === "cn" ? "盘后复盘" : "Market")}</span>
           <b>{environment.symbol || (market === "cn" ? "A股" : "QQQ")}</b>
           {environment.vix ? <em>VIX {Number(environment.vix).toFixed(1)}</em> : null}
-        </div>
+        </button>
       </header>
+      {riskOpen ? <aside className={`risk-center tone-${environment.tone || "neutral"}`}>
+        <header><span><i /><strong>{environment.state || "市场状态"}</strong><b>{action}</b></span><button className="icon-button" type="button" aria-label="关闭风险提示" onClick={() => setRiskOpen(false)}><Icon name="close" /></button></header>
+        <div className="risk-facts"><span><small>参考指数</small><strong>{environment.symbol || (market === "cn" ? "A股" : "QQQ")}</strong></span><span><small>数据日期</small><strong>{environment.date || "-"}</strong></span>{market === "us" ? <><span><small>距MA20</small><strong>{Number.isFinite(Number(environment.dist20)) ? `${Number(environment.dist20).toFixed(2)}%` : "-"}</strong></span><span><small>MA20</small><strong>{environment.ma20_direction || "-"}</strong></span><span><small>VIX</small><strong>{environment.vix ? `${Number(environment.vix).toFixed(1)} · ${environment.vix_label || ""}` : "-"}</strong></span></> : null}</div>
+        <p>{environment.message || (market === "cn" ? "盘后信号仅供次日交易计划参考。" : "市场环境只作为仓位和追高风险参考，不改变策略信号。")}</p>
+        {environment.macro?.events?.length ? <div className="risk-events"><strong>近期大事</strong>{environment.macro.events.slice(0, 3).map((event, index) => <span key={`${event.date || index}-${event.title || event.name || "event"}`}>{event.date || ""} {event.title || event.name || String(event)}</span>)}</div> : null}
+      </aside> : null}
       {children}
     </main>
   );
@@ -84,20 +92,6 @@ export function Progress({ job }) {
   const scanned = Number(job?.scanned || 0);
   const percent = Number(job?.progress_pct ?? (total ? Math.round((scanned / total) * 100) : 0));
   return <div className="progress-strip"><div><strong>{job?.status_label || job?.message || job?.status}</strong><span>{scanned}/{total || "-"}</span><span>候选 {job?.candidates || 0}</span><span>失败 {job?.errors || 0}</span><em>{job?.current || job?.stage || ""}</em></div><div className="progress-track"><i style={{ width: `${Math.max(0, Math.min(100, percent))}%` }} /></div></div>;
-}
-
-export function ChartFrame({ title, src, onClose, className = "", showHeader = true }) {
-  const [loading, setLoading] = React.useState(true);
-  const [failed, setFailed] = React.useState(false);
-  React.useEffect(() => setLoading(true), [src]);
-  return <section className={`chart-drawer ${showHeader ? "" : "no-header"} ${className}`}>
-    {showHeader ? <header><strong>{title}</strong>{onClose ? <button className="icon-button" type="button" onClick={onClose} title="关闭" aria-label="关闭图表"><Icon name="close" /></button> : null}</header> : null}
-    <div className="chart-frame-body">
-      {loading && !failed ? <div className="frame-loading" role="status"><span /><b>正在加载图表</b></div> : null}
-      {failed ? <div className="frame-error"><strong>图表加载失败</strong><button type="button" onClick={() => { setFailed(false); setLoading(true); }}>重试</button></div> : null}
-      <iframe loading="lazy" src={src} title={title} onError={() => { setLoading(false); setFailed(true); }} onLoad={(event) => { setLoading(false); setFailed(false); try { event.currentTarget.contentWindow.scrollTo(0, 0); } catch { /* same-origin report in normal use */ } }} />
-    </div>
-  </section>;
 }
 
 export function ResizableWorkspace({ storageKey, className, initial = 300, min = 220, max = 460, children }) {

@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { getJson, isJobRunning, numberText, toQuery, usePersistentState } from "./lib";
 import { filterCandidates } from "./resultFilters";
-import { Checkbox, ChartFrame, Field, FilterSection, Icon, PageToolbar, Progress, ResizableWorkspace, WorkspaceEmpty } from "./ui";
+import { LazyStrategyChart } from "./LazyStrategyChart";
+import { Checkbox, Field, FilterSection, Icon, PageToolbar, Progress, ResizableWorkspace, WorkspaceEmpty } from "./ui";
 
 function value(form, key) {
   return form?.[key] ?? "";
@@ -17,6 +18,10 @@ function SelectField({ form, setForm, name, label, options }) {
 
 function Toggle({ form, setForm, name, label }) {
   return <Checkbox label={label} checked={form[name]} onChange={(checked) => setForm({ ...form, [name]: checked })} />;
+}
+
+function FilterChip({ active, label, onClick }) {
+  return <button type="button" className={`filter-chip ${active ? "active" : ""}`} aria-pressed={active} onClick={onClick}><span>{active ? "✓" : ""}</span>{label}</button>;
 }
 
 function UsFilters({ form, setForm }) {
@@ -211,13 +216,6 @@ export function Scanner({ market, bootstrap, latest, setLatest, reloadWatchlist 
     } catch (exception) { setError(exception.message); }
   }
 
-  const chartUrl = useMemo(() => {
-    if (!selectedRow) return "";
-    return market === "cn"
-      ? `/cn/candidate/chart?${toQuery({ ...form, symbol: selectedRow.symbol })}`
-      : `/candidate/chart?${toQuery({ ...form, symbol: selectedRow.symbol, fast: 1 })}`;
-  }, [form, market, selectedRow]);
-
   const signalDate = latest?.signal_date || "-";
   const startTableResize = (event) => {
     if (window.matchMedia("(max-width: 820px)").matches) return;
@@ -245,8 +243,8 @@ export function Scanner({ market, bootstrap, latest, setLatest, reloadWatchlist 
           <select aria-label="B点类型" value={resultFilter.signal} onChange={(event) => setResultFilter({ ...resultFilter, signal: event.target.value })}><option value="all">全部B点</option><option value="B1">B1</option><option value="B2">B2</option></select>
           <select aria-label="评级" value={resultFilter.rating} onChange={(event) => setResultFilter({ ...resultFilter, rating: event.target.value })}><option value="all">全部评级</option><option value="Strong">Strong</option><option value="Medium">Medium</option></select>
           <input aria-label="最低技术分" type="number" placeholder="最低分" value={resultFilter.minScore} onChange={(event) => setResultFilter({ ...resultFilter, minScore: event.target.value })} />
-          <Checkbox label="仅新增" checked={resultFilter.onlyNew} onChange={(checked) => setResultFilter({ ...resultFilter, onlyNew: checked })} />
-          <Checkbox label="连续入选" checked={resultFilter.consecutive} onChange={(checked) => setResultFilter({ ...resultFilter, consecutive: checked })} />
+          <FilterChip label="新增" active={resultFilter.onlyNew} onClick={() => setResultFilter({ ...resultFilter, onlyNew: !resultFilter.onlyNew })} />
+          <FilterChip label="连续" active={resultFilter.consecutive} onClick={() => setResultFilter({ ...resultFilter, consecutive: !resultFilter.consecutive })} />
           <button className="icon-button" type="button" title="清除筛选" aria-label="清除筛选" onClick={() => setResultFilter({ query: "", signal: "all", rating: "all", minScore: "", onlyNew: false, consecutive: false })}><Icon name="close" /></button>
           <span>{visibleRows.length}/{rows.length}</span>
         </div>
@@ -255,7 +253,7 @@ export function Scanner({ market, bootstrap, latest, setLatest, reloadWatchlist 
           if (!["ArrowUp", "ArrowDown"].includes(event.key)) return;
           event.preventDefault(); setTableHeight(Math.max(132, Math.min(520, Number(tableHeight) + (event.key === "ArrowDown" ? 16 : -16))));
         }} />
-        {chartUrl ? <ChartFrame title={`${selectedRow.symbol} 策略图表`} src={chartUrl} className="scanner-chart" onClose={() => setSelectedSymbol("")} /> : <WorkspaceEmpty title="暂无候选图表" note="当前信号日没有可显示的候选股票" />}
+        {selectedRow ? <LazyStrategyChart market={market} symbol={selectedRow.symbol} params={form} title={`${selectedRow.symbol} · ${market === "cn" ? selectedRow.name || "策略图表" : selectedRow.company_display_name || selectedRow.company_name || "策略图表"}`} className="scanner-chart" onClose={() => setSelectedSymbol("")} /> : <WorkspaceEmpty title="暂无候选图表" note="当前信号日没有可显示的候选股票" />}
       </section>
     </ResizableWorkspace>
   </>;

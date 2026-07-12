@@ -1,6 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
 import { backtestDates, getJson, toQuery, usePersistentState } from "./lib";
-import { Checkbox, ChartFrame, Field, FilterSection, Icon, PageToolbar, ResizableWorkspace, WorkspaceEmpty } from "./ui";
+import { LazyStrategyChart } from "./LazyStrategyChart";
+import { LazyBacktestReport } from "./LazyBacktestReport";
+import { LazyBatchReport } from "./LazyBatchReport";
+import { Checkbox, Field, FilterSection, Icon, PageToolbar, ResizableWorkspace, WorkspaceEmpty } from "./ui";
 
 function Toggle({ form, setForm, name, label }) {
   return <Checkbox label={label} checked={form[name]} onChange={(checked) => setForm({ ...form, [name]: checked })} />;
@@ -173,7 +176,6 @@ export function Watchlist({ market, items, reload }) {
     catch (exception) { setError(exception.message); }
   }
 
-  const chartSrc = selectedItem ? (market === "cn" ? `/cn/candidate/chart?${toQuery({ symbol: selectedItem.symbol })}` : `/candidate/chart?${toQuery({ symbol: selectedItem.symbol, preset: "1y", fast: 1 })}`) : "";
   function openBatch() {
     if (market !== "us") return;
     try {
@@ -196,7 +198,7 @@ export function Watchlist({ market, items, reload }) {
           return <button key={item.symbol} type="button" className={selectedItem?.symbol === item.symbol ? "active" : ""} onClick={() => setSelected(item.symbol)}><span className="watch-item-copy"><span><strong>{item.symbol}</strong><b className={hasGain ? (gain >= 0 ? "gain-up" : "gain-down") : "gain-waiting"}>{hasGain ? `${gain >= 0 ? "+" : ""}${gain.toFixed(2)}%` : "待更新"}</b></span><small>{item.name || item.group || "观察"}</small></span><i role="button" tabIndex="0" title="删除" onClick={(event) => { event.stopPropagation(); remove(item.symbol); }}><Icon name="trash" /></i></button>;
         })}</section>) : <div className="empty">暂无自选股票</div>}</div>
       </aside>
-      {selectedItem ? <ChartFrame className="watch-chart" title={`${selectedItem.symbol} · ${selectedItem.name || selectedItem.note || selectedItem.sector || "策略图表"}`} src={chartSrc} showHeader={false} /> : <section className="watch-chart"><div className="empty">从左侧加入或选择一只股票</div></section>}
+      {selectedItem ? <LazyStrategyChart className="watch-chart" market={market} symbol={selectedItem.symbol} title={`${selectedItem.symbol} · ${selectedItem.name || selectedItem.note || selectedItem.sector || "策略图表"}`} /> : <section className="watch-chart"><div className="empty">从左侧加入或选择一只股票</div></section>}
     </ResizableWorkspace>
   </>;
 }
@@ -330,7 +332,7 @@ export function Backtest({ market, defaults }) {
           <FilterSection title="可选买入条件" note="默认勾选趋势条件"><EntryConditionFields form={form} setForm={setForm} /></FilterSection>
         </> : <FilterSection title="策略与交易参数" note="高级"><StrategyFields market={market} form={form} setForm={setForm} /></FilterSection>}
       </form>
-      <section className="backtest-canvas">{src ? <ChartFrame title={`${form.symbol} 回测结果`} src={src} className="report-frame" onClose={() => setSrc("")} /> : <WorkspaceEmpty title="回测结果" note="当前尚未运行回测" />}</section>
+      <section className="backtest-canvas">{src ? <LazyBacktestReport url={src} symbol={form.symbol} market={market} onClose={() => setSrc("")} /> : <WorkspaceEmpty title="回测结果" note="当前尚未运行回测" />}</section>
     </ResizableWorkspace>
   </>;
 }
@@ -341,5 +343,5 @@ export function BatchBacktest({ market, defaults }) {
   const [src, setSrc] = usePersistentState("backtest.us.batch.result", "");
   if (market === "cn") return <><PageToolbar title="A股批量回测" subtitle="A股批量组合回测尚未启用" /><WorkspaceEmpty title="A股批量回测暂未启用" note="当前可使用 A股单票回测" /></>;
   function run(event) { event.preventDefault(); setSrc(`/batch/run/frame?${toQuery({ ...form, _report_only: 1 })}`); }
-  return <><PageToolbar title="美股批量回测" subtitle="按总资金和单票投入金额观察组合收益" /><ResizableWorkspace storageKey="backtest.us.batch.rail" className="backtest-workspace" initial={300} min={250} max={460}><form className="backtest-rail" onSubmit={run}><div className="rail-title"><Icon name="batch" /><strong>组合设置</strong><span>US</span></div><div className="backtest-fields"><Field label="股票列表"><textarea rows="3" value={form.symbols} onChange={(event) => setForm({ ...form, symbols: event.target.value })} /></Field><Field label="回测周期"><select value={form.preset} onChange={(event) => setForm({ ...form, preset: event.target.value })}><option value="3m">3个月</option><option value="6m">6个月</option><option value="1y">1年</option><option value="3y">3年</option><option value="custom">自定义</option></select></Field><Input form={form} setForm={setForm} name="initial_cash" label="总资金" /><Input form={form} setForm={setForm} name="position_cash" label="单票资金" /><button className="primary-action" type="submit"><Icon name="play" />运行批量回测</button></div><FilterSection title="策略参数" note="高级"><StrategyFields market="us" form={form} setForm={setForm} /></FilterSection></form><section className="backtest-canvas">{src ? <ChartFrame title="批量回测结果" src={src} className="report-frame" onClose={() => setSrc("")} /> : <WorkspaceEmpty title="批量回测结果" note="当前尚未运行批量回测" />}</section></ResizableWorkspace></>;
+  return <><PageToolbar title="美股批量回测" subtitle="按总资金和单票投入金额观察组合收益" /><ResizableWorkspace storageKey="backtest.us.batch.rail" className="backtest-workspace" initial={300} min={250} max={460}><form className="backtest-rail" onSubmit={run}><div className="rail-title"><Icon name="batch" /><strong>组合设置</strong><span>US</span></div><div className="backtest-fields"><Field label="股票列表"><textarea rows="3" value={form.symbols} onChange={(event) => setForm({ ...form, symbols: event.target.value })} /></Field><Field label="回测周期"><select value={form.preset} onChange={(event) => setForm({ ...form, preset: event.target.value })}><option value="3m">3个月</option><option value="6m">6个月</option><option value="1y">1年</option><option value="3y">3年</option><option value="custom">自定义</option></select></Field><Input form={form} setForm={setForm} name="initial_cash" label="总资金" /><Input form={form} setForm={setForm} name="position_cash" label="单票资金" /><button className="primary-action" type="submit"><Icon name="play" />运行批量回测</button></div><FilterSection title="策略参数" note="高级"><StrategyFields market="us" form={form} setForm={setForm} /></FilterSection></form><section className="backtest-canvas">{src ? <LazyBatchReport url={src} onClose={() => setSrc("")} /> : <WorkspaceEmpty title="批量回测结果" note="当前尚未运行批量回测" />}</section></ResizableWorkspace></>;
 }

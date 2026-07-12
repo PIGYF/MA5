@@ -9052,6 +9052,7 @@ class Handler(BaseHTTPRequestHandler):
                 b1_require_20ma_gt_50ma=checkbox_field(params, "b1_require_20ma_gt_50ma", False),
                 require_ma5_rising=checkbox_field(params, "require_ma5_rising", False),
                 require_5ma_gt_20ma=checkbox_field(params, "require_5ma_gt_20ma", False),
+                preset=field(params, "preset", "1y").lower(),
             )
             payload["j_threshold"] = j_threshold
             self.send_json(payload)

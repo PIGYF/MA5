@@ -147,6 +147,7 @@ wait_for_url() {
 wait_for_url "业务服务" "${APP_HEALTH_URL}"
 wait_for_url "新版前端" "${FRONTEND_URL}"
 wait_for_url "登录入口" "${HEALTH_URL}"
+"${PYTHON_BIN}" "${SCRIPT_DIR}/smoke_test.py" --base-url "${APP_HEALTH_URL%/api/health}"
 
 echo "${NEW_COMMIT}" > "${LAST_SUCCESS_FILE}"
 echo "[INFO] 部署成功：${NEW_COMMIT}"

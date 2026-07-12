@@ -61,6 +61,9 @@ wait_for_url() {
 if [[ -f "${REPO_DIR}/frontend/dist/index.html" ]]; then
   wait_for_url "业务服务" "${APP_HEALTH_URL}"
   wait_for_url "新版前端" "${FRONTEND_URL}"
+  PYTHON_BIN="${VENV_DIR:-${PROJECT_DIR}/.venv}/bin/python"
+  [[ -x "${PYTHON_BIN}" ]] || PYTHON_BIN="python3"
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/smoke_test.py" --base-url "${APP_HEALTH_URL%/api/health}"
 fi
 wait_for_url "登录入口" "${HEALTH_URL}"
 

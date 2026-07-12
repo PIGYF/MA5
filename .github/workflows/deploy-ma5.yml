@@ -70,6 +70,19 @@ jobs:
           bash -n deploy/deploy.sh
           bash -n deploy/rollback.sh
 
+      - name: Smoke test application routes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python web_app.py --host 127.0.0.1 --port 8765 >/tmp/ma5-smoke.log 2>&1 &
+          APP_PID=$!
+          trap 'kill "$APP_PID" 2>/dev/null || true' EXIT
+          for i in {1..20}; do
+            curl -fsS http://127.0.0.1:8765/api/health >/dev/null && break
+            sleep 1
+          done
+          python deploy/smoke_test.py --base-url http://127.0.0.1:8765
+
   deploy:
     name: Deploy to Aliyun
     runs-on: ubuntu-latest
