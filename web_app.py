@@ -86,7 +86,9 @@ from ashare_lab import (
     filter_ashare_universe_by_board,
     latest_ashare_signal,
     load_ashare_universe_for_scan,
+    normalize_ashare_display_name,
     normalize_ashare_boards,
+    read_ashare_price_cache,
     resolve_ashare_symbol_query,
     scan_ashare_candidates,
     suggest_ashare_symbols,
@@ -435,6 +437,8 @@ def latest_scan_api_payload() -> dict[str, object]:
         for row in latest.get("candidates", [])
         if isinstance(row, dict)
     ]
+    candidates = annotate_candidate_history("us", str(latest.get("signal_date", "")), candidates)
+    cache = price_cache_summary([str(row.get("symbol", "")) for row in candidates]) if candidates else {"cached_symbols": 0, "latest": "-", "size_mb": 0}
     return {
         "ok": True,
         "has_result": True,
@@ -449,6 +453,7 @@ def latest_scan_api_payload() -> dict[str, object]:
             "params": latest.get("params", {}),
             "candidates": candidates,
             "errors": latest.get("errors", []),
+            "cache": cache,
         },
     }
 
@@ -492,6 +497,10 @@ def scanner_bootstrap_api_payload(params: dict[str, list[str]]) -> dict[str, obj
 
 def ashare_latest_scan_api_payload() -> dict[str, object]:
     latest = load_latest_ashare_scan()
+    if latest:
+        latest = dict(latest)
+        latest["candidates"] = annotate_candidate_history("cn", str(latest.get("signal_date", "")), [dict(row) for row in latest.get("candidates", []) if isinstance(row, dict)])
+        latest["cache"] = {"cached_symbols": sum(1 for row in latest["candidates"] if read_ashare_price_cache(str(row.get("symbol", "")))), "latest": latest.get("signal_date", "-")}
     return {"ok": True, "latest": json_safe(latest) if latest else None}
 
 
@@ -1231,7 +1240,7 @@ def load_ashare_watchlist_items() -> list[dict[str, str]]:
         items.append(
             {
                 "symbol": symbol,
-                "name": str(raw.get("name", "") or ""),
+                "name": normalize_ashare_display_name(str(raw.get("name", "") or "")),
                 "sector": str(raw.get("sector", "") or ""),
                 "group": str(raw.get("group", "") or "观察"),
                 "note": str(raw.get("note", "") or ""),
@@ -1257,7 +1266,7 @@ def save_ashare_watchlist_items(items: list[dict[str, str]]) -> None:
         clean_items.append(
             {
                 "symbol": symbol,
-                "name": str(item.get("name", "") or "").strip()[:80],
+                "name": normalize_ashare_display_name(str(item.get("name", "") or ""))[:80],
                 "sector": str(item.get("sector", "") or "").strip()[:80],
                 "group": str(item.get("group", "") or "观察").strip()[:40],
                 "note": str(item.get("note", "") or "").strip()[:240],
@@ -1268,7 +1277,9 @@ def save_ashare_watchlist_items(items: list[dict[str, str]]) -> None:
 
 
 def ashare_snapshot_to_dict(row: AShareSignalSnapshot) -> dict[str, object]:
-    return dict(row.__dict__)
+    payload = dict(row.__dict__)
+    payload["name"] = normalize_ashare_display_name(str(payload.get("name", "") or ""))
+    return payload
 
 
 def load_latest_ashare_scan() -> dict[str, object] | None:
@@ -1282,6 +1293,9 @@ def load_latest_ashare_scan() -> dict[str, object] | None:
         expected_signal_date = ashare_required_latest_date(date.today()).isoformat()
         if str(payload.get("signal_date", "")) != expected_signal_date:
             return None
+        for candidate in payload.get("candidates", []):
+            if isinstance(candidate, dict):
+                candidate["name"] = normalize_ashare_display_name(str(candidate.get("name", "") or ""))
         return payload
     except Exception:
         path.unlink(missing_ok=True)
@@ -1311,6 +1325,7 @@ def save_latest_ashare_scan(
         "errors": [{"symbol": symbol, "reason": reason} for symbol, reason in errors],
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    update_scan_history_index("cn", signal_date, [row.symbol for row in candidates])
 
 
 def delete_latest_ashare_scan() -> bool:
@@ -1330,6 +1345,7 @@ def add_ashare_watchlist_symbol(symbol: str, group: str = "观察", note: str = 
             sector = sector or fetched_sector
         except Exception:
             pass
+    name = normalize_ashare_display_name(name)
     items = load_ashare_watchlist_items()
     for item in items:
         if item["symbol"] == clean:
@@ -1450,6 +1466,30 @@ def clear_cache_area(area: str) -> str:
         cn_deleted = 1 if delete_latest_ashare_scan() else 0
         return f"已清理最新扫描结果 {us_deleted + cn_deleted} 个相关文件。"
     return "未知缓存类型，未执行清理。"
+
+
+def watchlist_items_with_performance(items: list[dict[str, str]], market: str) -> list[dict[str, object]]:
+    enriched: list[dict[str, object]] = []
+    for item in items:
+        row: dict[str, object] = dict(item)
+        added_date = str(item.get("added_at", "") or "")[:10]
+        try:
+            bars = read_ashare_price_cache(item["symbol"]) if market == "cn" else read_price_cache(item["symbol"])
+            eligible = [bar for bar in bars if bar.date >= added_date] if added_date else []
+            if eligible and eligible[0].close and bars[-1].close:
+                row.update(
+                    {
+                        "added_close": round(float(eligible[0].close), 4),
+                        "latest_close": round(float(bars[-1].close), 4),
+                        "performance_pct": round((float(bars[-1].close) / float(eligible[0].close) - 1) * 100, 2),
+                        "performance_start": eligible[0].date,
+                        "performance_end": bars[-1].date,
+                    }
+                )
+        except Exception:
+            pass
+        enriched.append(row)
+    return enriched
 
 
 def page_shell(content: str, active: str = "backtest", market: str = "us") -> bytes:
@@ -3027,8 +3067,9 @@ def run_ashare_strategy(params: dict[str, list[str]]) -> str:
     report_url = f"/reports/{quote(report_path.name)}"
     trades_url = f"/reports/{quote(trades_path.name)}"
     equity_url = f"/reports/{quote(equity_path.name)}"
+    if field(params, "_report_only", "0") == "1":
+        return report_path.read_text(encoding="utf-8")
     return f"""
-{render_ashare_backtest_form(params)}
 <section class="result">
   <p class="hint">数据源：{html.escape(data_source)}；涨跌停阈值：{limit_pct:.0f}%；A 股执行规则已启用。</p>
   <p class="links">
@@ -4480,6 +4521,8 @@ def run_strategy(params: dict[str, list[str]]) -> str:
     report_url = f"/reports/{quote(report_path.name)}"
     trades_url = f"/reports/{quote(trades_path.name)}"
     equity_url = f"/reports/{quote(equity_path.name)}"
+    if field(params, "_report_only", "0") == "1":
+        return report_path.read_text(encoding="utf-8")
     return f"""
 {render_backtest_form(params)}
 <section class="result">
@@ -4950,8 +4993,9 @@ def run_batch_backtest(params: dict[str, list[str]]) -> str:
 </section>
 """
     )
+    form_html = "" if field(params, "_report_only", "0") == "1" else render_batch_form(params)
     return f"""
-{render_batch_form(params)}
+  {form_html}
 <section class="result">
   <p class="hint">组合资金池回测：已处理 {len(symbols)} 个代码，成功 {len(symbol_data)} 个，失败 {len(errors)} 个。区间：{html.escape(start)} 到 {html.escape(end)}。每次买入金额：{position_cash:,.2f}。</p>
   <section class="status-strip">
@@ -6209,6 +6253,45 @@ def delete_latest_scan() -> int:
     return deleted
 
 
+SCAN_HISTORY_INDEX_PATH = DATA_DIR / "scan_history_index.json"
+
+
+def load_scan_history_index() -> dict[str, dict[str, list[str]]]:
+    try:
+        payload = json.loads(SCAN_HISTORY_INDEX_PATH.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {"us": {}, "cn": {}}
+    except Exception:
+        return {"us": {}, "cn": {}}
+
+
+def update_scan_history_index(market: str, signal_date: str, symbols: list[str]) -> None:
+    if not signal_date:
+        return
+    payload = load_scan_history_index()
+    market_rows = payload.setdefault(market, {})
+    market_rows[signal_date] = sorted(set(symbols))
+    recent_dates = sorted(market_rows, reverse=True)[:45]
+    payload[market] = {day: market_rows[day] for day in recent_dates}
+    SCAN_HISTORY_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SCAN_HISTORY_INDEX_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def annotate_candidate_history(market: str, signal_date: str, rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    history = load_scan_history_index().get(market, {})
+    prior_dates = [day for day in sorted(history, reverse=True) if day < signal_date]
+    previous = set(history.get(prior_dates[0], [])) if prior_dates else set()
+    for row in rows:
+        symbol = str(row.get("symbol", "")).upper()
+        streak = 1
+        for day in prior_dates:
+            if symbol not in set(history.get(day, [])):
+                break
+            streak += 1
+        row["selection_streak"] = streak
+        row["is_new_candidate"] = bool(prior_dates and symbol not in previous)
+    return rows
+
+
 def load_latest_scan() -> dict[str, object] | None:
     cleanup_stale_latest_scan()
     if not LATEST_SCAN_PATH.exists():
@@ -6255,6 +6338,7 @@ def save_latest_scan(
         "errors": [{"symbol": symbol, "reason": reason} for symbol, reason in errors],
     }
     LATEST_SCAN_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    update_scan_history_index("us", end, [row.symbol for row in display_rows])
     try:
         start_us_profile_update_for_symbols([row.symbol for row in display_rows], "latest scan")
     except Exception:
@@ -7256,8 +7340,7 @@ def urlencode_candidate_params(params: dict[str, list[str]], symbol: str) -> str
     return urlencode(flat)
 
 
-def render_candidate_chart_frame(params: dict[str, list[str]]) -> bytes:
-    payload = watchlist_chart_payload(params)
+def render_strategy_chart_payload(payload: dict[str, object]) -> bytes:
     error = str(payload.get("error", "")) if isinstance(payload, dict) else ""
     body = f"""
 <!doctype html>
@@ -7269,27 +7352,49 @@ def render_candidate_chart_frame(params: dict[str, list[str]]) -> bytes:
 <style>
 * {{ box-sizing: border-box; }}
 body {{ margin: 0; background: #fff; color: #131722; font-family: Inter, "Microsoft YaHei UI", "PingFang SC", Arial, sans-serif; }}
-.frame {{ height: 760px; padding: 10px; }}
-.title {{ display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin: 0 0 8px; font-size: 13px; color: #5d6675; }}
-.title strong {{ color: #131722; font-size: 15px; }}
-#price {{ height: 520px; }}
-#kdj {{ height: 170px; margin-top: 12px; border-top: 1px solid #eef1f5; }}
-.chart-toggle-row {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 8px; }}
-.chart-toggle {{ display: inline-flex; align-items: center; gap: 5px; min-height: 24px; border: 1px solid #d6dbe3; background: #fff; color: #334155; border-radius: 4px; padding: 0 7px; font-size: 12px; font-weight: 800; cursor: pointer; }}
-.chart-toggle input {{ margin: 0; }}
+.frame {{ height: 100vh; min-height: 420px; display: grid; grid-template-rows: 42px minmax(0, 1fr); overflow: hidden; }}
+.chart-toolbar {{ min-width: 0; display: flex; align-items: center; gap: 8px; padding: 5px 8px; overflow-x: auto; border-bottom: 1px solid #d9dde5; background: #f7f8fa; scrollbar-width: thin; }}
+.chart-meta {{ min-width: 140px; display: grid; gap: 1px; margin-right: 2px; }}
+.chart-meta strong {{ overflow: hidden; color: #131722; font-size: 13px; white-space: nowrap; text-overflow: ellipsis; }}
+.chart-meta span {{ color: #787b86; font-size: 10px; white-space: nowrap; }}
+.periods {{ display: inline-flex; flex: 0 0 auto; overflow: hidden; border: 1px solid #d9dde5; border-radius: 6px; background: #fff; }}
+.periods button {{ min-width: 34px; height: 28px; padding: 0 7px; color: #4f5360; border: 0; border-right: 1px solid #eceef2; background: transparent; cursor: pointer; font-size: 11px; font-weight: 800; }}
+.periods button:last-child {{ border-right: 0; }}
+.periods button:hover {{ background: #f3f6fc; }}
+.periods button.active {{ color: #fff; background: #2962ff; }}
+.chart-divider {{ width: 1px; height: 22px; flex: 0 0 auto; background: #d9dde5; }}
+.chart-toggle {{ height: 28px; display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; padding: 0 8px; color: #4f5360; border: 1px solid #d9dde5; border-radius: 6px; background: #fff; cursor: pointer; font-size: 11px; font-weight: 750; }}
+.chart-toggle:hover {{ background: #f3f6fc; }}
+.chart-toggle input {{ width: 13px; height: 13px; margin: 0; accent-color: #2962ff; }}
+.icon-tool {{ width: 30px; height: 28px; display: grid; place-items: center; flex: 0 0 auto; padding: 0; color: #4f5360; border: 1px solid #d9dde5; border-radius: 6px; background: #fff; cursor: pointer; }}
+.icon-tool:hover {{ color: #2962ff; background: #eaf0ff; }}
+.icon-tool svg {{ width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }}
+.chart-stack {{ min-height: 0; display: grid; grid-template-rows: minmax(260px, 3fr) minmax(115px, 1fr); gap: 0; padding: 0 6px 6px; }}
+.chart-stack.hide-kdj {{ grid-template-rows: minmax(0, 1fr) 0; }}
+#price, #kdj {{ min-height: 0; }}
+#kdj {{ overflow: hidden; border-top: 1px solid #eceef2; }}
+.chart-stack.hide-kdj #kdj {{ display: none; }}
 .error {{ margin: 20px; padding: 12px; border: 1px solid #ffc9cf; background: #fff5f6; color: #b42332; border-radius: 6px; }}
+@media (max-width: 620px) {{ .chart-meta {{ min-width: 105px; }} .chart-toolbar {{ gap: 6px; }} .chart-toggle {{ padding: 0 6px; }} }}
 </style>
 </head>
 <body>
 <div class="frame">
-  <div class="title"><strong id="title">候选图表</strong><span id="range"></span></div>
-  <div class="chart-toggle-row">
-    <label class="chart-toggle"><input id="candidate-toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
-    <label class="chart-toggle"><input id="candidate-toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
-    <label class="chart-toggle"><input id="candidate-toggle-signal-markers" type="checkbox">B/S信号日</label>
+  <div class="chart-toolbar">
+    <div class="chart-meta"><strong id="title">策略图表</strong><span id="range"></span></div>
+    <div class="periods" id="periods">
+      <button type="button" data-preset="1m">1M</button><button type="button" data-preset="3m">3M</button><button type="button" data-preset="6m">6M</button><button type="button" data-preset="1y">1Y</button><button type="button" data-preset="3y">3Y</button><button type="button" data-preset="5y">5Y</button>
+    </div>
+    <span class="chart-divider"></span>
+    <label class="chart-toggle"><input id="toggle-ma5" type="checkbox" checked>MA5</label>
+    <label class="chart-toggle"><input id="toggle-ma20" type="checkbox" checked>MA20</label>
+    <label class="chart-toggle"><input id="toggle-volume" type="checkbox" checked>成交量</label>
+    <label class="chart-toggle"><input id="toggle-kdj" type="checkbox" checked>KDJ</label>
+    <label class="chart-toggle"><input id="toggle-signals" type="checkbox">B/S信号</label>
+    <label class="chart-toggle"><input id="toggle-defense" type="checkbox">策略线</label>
+    <button class="icon-tool" id="fit-chart" type="button" title="适应窗口" aria-label="适应窗口"><svg viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5M3 8l6-5M21 8l-6-5M3 16l6 5M21 16l-6 5"/></svg></button>
   </div>
-  <div id="price"></div>
-  <div id="kdj"></div>
+  <div class="chart-stack" id="chart-stack"><div id="price"></div><div id="kdj"></div></div>
 </div>
 <script type="application/json" id="payload">{json.dumps(payload, ensure_ascii=False, allow_nan=False)}</script>
 <script>
@@ -7297,8 +7402,31 @@ const payload = JSON.parse(document.getElementById("payload").textContent);
 if (payload.error) {{
   document.body.innerHTML = `<div class="error">${{payload.error}}</div>`;
 }} else {{
-  document.getElementById("title").textContent = `${{payload.symbol}} 日K`;
-  document.getElementById("range").textContent = `${{payload.start}} 到 ${{payload.end}}`;
+  const toLine = rows => (rows || []).map(row => row.time ? row : ({{ time: row.x, value: row.y }})).filter(row => row.value !== null && row.value !== undefined);
+  const ohlc = (payload.ohlc || []).map(row => row.time ? row : ({{ time: row.x, open: row.open, high: row.high, low: row.low, close: row.close }}));
+  const volumeData = (payload.volume || []).map(row => row.time ? row : ({{ time: row.x, value: row.y, color: row.color }}));
+  const ma5Data = toLine(payload.ma || payload.ma5 || payload.zx_short_trend);
+  const ma20Data = toLine(payload.ma20 || payload.zx_multi_trend);
+  const volMaData = toLine(payload.volMa || payload.volume_ma20);
+  const volThresholdData = toLine(payload.volThreshold);
+  const kData = toLine(payload.kdjK || payload.k);
+  const dData = toLine(payload.kdjD || payload.d);
+  const jData = toLine(payload.kdjJ || payload.j);
+  const dates = ohlc.map(row => row.time);
+  const firstDate = payload.start || dates[0] || "";
+  const lastDate = payload.end || dates[dates.length - 1] || "";
+  document.getElementById("title").textContent = `${{payload.symbol}}${{payload.name ? " · " + payload.name : ""}}`;
+  document.getElementById("range").textContent = `${{firstDate}} - ${{lastDate}}`;
+  const activePreset = payload.preset || new URL(location.href).searchParams.get("preset") || "1y";
+  document.querySelectorAll("[data-preset]").forEach(button => button.classList.toggle("active", button.dataset.preset === activePreset));
+  document.getElementById("periods").addEventListener("click", event => {{
+    const button = event.target.closest("[data-preset]");
+    if (!button || button.dataset.preset === activePreset) return;
+    const next = new URL(location.href);
+    next.searchParams.set("preset", button.dataset.preset);
+    localStorage.setItem("ma5.chart.preset", button.dataset.preset);
+    location.href = next.toString();
+  }});
   const priceEl = document.getElementById("price");
   const kdjEl = document.getElementById("kdj");
   const baseOptions = {{
@@ -7312,41 +7440,59 @@ if (payload.error) {{
   }};
   const chart = LightweightCharts.createChart(priceEl, {{ ...baseOptions, width: priceEl.clientWidth, height: priceEl.clientHeight, rightPriceScale: {{ borderColor: "#d6dbe3", scaleMargins: {{ top: 0.08, bottom: 0.28 }} }} }});
   const candle = chart.addCandlestickSeries({{ upColor: "#089981", downColor: "#f23645", borderUpColor: "#089981", borderDownColor: "#f23645", wickUpColor: "#089981", wickDownColor: "#f23645", priceLineVisible: false }});
-  candle.setData(payload.ohlc || []);
-  chart.addLineSeries({{ color: "#f5a623", lineWidth: 2, title: "5MA", priceLineVisible: false }}).setData(payload.ma || []);
-  chart.addLineSeries({{ color: "#94a3b8", lineWidth: 1, title: "20MA", priceLineVisible: false, lastValueVisible: false }}).setData(payload.ma20 || []);
-  const ma5Stop25 = chart.addLineSeries({{ color: "#dc2626", lineWidth: 1, title: "5MA-2.5%", priceLineVisible: false, lastValueVisible: false }});
+  candle.setData(ohlc);
+  const ma5Series = chart.addLineSeries({{ color: "#f5a623", lineWidth: 2, title: "5MA", priceLineVisible: false }});
+  const ma20Series = chart.addLineSeries({{ color: "#94a3b8", lineWidth: 1, title: "20MA", priceLineVisible: false, lastValueVisible: false }});
+  ma5Series.setData(ma5Data);
+  ma20Series.setData(ma20Data);
   const ma5Stop = chart.addLineSeries({{ color: "#ef4444", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, title: `5MA-${{payload.ma5StopPct || 7.5}}%`, priceLineVisible: false, lastValueVisible: false }});
-  function refreshDefenseLines() {{
-    ma5Stop25.setData(document.getElementById("candidate-toggle-ma5-stop-25")?.checked ? (payload.ma5Stop25 || []) : []);
-    ma5Stop.setData(document.getElementById("candidate-toggle-ma5-stop-strategy")?.checked ? (payload.ma5Stop || []) : []);
-  }}
-  refreshDefenseLines();
-  document.getElementById("candidate-toggle-ma5-stop-25")?.addEventListener("change", refreshDefenseLines);
-  document.getElementById("candidate-toggle-ma5-stop-strategy")?.addEventListener("change", refreshDefenseLines);
   const volume = chart.addHistogramSeries({{ priceScaleId: "", priceFormat: {{ type: "volume" }}, priceLineVisible: false, lastValueVisible: false }});
-  volume.setData(payload.volume || []);
   chart.priceScale("").applyOptions({{ scaleMargins: {{ top: 0.78, bottom: 0 }} }});
-  chart.addLineSeries({{ color: "#2962ff", lineWidth: 1, priceScaleId: "", title: "成交量均线", priceLineVisible: false, lastValueVisible: false }}).setData(payload.volMa || []);
-  chart.addLineSeries({{ color: "#f97316", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, priceScaleId: "", title: `${{payload.volMultiplier || ""}}x Vol`, priceLineVisible: false, lastValueVisible: false }}).setData(payload.volThreshold || []);
+  const volMaSeries = chart.addLineSeries({{ color: "#2962ff", lineWidth: 1, priceScaleId: "", title: "成交量均线", priceLineVisible: false, lastValueVisible: false }});
+  const volThresholdSeries = chart.addLineSeries({{ color: "#f97316", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, priceScaleId: "", title: `${{payload.volMultiplier || ""}}x Vol`, priceLineVisible: false, lastValueVisible: false }});
+  volume.setData(volumeData);
+  volMaSeries.setData(volMaData);
+  volThresholdSeries.setData(volThresholdData);
   function refreshMarkers() {{
     const baseMarkers = payload.markers || [];
-    const signalMarkers = document.getElementById("candidate-toggle-signal-markers")?.checked ? (payload.signalMarkers || []) : [];
+    const ashareSignals = (payload.signals || []).map(row => ({{ time: row.x, position: "belowBar", color: "#089981", shape: "circle", text: row.text || "B" }}));
+    const signalMarkers = document.getElementById("toggle-signals")?.checked ? ([...(payload.signalMarkers || []), ...ashareSignals]) : [];
     candle.setMarkers([...baseMarkers, ...signalMarkers].sort((a, b) => String(a.time).localeCompare(String(b.time))));
   }}
   refreshMarkers();
-  document.getElementById("candidate-toggle-signal-markers")?.addEventListener("change", refreshMarkers);
   const kdjChart = LightweightCharts.createChart(kdjEl, {{ ...baseOptions, width: kdjEl.clientWidth, height: kdjEl.clientHeight }});
-  kdjChart.addLineSeries({{ color: "#2563eb", lineWidth: 1.5, title: "K", priceLineVisible: false }}).setData(payload.kdjK || []);
-  kdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "D", priceLineVisible: false }}).setData(payload.kdjD || []);
-  kdjChart.addLineSeries({{ color: "#7c3aed", lineWidth: 2, title: "J", priceLineVisible: false }}).setData(payload.kdjJ || []);
-  kdjChart.addLineSeries({{ color: "#94a3b8", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: "80", priceLineVisible: false, lastValueVisible: false }}).setData(payload.kdjUpper || []);
-  kdjChart.addLineSeries({{ color: "#94a3b8", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: "20", priceLineVisible: false, lastValueVisible: false }}).setData(payload.kdjLower || []);
+  kdjChart.addLineSeries({{ color: "#2563eb", lineWidth: 1.5, title: "K", priceLineVisible: false }}).setData(kData);
+  kdjChart.addLineSeries({{ color: "#f59e0b", lineWidth: 1.5, title: "D", priceLineVisible: false }}).setData(dData);
+  kdjChart.addLineSeries({{ color: "#7c3aed", lineWidth: 2, title: "J", priceLineVisible: false }}).setData(jData);
+  kdjChart.addLineSeries({{ color: "#94a3b8", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: "80", priceLineVisible: false, lastValueVisible: false }}).setData(dates.map(time => ({{ time, value: 80 }})));
+  kdjChart.addLineSeries({{ color: "#94a3b8", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: "20", priceLineVisible: false, lastValueVisible: false }}).setData(dates.map(time => ({{ time, value: 20 }})));
+  function refreshChartOptions() {{
+    ma5Series.setData(document.getElementById("toggle-ma5").checked ? ma5Data : []);
+    ma20Series.setData(document.getElementById("toggle-ma20").checked ? ma20Data : []);
+    const showVolume = document.getElementById("toggle-volume").checked;
+    volume.setData(showVolume ? volumeData : []);
+    volMaSeries.setData(showVolume ? volMaData : []);
+    volThresholdSeries.setData(showVolume ? volThresholdData : []);
+    ma5Stop.setData(document.getElementById("toggle-defense").checked ? toLine(payload.ma5Stop) : []);
+    document.getElementById("chart-stack").classList.toggle("hide-kdj", !document.getElementById("toggle-kdj").checked);
+    refreshMarkers();
+  }}
+  const chartStateKey = "ma5.chart.controls.v1";
+  try {{
+    const saved = JSON.parse(localStorage.getItem(chartStateKey) || "{{}}");
+    document.querySelectorAll(".chart-toggle input").forEach(input => {{ if (typeof saved[input.id] === "boolean") input.checked = saved[input.id]; }});
+  }} catch {{}}
+  document.querySelectorAll(".chart-toggle input").forEach(input => input.addEventListener("change", () => {{
+    let state = {{}}; try {{ state = JSON.parse(localStorage.getItem(chartStateKey) || "{{}}"); }} catch {{}} document.querySelectorAll(".chart-toggle input").forEach(item => state[item.id] = item.checked);
+    localStorage.setItem(chartStateKey, JSON.stringify(state)); refreshChartOptions();
+  }}));
+  refreshChartOptions();
   let syncing = false;
   chart.timeScale().subscribeVisibleLogicalRangeChange(range => {{ if (!range || syncing) return; syncing = true; kdjChart.timeScale().setVisibleLogicalRange(range); syncing = false; }});
   kdjChart.timeScale().subscribeVisibleLogicalRangeChange(range => {{ if (!range || syncing) return; syncing = true; chart.timeScale().setVisibleLogicalRange(range); syncing = false; }});
   chart.timeScale().fitContent();
   kdjChart.timeScale().fitContent();
+  document.getElementById("fit-chart").addEventListener("click", () => {{ chart.timeScale().fitContent(); kdjChart.timeScale().fitContent(); }});
   new ResizeObserver(entries => chart.applyOptions({{ width: Math.floor(entries[0].contentRect.width), height: Math.floor(entries[0].contentRect.height) }})).observe(priceEl);
   new ResizeObserver(entries => kdjChart.applyOptions({{ width: Math.floor(entries[0].contentRect.width), height: Math.floor(entries[0].contentRect.height) }})).observe(kdjEl);
 }}
@@ -7355,6 +7501,29 @@ if (payload.error) {{
 </html>
 """
     return body.encode("utf-8")
+
+
+def render_candidate_chart_frame(params: dict[str, list[str]]) -> bytes:
+    payload = watchlist_chart_payload(params)
+    if isinstance(payload, dict):
+        payload["market"] = "us"
+    return render_strategy_chart_payload(payload)
+
+
+def render_ashare_candidate_chart_frame(params: dict[str, list[str]]) -> bytes:
+    try:
+        payload = ashare_chart_payload(
+            field(params, "symbol", ""),
+            number_field(params, "j_threshold", 14.0),
+            b1_require_20ma_gt_50ma=checkbox_field(params, "b1_require_20ma_gt_50ma", False),
+            require_ma5_rising=checkbox_field(params, "require_ma5_rising", False),
+            require_5ma_gt_20ma=checkbox_field(params, "require_5ma_gt_20ma", False),
+            preset=field(params, "preset", "1y").lower(),
+        )
+        payload["market"] = "cn"
+    except Exception as exc:
+        payload = {"error": str(exc), "market": "cn"}
+    return render_strategy_chart_payload(payload)
 
 
 def watchlist_metadata_by_symbol(symbols: list[str]) -> dict[str, dict[str, object]]:
@@ -8509,11 +8678,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif route_path == "/scanner/frame":
                     self.send_bytes(frame_shell(render_ashare_scanner(params), "scanner", "cn"))
                 elif route_path == "/candidate/chart":
-                    chart_params = {key: list(values) for key, values in params.items()}
-                    chart_params["mode"] = ["single"]
-                    chart_params["embed"] = ["1"]
-                    chart_content = f'<div class="chart-only-frame">{render_ashare_scanner(chart_params)}</div>'
-                    self.send_bytes(frame_shell(chart_content, "scanner", "cn"))
+                    self.send_bytes(render_ashare_candidate_chart_frame(params))
                 elif route_path == "/scan/start":
                     self.start_ashare_scan_job(params)
                 elif route_path == "/scan/status":
@@ -8535,7 +8700,8 @@ class Handler(BaseHTTPRequestHandler):
                 elif route_path == "/backtest/frame":
                     self.send_bytes(frame_shell(render_ashare_backtest_form(params), "backtest", "cn"))
                 elif route_path == "/run/frame":
-                    self.send_bytes(frame_shell(run_ashare_strategy(params), "backtest", "cn"))
+                    content = run_ashare_strategy(params)
+                    self.send_bytes(content.encode("utf-8") if field(params, "_report_only", "0") == "1" else frame_shell(content, "backtest", "cn"))
                 else:
                     self.send_error(404)
             elif route_path == "/company-profiles/update":
@@ -8545,7 +8711,8 @@ class Handler(BaseHTTPRequestHandler):
             elif route_path == "/company-profiles/stop":
                 self.stop_us_company_profiles_job(params)
             elif route_path == "/run/frame":
-                self.send_bytes(frame_shell(run_strategy(params), "backtest", "us"))
+                content = run_strategy(params)
+                self.send_bytes(content.encode("utf-8") if field(params, "_report_only", "0") == "1" else frame_shell(content, "backtest", "us"))
             elif route_path == "/batch/run/frame":
                 self.send_bytes(frame_shell(run_batch_backtest(params), "batch", "us"))
             elif route_path == "/watchlist/add":
@@ -8589,6 +8756,15 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if route_path == "/api/health":
                 self.send_json({"ok": True, "status": "ok"})
+            elif route_path == "/api/cache/summary":
+                self.send_json({"ok": True, "areas": cache_dashboard_summary()})
+            elif route_path == "/api/cache/clear":
+                area = field(params, "area", "")
+                if area not in {"reports", "prices", "us_market", "ashare", "latest"}:
+                    self.send_json({"ok": False, "error": "未知缓存类型，未执行清理。"}, status=400)
+                else:
+                    message = clear_cache_area(area)
+                    self.send_json({"ok": True, "message": message, "areas": cache_dashboard_summary()})
             elif route_path == "/api/us/scanner/bootstrap":
                 self.send_json(scanner_bootstrap_api_payload(params))
             elif route_path == "/api/us/scan/latest":
@@ -8606,7 +8782,7 @@ class Handler(BaseHTTPRequestHandler):
             elif route_path == "/api/us/scan/stop":
                 self.stop_scan_job({"id": params.get("id", params.get("job_id", [""]))})
             elif route_path == "/api/us/watchlist":
-                self.send_json({"ok": True, "items": load_watchlist_items()})
+                self.send_json({"ok": True, "items": watchlist_items_with_performance(load_watchlist_items(), "us")})
             elif route_path == "/api/us/watchlist/add":
                 self.add_watchlist_item_json(params)
             elif route_path == "/api/us/watchlist/delete":
@@ -8628,7 +8804,7 @@ class Handler(BaseHTTPRequestHandler):
             elif route_path == "/api/cn/scan/stop":
                 self.stop_ashare_scan_job({"job_id": params.get("job_id", params.get("id", [""]))})
             elif route_path == "/api/cn/watchlist":
-                self.send_json({"ok": True, "items": load_ashare_watchlist_items()})
+                self.send_json({"ok": True, "items": watchlist_items_with_performance(load_ashare_watchlist_items(), "cn")})
             elif route_path == "/api/cn/watchlist/add":
                 items = add_ashare_watchlist_symbol(
                     field(params, "symbol", ""),

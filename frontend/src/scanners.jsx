@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { getJson, isJobRunning, numberText, toQuery } from "./lib";
-import { Checkbox, ChartFrame, Field, FilterSection, Icon, PageToolbar, Progress, WorkspaceEmpty } from "./ui";
+import { getJson, isJobRunning, numberText, toQuery, usePersistentState } from "./lib";
+import { filterCandidates } from "./resultFilters";
+import { Checkbox, ChartFrame, Field, FilterSection, Icon, PageToolbar, Progress, ResizableWorkspace, WorkspaceEmpty } from "./ui";
 
 function value(form, key) {
   return form?.[key] ?? "";
@@ -99,8 +100,24 @@ function CnFilters({ form, setForm, boards }) {
 }
 
 function CandidateTable({ market, rows, selected, onSelect, onAdd }) {
-  return <div className="table-wrap"><table><thead><tr><th>操作</th><th>代码</th><th>公司</th><th>B点</th><th>入选原因</th><th>技术分</th><th>量比</th><th>{market === "cn" ? "20日额" : "市值"}</th><th>行业</th></tr></thead><tbody>
-    {rows.length ? rows.map((row) => {
+  const [sort, setSort] = usePersistentState(`scanner.${market}.sort`, { key: "score", direction: "desc" });
+  const [widths, setWidths] = usePersistentState(`scanner.${market}.columns`, [52, 82, 180, 70, 260, 78, 72, 100, 150, 76]);
+  const sortedRows = useMemo(() => [...rows].sort((left, right) => {
+    const read = (row) => sort.key === "score" ? Number(market === "cn" ? row.volume_score : row.technical_score) : sort.key === "volume" ? Number(row.volume_ratio) : String(row[sort.key] || row.symbol || "");
+    const a = read(left); const b = read(right); const result = typeof a === "number" ? a - b : String(a).localeCompare(String(b));
+    return sort.direction === "asc" ? result : -result;
+  }), [market, rows, sort]);
+  const sortBy = (key) => setSort((current) => ({ key, direction: current.key === key && current.direction === "desc" ? "asc" : "desc" }));
+  const resizeColumn = (index, event) => {
+    event.preventDefault(); event.stopPropagation();
+    const startX = event.clientX; const startWidth = widths[index];
+    const move = (moveEvent) => setWidths((current) => current.map((width, currentIndex) => currentIndex === index ? Math.max(56, startWidth + moveEvent.clientX - startX) : width));
+    const stop = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", stop); };
+    window.addEventListener("pointermove", move); window.addEventListener("pointerup", stop);
+  };
+  const headers = [{ label: "操作" }, { label: "代码", key: "symbol" }, { label: "公司", key: "company_name" }, { label: "B点", key: "signal_type" }, { label: "入选原因" }, { label: "技术分", key: "score" }, { label: "量比", key: "volume" }, { label: market === "cn" ? "20日额" : "市值", key: market === "cn" ? "avg_amount_20d" : "market_cap_billion" }, { label: "行业", key: "sector" }, { label: "入选", key: "selection_streak" }];
+  return <div className="table-wrap"><table className="candidate-table"><colgroup>{widths.map((width, index) => <col key={index} style={{ width }} />)}</colgroup><thead><tr>{headers.map((header, index) => <th key={header.label} className={header.key ? "sortable" : ""} onClick={() => header.key && sortBy(header.key)}><span>{header.label}{sort.key === header.key ? (sort.direction === "asc" ? " ↑" : " ↓") : ""}</span><i onPointerDown={(event) => resizeColumn(index, event)} /></th>)}</tr></thead><tbody>
+    {sortedRows.length ? sortedRows.map((row) => {
       const symbol = row.symbol;
       const score = market === "cn" ? row.volume_score : row.technical_score;
       const rating = market === "cn" ? row.candidate_rating : row.technical_rating;
@@ -117,28 +134,36 @@ function CandidateTable({ market, rows, selected, onSelect, onAdd }) {
         <td>{numberText(row.volume_ratio)}x</td>
         <td>{market === "cn" ? `${numberText(Number(row.avg_amount_20d || 0) / 100000000)}亿` : (row.market_cap_billion || "-")}</td>
         <td>{market === "cn" ? (row.sector || "-") : (row.industry_zh || row.sector_zh || "-")}</td>
+        <td>{row.is_new_candidate ? <span className="new-candidate">新</span> : `${Number(row.selection_streak || 1)}次`}</td>
       </tr>;
-    }) : <tr><td colSpan="9" className="empty">当前信号日暂无候选</td></tr>}
+    }) : <tr><td colSpan="10" className="empty">当前筛选下暂无候选</td></tr>}
   </tbody></table></div>;
 }
 
 export function Scanner({ market, bootstrap, latest, setLatest, reloadWatchlist }) {
-  const [form, setForm] = useState(() => ({ ...(bootstrap?.defaults || {}) }));
+  const isMobile = window.matchMedia("(max-width: 820px)").matches;
+  const [form, setForm] = usePersistentState(`scanner.${market}.form`, () => ({ ...(bootstrap?.defaults || {}) }));
   const [job, setJob] = useState(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [selectedRow, setSelectedRow] = useState(null);
-  const [filtersOpen, setFiltersOpen] = useState(true);
+  const [selectedSymbol, setSelectedSymbol] = usePersistentState(`scanner.${market}.selected`, "");
+  const [filtersOpen, setFiltersOpen] = usePersistentState(`scanner.${market}.filters.${isMobile ? "mobile" : "desktop"}`, () => !isMobile);
+  const [tableHeight, setTableHeight] = usePersistentState(`scanner.${market}.tableHeight`, 220);
+  const [resultFilter, setResultFilter] = usePersistentState(`scanner.${market}.resultFilter`, { query: "", signal: "all", rating: "all", minScore: "", onlyNew: false, consecutive: false });
+  const [starting, setStarting] = useState(false);
   const prefix = `/api/${market}`;
   const rows = latest?.candidates || [];
+  const visibleRows = useMemo(() => filterCandidates(rows, market, resultFilter), [market, resultFilter, rows]);
+  const selectedRow = visibleRows.find((row) => row.symbol === selectedSymbol) || null;
   const running = isJobRunning(job);
   const jobId = job?.job_id;
 
-  useEffect(() => setForm({ ...(bootstrap?.defaults || {}) }), [bootstrap]);
+  useEffect(() => setForm((current) => ({ ...(bootstrap?.defaults || {}), ...current })), [bootstrap, setForm]);
 
   useEffect(() => {
-    if (!selectedRow && rows.length) setSelectedRow(rows[0]);
-  }, [rows, selectedRow]);
+    if (!selectedRow && visibleRows.length) setSelectedSymbol(visibleRows[0].symbol);
+    if (!visibleRows.length && selectedSymbol) setSelectedSymbol("");
+  }, [selectedRow, selectedSymbol, setSelectedSymbol, visibleRows]);
 
   useEffect(() => {
     let cancelled = false;
@@ -164,9 +189,11 @@ export function Scanner({ market, bootstrap, latest, setLatest, reloadWatchlist 
   }, [jobId, prefix, running, setLatest]);
 
   async function startScan() {
-    setError(""); setNotice(""); setSelectedRow(null);
+    setError(""); setNotice(""); setSelectedSymbol("");
+    setStarting(true);
     try { setJob(await getJson(`${prefix}/scan/start?${toQuery(form)}`)); }
     catch (exception) { setError(exception.message); }
+    finally { setStarting(false); }
   }
 
   async function jobAction(action) {
@@ -192,22 +219,44 @@ export function Scanner({ market, bootstrap, latest, setLatest, reloadWatchlist 
   }, [form, market, selectedRow]);
 
   const signalDate = latest?.signal_date || "-";
+  const startTableResize = (event) => {
+    if (window.matchMedia("(max-width: 820px)").matches) return;
+    event.preventDefault(); const startY = event.clientY; const startHeight = Number(tableHeight) || 220;
+    const move = (moveEvent) => setTableHeight(Math.max(132, Math.min(520, startHeight + moveEvent.clientY - startY)));
+    const stop = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", stop); };
+    window.addEventListener("pointermove", move); window.addEventListener("pointerup", stop);
+  };
   return <>
     <PageToolbar title={`${market === "cn" ? "A股" : "美股"}选股器`} subtitle={`盘后扫描最后一根已完成日 K · 信号日 ${signalDate}`} actions={<>
       {latest?.csv ? <a className="tool-button" href={latest.csv}><Icon name="download" />CSV</a> : null}
-      <button className="primary-action" type="button" disabled={running} onClick={startScan}><Icon name="play" />开始选股</button>
+      <button className="tool-button mobile-filter-action" type="button" onClick={() => setFiltersOpen((open) => !open)} aria-expanded={filtersOpen}><Icon name="filter" />{filtersOpen ? "收起条件" : "选股条件"}</button>
+      <button className="primary-action" type="button" disabled={running || starting} onClick={startScan}><Icon name="play" />{starting ? "正在启动" : "开始选股"}</button>
       {running && market === "us" ? <button className="tool-button" type="button" onClick={() => jobAction(job.status === "paused" ? "resume" : "pause")}><Icon name={job.status === "paused" ? "play" : "pause"} />{job.status === "paused" ? "继续" : "暂停"}</button> : null}
       {running ? <button className="danger-action" type="button" onClick={() => jobAction("stop")}><Icon name="stop" />终止</button> : null}
     </>} />
     {error ? <div className="message error">{error}</div> : null}
     {notice ? <div className="message success">{notice}</div> : null}
-    <section className={`scanner-workspace ${filtersOpen ? "" : "filters-collapsed"}`}>
+    <ResizableWorkspace storageKey={`scanner.${market}.rail`} className={`scanner-workspace ${filtersOpen ? "" : "filters-collapsed"}`} initial={300} min={240} max={440}>
       <aside className="filter-rail"><div className="rail-title"><Icon name="filter" /><strong>选股条件</strong><span>{market === "cn" ? "A Share" : "US"}</span><button className="rail-toggle" type="button" title={filtersOpen ? "收起条件" : "展开条件"} onClick={() => setFiltersOpen((open) => !open)}><Icon name={filtersOpen ? "collapse" : "expand"} /></button></div><div className="filter-content">{market === "cn" ? <CnFilters form={form} setForm={setForm} boards={bootstrap?.boards || []} /> : <UsFilters form={form} setForm={setForm} />}</div></aside>
-      <section className="result-workspace">
-        {job ? <Progress job={job} /> : <div className="result-summary"><strong>当前结果</strong><span>{signalDate}</span><b>{rows.length} 只</b></div>}
-        <CandidateTable market={market} rows={rows} selected={selectedRow?.symbol} onSelect={setSelectedRow} onAdd={add} />
-        {chartUrl ? <ChartFrame title={`${selectedRow.symbol} 策略图表`} src={chartUrl} className="scanner-chart" onClose={() => setSelectedRow(null)} /> : <WorkspaceEmpty title="暂无候选图表" note="当前信号日没有可显示的候选股票" />}
+      <section className="result-workspace" style={{ "--table-height": `${tableHeight}px` }}>
+        {job ? <Progress job={job} /> : <div className="result-summary"><strong>当前结果</strong><span>{signalDate}</span><span>{latest?.source || "缓存"}</span><span>数据至 {latest?.cache?.latest || signalDate}</span><span>缓存 {latest?.cache?.cached_symbols ?? rows.length}/{rows.length}</span><b>{rows.length} 只</b></div>}
+        <div className="result-filterbar">
+          <input aria-label="筛选候选" placeholder="代码 / 公司 / 行业" value={resultFilter.query} onChange={(event) => setResultFilter({ ...resultFilter, query: event.target.value })} />
+          <select aria-label="B点类型" value={resultFilter.signal} onChange={(event) => setResultFilter({ ...resultFilter, signal: event.target.value })}><option value="all">全部B点</option><option value="B1">B1</option><option value="B2">B2</option></select>
+          <select aria-label="评级" value={resultFilter.rating} onChange={(event) => setResultFilter({ ...resultFilter, rating: event.target.value })}><option value="all">全部评级</option><option value="Strong">Strong</option><option value="Medium">Medium</option></select>
+          <input aria-label="最低技术分" type="number" placeholder="最低分" value={resultFilter.minScore} onChange={(event) => setResultFilter({ ...resultFilter, minScore: event.target.value })} />
+          <Checkbox label="仅新增" checked={resultFilter.onlyNew} onChange={(checked) => setResultFilter({ ...resultFilter, onlyNew: checked })} />
+          <Checkbox label="连续入选" checked={resultFilter.consecutive} onChange={(checked) => setResultFilter({ ...resultFilter, consecutive: checked })} />
+          <button className="icon-button" type="button" title="清除筛选" aria-label="清除筛选" onClick={() => setResultFilter({ query: "", signal: "all", rating: "all", minScore: "", onlyNew: false, consecutive: false })}><Icon name="close" /></button>
+          <span>{visibleRows.length}/{rows.length}</span>
+        </div>
+        <CandidateTable market={market} rows={visibleRows} selected={selectedRow?.symbol} onSelect={(row) => setSelectedSymbol(row.symbol)} onAdd={add} />
+        <div className="resize-handle resize-handle-y" role="separator" aria-orientation="horizontal" tabIndex="0" onPointerDown={startTableResize} onKeyDown={(event) => {
+          if (!["ArrowUp", "ArrowDown"].includes(event.key)) return;
+          event.preventDefault(); setTableHeight(Math.max(132, Math.min(520, Number(tableHeight) + (event.key === "ArrowDown" ? 16 : -16))));
+        }} />
+        {chartUrl ? <ChartFrame title={`${selectedRow.symbol} 策略图表`} src={chartUrl} className="scanner-chart" onClose={() => setSelectedSymbol("")} /> : <WorkspaceEmpty title="暂无候选图表" note="当前信号日没有可显示的候选股票" />}
       </section>
-    </section>
+    </ResizableWorkspace>
   </>;
 }

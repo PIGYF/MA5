@@ -1,5 +1,27 @@
+import { useEffect, useState } from "react";
+
+const STORAGE_PREFIX = "ma5.ui.v1.";
+
+export function usePersistentState(key, initialValue) {
+  const storageKey = `${STORAGE_PREFIX}${key}`;
+  const [value, setValue] = useState(() => {
+    try {
+      const saved = window.localStorage.getItem(storageKey);
+      return saved === null ? (typeof initialValue === "function" ? initialValue() : initialValue) : JSON.parse(saved);
+    } catch {
+      return typeof initialValue === "function" ? initialValue() : initialValue;
+    }
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem(storageKey, JSON.stringify(value)); } catch { /* storage may be unavailable */ }
+  }, [storageKey, value]);
+  return [value, setValue];
+}
+
 export async function getJson(url) {
   const response = await fetch(url);
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) throw new Error(`服务返回异常（${response.status}），请稍后重试`);
   const payload = await response.json();
   if (!response.ok || payload.ok === false || payload.status === "error") {
     throw new Error(payload.error || `请求失败：${response.status}`);

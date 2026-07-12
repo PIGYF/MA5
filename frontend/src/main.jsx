@@ -6,6 +6,15 @@ import { Scanner } from "./scanners";
 import { Shell } from "./ui";
 import "./styles.css";
 
+class AppErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return <main className="loading-screen"><strong>页面暂时无法显示</strong><span>{this.state.error.message}</span><button className="primary-action" type="button" onClick={() => window.location.reload()}>重新加载</button></main>;
+  }
+}
+
 function App() {
   const [route, setRoute] = useState(routeFromLocation());
   const [bootstraps, setBootstraps] = useState({ us: null, cn: null });
@@ -33,31 +42,30 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([
-      getJson("/api/us/scanner/bootstrap"),
-      getJson("/api/cn/scanner/bootstrap"),
-      getJson("/api/us/watchlist"),
-      getJson("/api/cn/watchlist"),
-    ]).then(([usBoot, cnBoot, usWatch, cnWatch]) => {
-      if (cancelled) return;
-      setBootstraps({ us: usBoot, cn: cnBoot });
-      setLatest({ us: usBoot.latest_scan?.latest || null, cn: cnBoot.latest_scan?.latest || null });
-      setWatchlists({ us: usWatch.items || [], cn: cnWatch.items || [] });
-    }).catch((exception) => setError(exception.message));
+    ["us", "cn"].forEach((targetMarket) => {
+      getJson(`/api/${targetMarket}/scanner/bootstrap`).then((payload) => {
+        if (cancelled) return;
+        setBootstraps((current) => ({ ...current, [targetMarket]: payload }));
+        setLatest((current) => ({ ...current, [targetMarket]: payload.latest_scan?.latest || null }));
+      }).catch((exception) => { if (!cancelled && targetMarket === route.market) setError(exception.message); });
+      getJson(`/api/${targetMarket}/watchlist`).then((payload) => {
+        if (!cancelled) setWatchlists((current) => ({ ...current, [targetMarket]: payload.items || [] }));
+      }).catch((exception) => { if (!cancelled && targetMarket === route.market) setError(exception.message); });
+    });
     return () => { cancelled = true; };
-  }, []);
+  }, []); // Initial market data streams independently; route changes reuse the loaded cache.
 
   const market = route.market;
   const bootstrap = bootstraps[market];
   const setMarketLatest = (next) => setLatest((current) => ({ ...current, [market]: next }));
 
-  if (!bootstraps.us || !bootstraps.cn) {
+  if (!bootstrap) {
     return <main className="loading-screen"><div className="loading-mark" /><strong>正在载入策略工作台</strong>{error ? <span>{error}</span> : null}</main>;
   }
 
   return <Shell route={route} navigate={navigate} marketEnvironment={bootstrap?.market_environment}>
     {error ? <div className="message error global-message">{error}</div> : null}
-    {route.page === "home" ? <Home navigate={navigate} /> : null}
+    {route.page === "home" ? <Home market={market} navigate={navigate} /> : null}
     {route.page === "scan" ? <Scanner key={market} market={market} bootstrap={bootstrap} latest={latest[market]} setLatest={setMarketLatest} reloadWatchlist={reloadWatchlist} /> : null}
     {route.page === "watchlist" ? <Watchlist key={market} market={market} items={watchlists[market]} reload={reloadWatchlist} /> : null}
     {route.page === "backtest" ? <Backtest key={market} market={market} defaults={bootstrap?.defaults || {}} /> : null}
@@ -65,4 +73,4 @@ function App() {
   </Shell>;
 }
 
-createRoot(document.getElementById("root")).render(<App />);
+createRoot(document.getElementById("root")).render(<AppErrorBoundary><App /></AppErrorBoundary>);

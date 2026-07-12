@@ -24,6 +24,16 @@ ASHARE_PRICE_CACHE_MAX_BARS = 1300
 ASHARE_PRICE_CACHE_READY_TIME = datetime_time(15, 30)
 
 
+def normalize_ashare_display_name(name: str) -> str:
+    """Remove temporary exchange prefixes from an A-share display name."""
+    value = str(name or "").strip()
+    upper_value = value.upper()
+    for prefix in ("XD", "XR", "DR"):
+        if upper_value.startswith(prefix) and len(value) > len(prefix):
+            return value[len(prefix) :].strip()
+    return value
+
+
 @dataclass
 class AShareBar:
     date: str
@@ -87,6 +97,9 @@ class AShareUniverseItem:
     market_cap_100m: float
     exchange: str
     turnover: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.name = normalize_ashare_display_name(self.name)
 
 
 @dataclass
@@ -158,9 +171,16 @@ def ashare_chart_payload(
     b1_require_20ma_gt_50ma: bool = True,
     require_ma5_rising: bool = True,
     require_5ma_gt_20ma: bool = True,
+    preset: str | None = None,
 ) -> dict[str, object]:
     clean = normalize_ashare_symbol(symbol)
-    bars, source = fetch_ashare_bars(clean)
+    if preset:
+        end_day = date.today()
+        days_by_preset = {"1m": 45, "3m": 120, "6m": 240, "1y": 420, "3y": 1180, "5y": 1900}
+        start_day = end_day - timedelta(days=days_by_preset.get(preset, 420))
+        bars, source = fetch_ashare_bars(clean, start_day.isoformat(), end_day.isoformat())
+    else:
+        bars, source = fetch_ashare_bars(clean)
     from backtest import adjust_limit_volumes, backtest, build_ratchet_inputs, calculate_kdj, open_position_snapshot, rolling_sma
 
     bt_bars = ashare_to_backtest_bars(bars)
@@ -297,6 +317,9 @@ def ashare_chart_payload(
         "sector": sector,
         "source": source,
         "strategy": "A股 MA5/B点",
+        "preset": preset or "1y",
+        "start": bars[0].date if bars else "",
+        "end": bars[-1].date if bars else "",
         "ohlc": [{"x": bar.date, "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close} for bar in bars],
         "volume": [
             {
@@ -783,7 +806,7 @@ def ashare_universe_cache_key(min_market_cap_100m: float, max_symbols: int) -> s
 def serialize_universe_item(item: AShareUniverseItem) -> dict[str, Any]:
     return {
         "symbol": item.symbol,
-        "name": item.name,
+        "name": normalize_ashare_display_name(item.name),
         "sector": item.sector,
         "market_cap_100m": item.market_cap_100m,
         "exchange": item.exchange,
@@ -913,7 +936,7 @@ def fetch_ashare_name(symbol: str) -> str:
             continue
         for raw in entry.get("items") or []:
             if isinstance(raw, dict) and normalize_ashare_symbol(str(raw.get("symbol", ""))) == clean:
-                return str(raw.get("name", "") or "")
+                return normalize_ashare_display_name(str(raw.get("name", "") or ""))
     return ""
 
 

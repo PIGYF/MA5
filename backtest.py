@@ -1763,10 +1763,10 @@ def make_report(
         if hide_summary
         else f"""
 <div class="metrics">{card_html}</div>
-<section class="tester">
+<details class="report-details"><summary>更多统计</summary><section class="tester">
 <table><caption>{labels['overview']}</caption><tbody>{stat_tables}</tbody></table>
 <table><caption>{labels['trade_analysis']}</caption><tbody>{analysis_tables}</tbody></table>
-</section>
+</section></details>
 """
     )
     settings = strategy_settings or {}
@@ -1927,17 +1927,21 @@ h2 {{ margin: 24px 0 10px; font-size: 17px; }}
 .tester caption {{ text-align: left; padding: 10px 12px; font-weight: 800; background: #f5f7fa; border-bottom: 1px solid #eef1f5; }}
 .panel {{ position: relative; background: #fff; border: 1px solid #d6dbe3; border-radius: 6px; padding: 10px; margin-bottom: 14px; overflow: hidden; }}
 .chart-shell {{ position: relative; height: 860px; min-width: 760px; }}
-.chart-toolbar {{ position: absolute; top: 12px; left: 12px; z-index: 5; display: flex; gap: 8px; align-items: center; }}
-.chart-toolbar button {{ border: 1px solid #d6dbe3; background: rgba(255,255,255,0.92); color: #131722; border-radius: 4px; height: 28px; padding: 0 10px; font-weight: 700; cursor: pointer; }}
-.chart-toolbar span {{ color: #64748b; font-size: 12px; background: rgba(255,255,255,0.86); padding: 5px 8px; border-radius: 4px; }}
-.chart-toggle {{ display: inline-flex; align-items: center; gap: 4px; height: 28px; border: 1px solid #d6dbe3; background: rgba(255,255,255,0.92); color: #334155; border-radius: 4px; padding: 0 8px; font-size: 12px; font-weight: 700; cursor: pointer; }}
-.chart-toggle input {{ margin: 0; }}
+.chart-toolbar {{ position: absolute; top: 12px; left: 12px; z-index: 5; display: flex; gap: 7px; align-items: center; padding: 5px; border: 1px solid #d9dde5; border-radius: 8px; background: rgba(247,248,250,.94); box-shadow: 0 2px 8px rgba(19,23,34,.06); }}
+.chart-toolbar button {{ width: 30px; border: 1px solid #d9dde5; background: #fff; color: #4f5360; border-radius: 6px; height: 28px; padding: 0; font-weight: 700; cursor: pointer; }}
+.chart-toolbar button:hover {{ color: #2962ff; background: #eaf0ff; }}
+.chart-toolbar button svg {{ width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }}
+.chart-toggle {{ display: inline-flex; align-items: center; gap: 5px; height: 28px; border: 1px solid #d9dde5; background: #fff; color: #4f5360; border-radius: 6px; padding: 0 8px; font-size: 11px; font-weight: 750; cursor: pointer; }}
+.chart-toggle:hover {{ background: #f3f6fc; }}
+.chart-toggle input {{ width: 13px; height: 13px; margin: 0; accent-color: #2962ff; }}
 .tv-chart {{ width: 100%; height: 100%; }}
 .price-chart-wrap {{ position: relative; height: 640px; }}
 .price-chart-main {{ position: relative; z-index: 1; height: 100%; }}
 .holding-bands {{ position: absolute; inset: 0; z-index: 2; pointer-events: none; overflow: hidden; }}
 .holding-band {{ position: absolute; top: 0; bottom: 0; border-radius: 0; background: rgba(8,153,129,0.08); border-left: 1px solid rgba(8,153,129,0.18); border-right: 1px solid rgba(8,153,129,0.18); }}
 .kdj-chart {{ height: 180px; margin-top: 12px; border-top: 1px solid #eef1f5; }}
+.chart-shell.hide-kdj .price-chart-wrap {{ height: 820px; }}
+.chart-shell.hide-kdj .kdj-chart {{ display: none; }}
 .chart-tooltip {{ position: absolute; z-index: 6; display: none; min-width: 220px; pointer-events: none; border: 1px solid #d6dbe3; background: rgba(255,255,255,0.96); border-radius: 6px; box-shadow: 0 8px 22px rgba(15,23,42,0.12); padding: 8px 10px; font-size: 12px; line-height: 1.6; }}
 .chart-tooltip strong {{ display: block; margin-bottom: 4px; font-size: 13px; }}
 .chart-tooltip .up {{ color: #089981; }}
@@ -1947,6 +1951,9 @@ h2 {{ margin: 24px 0 10px; font-size: 17px; }}
 .compare-note {{ font-size: 13px; color: #475569; margin: 0 0 8px; }}
 .rule-strip {{ display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }}
 .rule-pill {{ display: inline-flex; align-items: center; min-height: 28px; border: 1px solid #d6dbe3; background: #f8fafc; color: #334155; border-radius: 4px; padding: 0 9px; font-size: 12px; font-weight: 700; }}
+.report-details {{ margin: 0 0 12px; border: 1px solid #d6dbe3; border-radius: 6px; background: #fff; }}
+.report-details > summary {{ min-height: 38px; display: flex; align-items: center; padding: 7px 11px; cursor: pointer; color: #475569; font-weight: 800; }}
+.report-details .tester, .report-details .table-wrap {{ margin: 0 10px 10px; }}
 .table-wrap {{ width: 100%; overflow: auto; border: 1px solid #d6dbe3; border-radius: 6px; background: #fff; }}
 table {{ width: 100%; border-collapse: separate; border-spacing: 0; background: #fff; }}
 th, td {{ padding: 8px 10px; border-bottom: 1px solid #eef1f5; text-align: right; font-size: 12px; white-space: nowrap; }}
@@ -1961,7 +1968,7 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
 .pos {{ color: #089981; }}
 .neg {{ color: #f23645; }}
 .empty {{ text-align: center; color: #607080; }}
-@media (max-width: 900px) {{ main {{ padding: 12px; }} .metrics {{ grid-template-columns: repeat(2, 1fr); }} .tester {{ grid-template-columns: 1fr; }} .chart-shell {{ min-width: 0; height: 740px; }} .price-chart-wrap {{ height: 520px; }} .kdj-chart {{ height: 180px; }} .chart-toolbar span {{ display: none; }} }}
+@media (max-width: 900px) {{ main {{ padding: 12px; }} .metrics {{ grid-template-columns: repeat(2, 1fr); }} .tester {{ grid-template-columns: 1fr; }} .chart-shell {{ min-width: 0; height: 740px; }} .price-chart-wrap {{ height: 520px; }} .kdj-chart {{ height: 180px; }} .chart-shell.hide-kdj .price-chart-wrap {{ height: 700px; }} .chart-toolbar {{ max-width: calc(100% - 24px); overflow-x: auto; }} }}
 </style>
 </head>
 <body>
@@ -1969,8 +1976,7 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
 <h1>{html.escape(title)}</h1>
 {summary_html}
 {benchmark_html}
-<h2>{labels['trade_detail']}</h2>
-<div class="table-wrap">
+<details class="report-details"><summary>{labels['trade_detail']} · {len(trades) + (1 if open_position else 0)} 笔</summary><div class="table-wrap">
   <table>
     <thead>
       <tr>
@@ -1999,7 +2005,7 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
     </thead>
     <tbody>{trade_rows}</tbody>
   </table>
-</div>
+</div></details>
 <h2>{labels['main_chart']}</h2>
 <div class="rule-strip">
   <span class="rule-pill">B1：站上5MA{ma5_rising_label}{ma20_gt_50_label}{ma5_gt_20_b1_label} + 连续{vol_high_days_label}日成交量 &gt; 均量×{vol_high_multiplier_label:g} + {massive_window_label}日内至少{massive_min_label}次巨量</span>
@@ -2010,11 +2016,13 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3
 <section class="panel">
   <div class="chart-shell">
     <div class="chart-toolbar">
-      <button id="fit-chart">{labels['reset_view']}</button>
-      <label class="chart-toggle"><input id="toggle-ma5-stop-25" type="checkbox">2.5%防守线</label>
-      <label class="chart-toggle"><input id="toggle-ma5-stop-strategy" type="checkbox" checked>策略防守线</label>
-      <label class="chart-toggle"><input id="toggle-signal-markers" type="checkbox">B/S信号日</label>
-      <span>{labels['chart_hint']}</span>
+      <label class="chart-toggle"><input id="toggle-ma5" type="checkbox" checked>MA5</label>
+      <label class="chart-toggle"><input id="toggle-ma20" type="checkbox" checked>MA20</label>
+      <label class="chart-toggle"><input id="toggle-volume" type="checkbox" checked>成交量</label>
+      <label class="chart-toggle"><input id="toggle-kdj" type="checkbox" checked>KDJ</label>
+      <label class="chart-toggle"><input id="toggle-signal-markers" type="checkbox">B/S信号</label>
+      <label class="chart-toggle"><input id="toggle-ma5-stop-strategy" type="checkbox">策略线</label>
+      <button id="fit-chart" title="{labels['reset_view']}" aria-label="{labels['reset_view']}"><svg viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5M3 8l6-5M21 8l-6-5M3 16l6 5M21 16l-6 5"/></svg></button>
     </div>
     <div class="price-chart-wrap">
       <div id="price-chart" class="tv-chart price-chart-main"></div>
@@ -2071,6 +2079,25 @@ const volMaSeries = priceChart.addLineSeries({{ color: '#2962ff', lineWidth: 1, 
 volMaSeries.setData(chartData.volMa);
 const volThresholdSeries = priceChart.addLineSeries({{ color: '#f97316', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, priceScaleId: '', title: `${{chartData.volMultiplier || ''}}x Vol`, priceLineVisible: false, lastValueVisible: false }});
 volThresholdSeries.setData(chartData.volThreshold || []);
+function refreshChartOptions() {{
+  maSeries.setData(document.getElementById('toggle-ma5')?.checked ? chartData.ma : []);
+  ma20Series.setData(document.getElementById('toggle-ma20')?.checked ? (chartData.ma20 || []) : []);
+  const showVolume = document.getElementById('toggle-volume')?.checked;
+  volumeSeries.setData(showVolume ? chartData.volume : []);
+  volMaSeries.setData(showVolume ? chartData.volMa : []);
+  volThresholdSeries.setData(showVolume ? (chartData.volThreshold || []) : []);
+  document.querySelector('.chart-shell')?.classList.toggle('hide-kdj', !document.getElementById('toggle-kdj')?.checked);
+}}
+const chartStateKey = 'ma5.chart.controls.v1';
+try {{
+  const saved = JSON.parse(localStorage.getItem(chartStateKey) || '{{}}');
+  document.querySelectorAll('.chart-toggle input').forEach(input => {{ if (typeof saved[input.id] === 'boolean') input.checked = saved[input.id]; }});
+}} catch {{}}
+document.querySelectorAll('.chart-toggle input').forEach(input => input.addEventListener('change', () => {{
+  let state = {{}}; try {{ state = JSON.parse(localStorage.getItem(chartStateKey) || '{{}}'); }} catch {{}} document.querySelectorAll('.chart-toggle input').forEach(item => state[item.id] = item.checked);
+  localStorage.setItem(chartStateKey, JSON.stringify(state)); refreshChartOptions(); refreshDefenseLines(); refreshMarkers();
+}}));
+refreshChartOptions();
 const kdjChart = LightweightCharts.createChart(kdjElement, {{
   layout: {{ background: {{ type: 'solid', color: '#ffffff' }}, textColor: '#131722', fontFamily: 'Inter, Microsoft YaHei UI, PingFang SC, Arial, sans-serif' }},
   width: kdjElement.clientWidth,

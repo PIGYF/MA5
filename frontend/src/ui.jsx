@@ -1,5 +1,5 @@
 import React from "react";
-import { routePath } from "./lib";
+import { routePath, usePersistentState } from "./lib";
 
 const paths = {
   home: "M3 10.8 12 3l9 7.8 M5 10v10h14V10 M9 20v-6h6v6",
@@ -86,8 +86,41 @@ export function Progress({ job }) {
   return <div className="progress-strip"><div><strong>{job?.status_label || job?.message || job?.status}</strong><span>{scanned}/{total || "-"}</span><span>候选 {job?.candidates || 0}</span><span>失败 {job?.errors || 0}</span><em>{job?.current || job?.stage || ""}</em></div><div className="progress-track"><i style={{ width: `${Math.max(0, Math.min(100, percent))}%` }} /></div></div>;
 }
 
-export function ChartFrame({ title, src, onClose, className = "" }) {
-  return <section className={`chart-drawer ${className}`}><header><strong>{title}</strong>{onClose ? <button className="icon-button" type="button" onClick={onClose} title="关闭"><Icon name="close" /></button> : null}</header><iframe src={src} title={title} onLoad={(event) => { try { event.currentTarget.contentWindow.scrollTo(0, 0); } catch { /* same-origin report in normal use */ } }} /></section>;
+export function ChartFrame({ title, src, onClose, className = "", showHeader = true }) {
+  const [loading, setLoading] = React.useState(true);
+  const [failed, setFailed] = React.useState(false);
+  React.useEffect(() => setLoading(true), [src]);
+  return <section className={`chart-drawer ${showHeader ? "" : "no-header"} ${className}`}>
+    {showHeader ? <header><strong>{title}</strong>{onClose ? <button className="icon-button" type="button" onClick={onClose} title="关闭" aria-label="关闭图表"><Icon name="close" /></button> : null}</header> : null}
+    <div className="chart-frame-body">
+      {loading && !failed ? <div className="frame-loading" role="status"><span /><b>正在加载图表</b></div> : null}
+      {failed ? <div className="frame-error"><strong>图表加载失败</strong><button type="button" onClick={() => { setFailed(false); setLoading(true); }}>重试</button></div> : null}
+      <iframe loading="lazy" src={src} title={title} onError={() => { setLoading(false); setFailed(true); }} onLoad={(event) => { setLoading(false); setFailed(false); try { event.currentTarget.contentWindow.scrollTo(0, 0); } catch { /* same-origin report in normal use */ } }} />
+    </div>
+  </section>;
+}
+
+export function ResizableWorkspace({ storageKey, className, initial = 300, min = 220, max = 460, children }) {
+  const [size, setSize] = usePersistentState(`layout.${storageKey}`, initial);
+  const startDrag = (event) => {
+    if (window.matchMedia("(max-width: 820px)").matches) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startSize = Number(size) || initial;
+    const move = (moveEvent) => setSize(Math.max(min, Math.min(max, startSize + moveEvent.clientX - startX)));
+    const stop = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", stop); };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+  };
+  const parts = React.Children.toArray(children);
+  return <section className={`${className} resizable-workspace`} style={{ "--rail-size": `${size}px` }}>
+    {parts[0]}
+    <div className="resize-handle resize-handle-x" role="separator" aria-orientation="vertical" tabIndex="0" onPointerDown={startDrag} onKeyDown={(event) => {
+      if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      event.preventDefault(); setSize(Math.max(min, Math.min(max, Number(size) + (event.key === "ArrowRight" ? 12 : -12))));
+    }} />
+    {parts.slice(1)}
+  </section>;
 }
 
 export function WorkspaceEmpty({ title = "暂无结果", note = "" }) {
