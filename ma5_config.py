@@ -5,6 +5,8 @@ import math
 from datetime import date, timedelta
 from pathlib import Path
 
+from market_calendar import latest_completed_trading_day, next_trading_day
+
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("MA5_DATA_DIR", ROOT / "data")).expanduser().resolve()
@@ -84,10 +86,7 @@ def start_for_preset(preset: str, end: date) -> date:
 
 
 def default_scan_end_date() -> date:
-    end = date.today() - timedelta(days=1)
-    while end.weekday() >= 5:
-        end -= timedelta(days=1)
-    return end
+    return latest_completed_trading_day("us")
 
 
 def default_scan_start_date(end: date) -> date:
@@ -99,10 +98,7 @@ def current_signal_date() -> str:
 
 
 def next_market_weekday(day: date) -> date:
-    next_day = day + timedelta(days=1)
-    while next_day.weekday() >= 5:
-        next_day += timedelta(days=1)
-    return next_day
+    return next_trading_day(day, "us")
 
 
 def chart_start_for_preset(preset: str, end: date) -> date:

@@ -6,6 +6,13 @@ import { Scanner } from "./scanners";
 import { Shell } from "./ui";
 import "./styles.css";
 
+try {
+  const savedTheme = JSON.parse(window.localStorage.getItem("ma5.ui.v1.theme"));
+  document.documentElement.dataset.theme = savedTheme === "light" ? "light" : "dark";
+} catch {
+  document.documentElement.dataset.theme = "dark";
+}
+
 class AppErrorBoundary extends React.Component {
   constructor(props) { super(props); this.state = { error: null }; }
   static getDerivedStateFromError(error) { return { error }; }

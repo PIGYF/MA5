@@ -12,6 +12,8 @@ from datetime import date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 
+from backend_storage import atomic_write_csv, atomic_write_json, locked_path
+
 
 DATE_KEYS = ("date", "time", "datetime", "交易日期", "日期", "时间")
 OPEN_KEYS = ("open", "开盘", "开盘价")
@@ -160,11 +162,11 @@ def write_price_cache(symbol: str, bars: list[Bar]) -> None:
     ordered = [merged[key] for key in sorted(merged)]
     if len(ordered) > PRICE_CACHE_MAX_BARS:
         ordered = ordered[-PRICE_CACHE_MAX_BARS:]
-    with price_cache_path(symbol).open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["date", "open", "high", "low", "close", "volume"])
-        writer.writeheader()
-        for bar in ordered:
-            writer.writerow(bar.__dict__)
+    atomic_write_csv(
+        price_cache_path(symbol),
+        ["date", "open", "high", "low", "close", "volume"],
+        (bar.__dict__ for bar in ordered),
+    )
 
 
 def slice_bars(bars: list[Bar], start_date: str, end_date: str) -> list[Bar]:
@@ -226,7 +228,12 @@ def fetch_bars(
     end_date: str,
     adjust: str,
     cache_csv: Path | None,
+    _cache_locked: bool = False,
 ) -> list[Bar]:
+    if source == "yfinance" and cache_csv is None and symbol and not _cache_locked:
+        with locked_path(price_cache_path(symbol)):
+            return fetch_bars(source, symbol, start_date, end_date, adjust, cache_csv, True)
+
     if source == "akshare":
         try:
             import akshare as ak
@@ -334,7 +341,7 @@ def read_split_cache() -> dict[str, object]:
 
 def write_split_cache(payload: dict[str, object]) -> None:
     SPLIT_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SPLIT_CACHE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(SPLIT_CACHE_PATH, payload, indent=2)
 
 
 @lru_cache(maxsize=512)
@@ -1615,26 +1622,24 @@ def make_report(
             "shape": "arrowUp",
             "text": "买",
         }
-        for row in equity_curve
-        if str(row.get("buy_action", ""))
+        for index, row in enumerate(equity_curve)
+        if float(row.get("position_shares", 0) or 0)
+        > (float(equity_curve[index - 1].get("position_shares", 0) or 0) if index > 0 else 0.0)
     ]
-    holding_periods = [
-        {
-            "start": trade.entry_date,
-            "end": trade.exit_date,
-            "label": str(getattr(trade, "entry_structure", "") or "持仓"),
-        }
-        for trade in trades
-    ]
-    open_position = open_position_snapshot(equity_curve)
-    if open_position:
-        holding_periods.append(
-            {
-                "start": str(open_position["entry_date"]),
-                "end": str(open_position["mark_date"]),
-                "label": str(open_position.get("entry_structure", "") or "持仓中"),
-            }
-        )
+    holding_periods: list[dict[str, str]] = []
+    holding_start = ""
+    previous_position = 0.0
+    for row in equity_curve:
+        current_position = float(row.get("position_shares", 0) or 0)
+        current_date = str(row.get("date", ""))
+        if previous_position <= 0 < current_position:
+            holding_start = current_date
+        elif previous_position > 0 >= current_position and holding_start:
+            holding_periods.append({"start": holding_start, "end": current_date, "label": "持仓"})
+            holding_start = ""
+        previous_position = current_position
+    if holding_start and equity_curve:
+        holding_periods.append({"start": holding_start, "end": str(equity_curve[-1].get("date", "")), "label": "持仓中"})
 
     chart_payload = {
         "labels": labels,

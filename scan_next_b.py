@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
-from backtest import Bar, fetch_bars, recent_yfinance_split, rolling_sma, rolling_sum, score_signal_strength
+from backtest import Bar, build_ratchet_inputs, fetch_bars, recent_yfinance_split, rolling_sma, rolling_sum, score_signal_strength
 
 
 DEFAULT_SYMBOLS = [
@@ -193,16 +193,26 @@ def latest_b_signal_with_reason(
 
     closes = [bar.close for bar in bars]
     volumes = [bar.volume for bar in bars]
-    ma = rolling_sma(closes, ma_length)
+    buy_signals, is_massive_vol, ma, vol_ma, _, buy_stages = build_ratchet_inputs(
+        bars,
+        ma_length,
+        vol_length,
+        vol_multiplier,
+        reentry_pct / 100,
+        vol_high_days,
+        vol_high_multiplier,
+        massive_window,
+        massive_min_count,
+        massive_max_count,
+        b1_require_20ma_gt_50ma,
+        require_ma5_rising,
+        require_5ma_gt_20ma,
+        symbol=symbol,
+    )
     ma20 = rolling_sma(closes, 20)
     ma50 = rolling_sma(closes, 50)
-    vol_ma = rolling_sma(volumes, vol_length)
     is_vol_high = [
         vol_ma[i] is not None and bars[i].volume > vol_ma[i] * vol_high_multiplier for i in range(len(bars))
-    ]
-    is_massive_vol = [
-        vol_ma[i] is not None and bars[i].volume >= vol_ma[i] * vol_multiplier
-        for i in range(len(bars))
     ]
     massive_counts = rolling_sum([1 if value else 0 for value in is_massive_vol], massive_window)
 
@@ -224,63 +234,10 @@ def latest_b_signal_with_reason(
     ma5_gt_20 = ma[i] is not None and ma20[i] is not None and ma[i] > ma20[i]
     ma20_gt_50 = ma20[i] is not None and ma50[i] is not None and ma20[i] > ma50[i]
 
-    def bull_quality_ok_at(index: int) -> bool:
-        recent_high = max(closes[max(0, index - 59) : index + 1])
-        ma50_rising = ma50[index] is not None and index >= 5 and ma50[index - 5] is not None and ma50[index] > ma50[index - 5]
-        above_ma50 = ma50[index] is not None and bars[index].close > ma50[index]
-        near_stage_high = recent_high > 0 and bars[index].close >= recent_high * 0.80
-        return bool(above_ma50 and ma50_rising and near_stage_high)
-
-    bull_quality_ok = bull_quality_ok_at(i)
-    trend_confirmed = False
-    for j in range(i):
-        if ma[j] is None or massive_counts[j] is None:
-            continue
-        j_ma_rising = j > 0 and ma[j - 1] is not None and ma[j] > ma[j - 1]
-        j_vol_days_high = j >= vol_high_days - 1 and all(is_vol_high[k] for k in range(j - vol_high_days + 1, j + 1))
-        j_has_massive_vol = massive_counts[j] >= massive_min_count
-        j_price_above_ma = bars[j].close > ma[j]
-        j_ma5_gt_20 = ma[j] is not None and ma20[j] is not None and ma[j] > ma20[j]
-        j_ma20_gt_50 = ma20[j] is not None and ma50[j] is not None and ma20[j] > ma50[j]
-        j_initial_buy = (
-            j_price_above_ma
-            and j_vol_days_high
-            and j_has_massive_vol
-            and (j_ma_rising or not require_ma5_rising)
-            and (j_ma20_gt_50 or not b1_require_20ma_gt_50ma)
-            and (j_ma5_gt_20 or not require_5ma_gt_20ma)
-        )
-        if j_initial_buy:
-            trend_confirmed = True
-        if bars[j].close < ma[j] * 0.925:
-            trend_confirmed = False
-
     dist_to_ma = abs(bar.close - ma[i]) / ma[i]
-    initial_buy = (
-        price_above_ma
-        and vol_days_high
-        and has_massive_vol
-        and (ma_is_rising or not require_ma5_rising)
-        and (ma20_gt_50 or not b1_require_20ma_gt_50ma)
-        and (ma5_gt_20 or not require_5ma_gt_20ma)
-    )
     full_range = bar.high - bar.low
-    body = abs(bar.close - bar.open)
-    upper_shadow = bar.high - max(bar.open, bar.close)
     close_position = (bar.close - bar.low) / full_range if full_range > 0 else 0.5
-    upper_shadow_ok = upper_shadow <= max(body * 0.75, full_range * 0.20)
-    reentry_buy = (
-        trend_confirmed
-        and is_massive_vol[i]
-        and price_above_ma
-        and dist_to_ma <= reentry_pct / 100
-        and bar.close > bar.open
-        and (ma_is_rising or not require_ma5_rising)
-        and (ma5_gt_20 or not require_5ma_gt_20ma)
-        and bull_quality_ok
-        and upper_shadow_ok
-    )
-    if not (initial_buy or reentry_buy):
+    if not buy_signals[i]:
         failed = []
         if not price_above_ma:
             failed.append("收盘价未站上MA")
@@ -302,12 +259,7 @@ def latest_b_signal_with_reason(
             failed.append("当日不是阳线")
         return None, "未出现B点：" + "；".join(failed)
 
-    if reentry_buy:
-        signal_type = "B2_reentry"
-    elif initial_buy:
-        signal_type = "B1_trend_confirm"
-    else:
-        signal_type = "B"
+    signal_type = {"B1": "B1_trend_confirm", "B2": "B2_reentry"}.get(buy_stages[i], "B")
     strength = technical_strength_for_latest_signal(bars, ma, vol_ma, "B")
     previous_close = bars[i - 1].close if i > 0 else bar.close
     body_pct = (bar.open - bar.close) / previous_close * 100 if previous_close else 0.0

@@ -5,11 +5,14 @@ import os
 import csv
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, time as datetime_time, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+
+from backend_storage import atomic_write_csv, atomic_write_json, locked_path
+from market_calendar import latest_completed_trading_day, previous_trading_day
 
 
 ASHARE_ROUTE = "/ashare"
@@ -21,7 +24,6 @@ ASHARE_UNIVERSE_CACHE_PATH = ASHARE_CACHE_DIR / "universe_cache.json"
 ASHARE_UNIVERSE_CACHE_SECONDS = 18 * 60 * 60
 ASHARE_PRICE_CACHE_DIR = ASHARE_CACHE_DIR / "prices"
 ASHARE_PRICE_CACHE_MAX_BARS = 1300
-ASHARE_PRICE_CACHE_READY_TIME = datetime_time(15, 30)
 
 
 def normalize_ashare_display_name(name: str) -> str:
@@ -181,7 +183,7 @@ def ashare_chart_payload(
         bars, source = fetch_ashare_bars(clean, start_day.isoformat(), end_day.isoformat())
     else:
         bars, source = fetch_ashare_bars(clean)
-    from backtest import adjust_limit_volumes, backtest, build_ratchet_inputs, calculate_kdj, open_position_snapshot, rolling_sma
+    from backtest import adjust_limit_volumes, backtest, build_ratchet_inputs, calculate_kdj, rolling_sma
 
     bt_bars = ashare_to_backtest_bars(bars)
     closes = [bar.close for bar in bt_bars]
@@ -291,23 +293,19 @@ def ashare_chart_payload(
             }
             for trade in trades
         ]
-        holding_periods = [
-            {
-                "start": trade.entry_date,
-                "end": trade.exit_date,
-                "label": str(getattr(trade, "entry_structure", "") or "hold"),
-            }
-            for trade in trades
-        ]
-        open_position = open_position_snapshot(equity_curve)
-        if open_position:
-            holding_periods.append(
-                {
-                    "start": str(open_position["entry_date"]),
-                    "end": str(open_position["mark_date"]),
-                    "label": str(open_position.get("entry_structure", "") or "holding"),
-                }
-            )
+        holding_start = ""
+        previous_position = 0.0
+        for row in equity_curve:
+            current_position = float(row.get("position_shares", 0) or 0)
+            current_date = str(row.get("date", ""))
+            if previous_position <= 0 < current_position:
+                holding_start = current_date
+            elif previous_position > 0 >= current_position and holding_start:
+                holding_periods.append({"start": holding_start, "end": current_date, "label": "持仓"})
+                holding_start = ""
+            previous_position = current_position
+        if holding_start and equity_curve:
+            holding_periods.append({"start": holding_start, "end": str(equity_curve[-1].get("date", "")), "label": "持仓中"})
         chart_markers = executed_buy_markers + sell_signal_markers + executed_sell_markers
     except Exception:
         pass
@@ -578,11 +576,11 @@ def write_ashare_price_cache(symbol: str, bars: list[AShareBar]) -> list[AShareB
     ordered = [merged[key] for key in sorted(merged)]
     if len(ordered) > ASHARE_PRICE_CACHE_MAX_BARS:
         ordered = ordered[-ASHARE_PRICE_CACHE_MAX_BARS:]
-    with ashare_price_cache_path(symbol).open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["date", "open", "high", "low", "close", "volume", "amount"])
-        writer.writeheader()
-        for bar in ordered:
-            writer.writerow(bar.__dict__)
+    atomic_write_csv(
+        ashare_price_cache_path(symbol),
+        ["date", "open", "high", "low", "close", "volume", "amount"],
+        (bar.__dict__ for bar in ordered),
+    )
     return ordered
 
 
@@ -593,24 +591,13 @@ def slice_ashare_bars(bars: list[AShareBar], start_day: date, end_day: date) -> 
 
 
 def previous_weekday(day: date) -> date:
-    current = day - timedelta(days=1)
-    while current.weekday() >= 5:
-        current -= timedelta(days=1)
-    return current
+    return previous_trading_day(day, "cn")
 
 
 def ashare_required_latest_date(end_day: date) -> date:
-    today = date.today()
-    if end_day >= today:
-        if today.weekday() >= 5:
-            return previous_weekday(today)
-        if datetime.now().time() < ASHARE_PRICE_CACHE_READY_TIME:
-            return previous_weekday(today)
-        return today
-    required = end_day
-    while required.weekday() >= 5:
-        required -= timedelta(days=1)
-    return required
+    if end_day >= date.today():
+        return latest_completed_trading_day("cn")
+    return previous_trading_day(end_day, "cn", include_day=True)
 
 
 def ashare_cache_covers_range(bars: list[AShareBar], start_day: date, end_day: date) -> bool:
@@ -627,8 +614,109 @@ def ashare_cache_covers_range(bars: list[AShareBar], start_day: date, end_day: d
     return latest >= required_latest
 
 
-def fetch_ashare_bars(symbol: str, start: str | None = None, end: str | None = None) -> tuple[list[AShareBar], str]:
+def fetch_efinance_ashare_bars(symbol: str, start_day: date, end_day: date) -> tuple[list[AShareBar], str]:
+    import efinance as ef
+
+    df = ef.stock.get_quote_history(
+        symbol,
+        beg=start_day.strftime("%Y%m%d"),
+        end=end_day.strftime("%Y%m%d"),
+        klt=101,
+        fqt=1,
+    )
+    bars = [
+        AShareBar(
+            date=str(row_value(row, ("日期", "date"), 2)),
+            open=float(row_value(row, ("开盘", "open"), 3)),
+            high=float(row_value(row, ("最高", "high"), 5)),
+            low=float(row_value(row, ("最低", "low"), 6)),
+            close=float(row_value(row, ("收盘", "close"), 4)),
+            volume=float(row_value(row, ("成交量", "volume"), 7)),
+            amount=float(row.get("成交额", row.get("amount", 0.0))),
+        )
+        for _, row in df.iterrows()
+    ]
+    if not bars:
+        raise RuntimeError("efinance 返回为空")
+    return bars, "efinance"
+
+
+def fetch_akshare_ashare_bars(symbol: str, start_day: date, end_day: date) -> tuple[list[AShareBar], str]:
+    import akshare as ak
+
+    df = ak.stock_zh_a_hist(
+        symbol=symbol,
+        period="daily",
+        start_date=start_day.strftime("%Y%m%d"),
+        end_date=end_day.strftime("%Y%m%d"),
+        adjust="qfq",
+    )
+    bars = [
+        AShareBar(
+            date=str(row_value(row, ("日期", "date"), 0)),
+            open=float(row_value(row, ("开盘", "open"), 1)),
+            high=float(row_value(row, ("最高", "high"), 2)),
+            low=float(row_value(row, ("最低", "low"), 3)),
+            close=float(row_value(row, ("收盘", "close"), 4)),
+            volume=float(row_value(row, ("成交量", "volume"), 5)),
+            amount=float(row.get("成交额", row.get("amount", 0.0))),
+        )
+        for _, row in df.iterrows()
+    ]
+    if not bars:
+        raise RuntimeError("akshare 返回为空")
+    return bars, "akshare"
+
+
+def fetch_yfinance_ashare_bars(symbol: str, start_day: date, end_day: date) -> tuple[list[AShareBar], str]:
+    import yfinance as yf
+
+    df = yf.download(
+        symbol + yahoo_suffix(symbol),
+        start=start_day.isoformat(),
+        end=(end_day + timedelta(days=1)).isoformat(),
+        progress=False,
+        auto_adjust=True,
+    )
+    if hasattr(df.columns, "nlevels") and df.columns.nlevels > 1:
+        df.columns = [col[0] for col in df.columns]
+    bars = [
+        AShareBar(
+            date=str(index.date()),
+            open=float(row["Open"]),
+            high=float(row["High"]),
+            low=float(row["Low"]),
+            close=float(row["Close"]),
+            volume=float(row["Volume"]),
+            amount=0.0,
+        )
+        for index, row in df.iterrows()
+    ]
+    if not bars:
+        raise RuntimeError("yfinance 返回为空")
+    return bars, "yfinance adjusted"
+
+
+def ashare_bar_sources() -> list[tuple[str, Callable[[str, date, date], tuple[list[AShareBar], str]]]]:
+    return [
+        ("腾讯", fetch_tencent_qfq_bars),
+        ("efinance", fetch_efinance_ashare_bars),
+        ("通达信", fetch_tdx_ashare_bars),
+        ("akshare", fetch_akshare_ashare_bars),
+        ("yfinance", fetch_yfinance_ashare_bars),
+    ]
+
+
+def fetch_ashare_bars(
+    symbol: str,
+    start: str | None = None,
+    end: str | None = None,
+    _cache_locked: bool = False,
+) -> tuple[list[AShareBar], str]:
     clean = normalize_ashare_symbol(symbol)
+    if not _cache_locked:
+        with locked_path(ashare_price_cache_path(clean)):
+            return fetch_ashare_bars(clean, start, end, True)
     end_day = date.today() if end is None else date.fromisoformat(end)
     start_day = end_day - timedelta(days=520) if start is None else date.fromisoformat(start)
     cached_bars = read_ashare_price_cache(clean)
@@ -648,101 +736,17 @@ def fetch_ashare_bars(symbol: str, start: str | None = None, end: str | None = N
         except Exception:
             fetch_start_day = start_day
 
-    start_ak = fetch_start_day.strftime("%Y%m%d")
-    end_ak = end_day.strftime("%Y%m%d")
+    errors: list[str] = []
+    for label, fetcher in ashare_bar_sources():
+        try:
+            fetched, source = fetcher(clean, fetch_start_day, end_day)
+            merged = write_ashare_price_cache(clean, cached_bars + fetched)
+            sliced = slice_ashare_bars(merged, start_day, end_day)
+            return (sliced if sliced else fetched), f"{source} + cache"
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
 
-    def finish_with_cache(fetched: list[AShareBar], source: str) -> tuple[list[AShareBar], str]:
-        merged = write_ashare_price_cache(clean, cached_bars + fetched)
-        sliced = slice_ashare_bars(merged, start_day, end_day)
-        return (sliced if sliced else fetched), f"{source} + cache"
-
-    try:
-        bars, source = fetch_tencent_qfq_bars(clean, fetch_start_day, end_day)
-        return finish_with_cache(bars, source)
-    except Exception:
-        pass
-
-    try:
-        import efinance as ef
-
-        df = ef.stock.get_quote_history(clean, beg=start_ak, end=end_ak, klt=101, fqt=1)
-        bars = [
-            AShareBar(
-                date=str(row_value(row, ("日期", "date"), 2)),
-                open=float(row_value(row, ("开盘", "open"), 3)),
-                high=float(row_value(row, ("最高", "high"), 5)),
-                low=float(row_value(row, ("最低", "low"), 6)),
-                close=float(row_value(row, ("收盘", "close"), 4)),
-                volume=float(row_value(row, ("成交量", "volume"), 7)),
-                amount=float(row.get("成交额", row.get("amount", 0.0))),
-            )
-            for _, row in df.iterrows()
-        ]
-        if bars:
-            return finish_with_cache(bars, "efinance")
-    except Exception:
-        pass
-
-    try:
-        bars, source = fetch_tdx_ashare_bars(clean, fetch_start_day, end_day)
-        return finish_with_cache(bars, source)
-    except Exception:
-        pass
-
-    try:
-        import akshare as ak
-
-        df = ak.stock_zh_a_hist(symbol=clean, period="daily", start_date=start_ak, end_date=end_ak, adjust="qfq")
-        bars = [
-            AShareBar(
-                date=str(row_value(row, ("日期", "date"), 0)),
-                open=float(row_value(row, ("开盘", "open"), 1)),
-                high=float(row_value(row, ("最高", "high"), 2)),
-                low=float(row_value(row, ("最低", "low"), 3)),
-                close=float(row_value(row, ("收盘", "close"), 4)),
-                volume=float(row_value(row, ("成交量", "volume"), 5)),
-                amount=float(row.get("成交额", row.get("amount", 0.0))),
-            )
-            for _, row in df.iterrows()
-        ]
-        if bars:
-            return finish_with_cache(bars, "akshare")
-    except Exception:
-        pass
-
-    raise RuntimeError(f"{clean} 没有可用 A 股日线数据源")
-
-    try:
-        import yfinance as yf
-
-        yf_symbol = clean + yahoo_suffix(clean)
-        df = yf.download(
-            yf_symbol,
-            start=start_day.isoformat(),
-            end=(end_day + timedelta(days=1)).isoformat(),
-            progress=False,
-            auto_adjust=False,
-        )
-        if hasattr(df.columns, "nlevels") and df.columns.nlevels > 1:
-            df.columns = [col[0] for col in df.columns]
-        bars = [
-            AShareBar(
-                date=str(index.date()),
-                open=float(row["Open"]),
-                high=float(row["High"]),
-                low=float(row["Low"]),
-                close=float(row["Close"]),
-                volume=float(row["Volume"]),
-                amount=0.0,
-            )
-            for index, row in df.iterrows()
-        ]
-        if bars:
-            return bars, "yfinance"
-    except Exception as exc:
-        raise RuntimeError(f"A 股日线拉取失败：{exc}") from exc
-
-    raise RuntimeError(f"{clean} 没有可用日线数据。")
+    raise RuntimeError(f"{clean} 没有可用 A 股日线数据源；" + "；".join(errors))
 
 
 def fetch_ashare_name(symbol: str) -> str:
@@ -793,8 +797,7 @@ def read_json_cache(path: Path, max_age_seconds: int) -> dict[str, Any] | None:
 
 def write_json_cache(path: Path, payload: dict[str, Any]) -> None:
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        atomic_write_json(path, payload)
     except Exception:
         pass
 
@@ -857,13 +860,12 @@ def read_ashare_universe_cache(
     entry = (payload.get("entries") or {}).get(key)
     if not isinstance(entry, dict):
         return None
-    source_text = str(entry.get("source", "")).lower()
-    if any(name in source_text for name in ("akshare", "efinance", "eastmoney", "东方财富")):
-        return None
     if min_market_cap_100m > 0 and not bool(entry.get("has_market_cap", False)):
         return None
     raw_items = entry.get("items") or []
     items = enrich_ashare_industries([deserialize_universe_item(raw) for raw in raw_items if isinstance(raw, dict)])
+    if min_market_cap_100m > 0:
+        items = [item for item in items if item.market_cap_100m >= min_market_cap_100m]
     if not items:
         return None
     if progress:
@@ -878,22 +880,23 @@ def write_ashare_universe_cache(
     source: str,
     has_market_cap: bool,
 ) -> None:
-    payload = read_json_cache(ASHARE_UNIVERSE_CACHE_PATH, 30 * 24 * 60 * 60) or {}
-    entries = payload.get("entries")
-    if not isinstance(entries, dict):
-        entries = {}
-    key = ashare_universe_cache_key(min_market_cap_100m, max_symbols)
-    items = enrich_ashare_industries(items)
-    entries[key] = {
-        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "source": source,
-        "has_market_cap": has_market_cap,
-        "items": [serialize_universe_item(item) for item in items],
-    }
-    write_json_cache(
-        ASHARE_UNIVERSE_CACHE_PATH,
-        {"updated_at": time.strftime("%Y-%m-%d %H:%M:%S"), "entries": entries},
-    )
+    with locked_path(ASHARE_UNIVERSE_CACHE_PATH):
+        payload = read_json_cache(ASHARE_UNIVERSE_CACHE_PATH, 30 * 24 * 60 * 60) or {}
+        entries = payload.get("entries")
+        if not isinstance(entries, dict):
+            entries = {}
+        key = ashare_universe_cache_key(min_market_cap_100m, max_symbols)
+        items = enrich_ashare_industries(items)
+        entries[key] = {
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "source": source,
+            "has_market_cap": has_market_cap,
+            "items": [serialize_universe_item(item) for item in items],
+        }
+        write_json_cache(
+            ASHARE_UNIVERSE_CACHE_PATH,
+            {"updated_at": time.strftime("%Y-%m-%d %H:%M:%S"), "entries": entries},
+        )
 
 
 def load_ashare_sector_map() -> dict[str, str]:
@@ -984,11 +987,14 @@ def stale_ashare_universe_cache(
     items = cached_ashare_universe_items()
     if not items:
         return None
-    filtered = [item for item in items if item.market_cap_100m >= min_market_cap_100m]
-    has_market_cap = bool(filtered)
-    if not filtered:
+    if min_market_cap_100m > 0:
+        filtered = [item for item in items if item.market_cap_100m >= min_market_cap_100m]
+        if not filtered:
+            return None
+        has_market_cap = True
+    else:
         filtered = items
-        has_market_cap = False
+        has_market_cap = any(item.market_cap_100m > 0 for item in filtered)
     filtered.sort(key=lambda item: item.market_cap_100m or item.turnover, reverse=True)
     result = filtered[: max(1, int(max_symbols))]
     if not result:
@@ -1360,6 +1366,55 @@ def fetch_akshare_code_name_universe(max_symbols: int = 300) -> tuple[list[AShar
     return items[: max(1, int(max_symbols))], "akshare.stock_info_a_code_name fallback", False
 
 
+def ashare_universe_sources(
+    progress: Callable[[str], None] | None = None,
+) -> list[tuple[str, Callable[[float, int], tuple[list[AShareUniverseItem], str, bool]]]]:
+    return [
+        ("通达信", fetch_tdx_ashare_universe),
+        ("efinance", fetch_efinance_ashare_universe),
+        ("东方财富", lambda minimum, maximum: fetch_eastmoney_ashare_universe(minimum, maximum, progress)),
+        ("代码名称表", lambda _minimum, maximum: fetch_akshare_code_name_universe(maximum)),
+    ]
+
+
+def _load_ashare_universe_pipeline(
+    min_market_cap_100m: float,
+    max_symbols: int,
+    progress: Callable[[str], None] | None = None,
+) -> tuple[list[AShareUniverseItem], str, bool]:
+    cached = read_ashare_universe_cache(min_market_cap_100m, max_symbols, progress)
+    if cached:
+        return cached
+
+    errors: list[str] = []
+    for label, fetcher in ashare_universe_sources(progress):
+        if progress:
+            progress(f"正在尝试{label}股票池")
+        try:
+            result = fetcher(min_market_cap_100m, max_symbols)
+            items, source, has_market_cap = result
+            if not items:
+                raise RuntimeError("返回空股票池")
+            if min_market_cap_100m > 0:
+                if not has_market_cap:
+                    raise RuntimeError("数据源未提供总市值，不能执行市值硬过滤")
+                items = [item for item in items if item.market_cap_100m >= min_market_cap_100m]
+                if not items:
+                    raise RuntimeError(f"没有满足最低市值 {min_market_cap_100m:g} 亿元的股票")
+            result = items[: max(1, int(max_symbols))], source, has_market_cap
+            write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
+            return result
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+            if progress:
+                progress(f"{label}股票池不可用，切换下一数据源")
+
+    stale = stale_ashare_universe_cache(min_market_cap_100m, max_symbols, progress)
+    if stale:
+        return stale
+    raise RuntimeError("A 股股票池拉取失败：" + "；".join(errors))
+
+
 def load_ashare_universe(min_market_cap_100m: float = 50.0, max_symbols: int = 300) -> list[AShareUniverseItem]:
     items, _, _ = load_ashare_universe_with_meta(min_market_cap_100m, max_symbols)
     return items
@@ -1370,124 +1425,7 @@ def load_ashare_universe_with_meta(
     max_symbols: int = 300,
     progress: Callable[[str], None] | None = None,
 ) -> tuple[list[AShareUniverseItem], str, bool]:
-    cached = read_ashare_universe_cache(min_market_cap_100m, max_symbols, progress)
-    if cached:
-        return cached
-    try:
-        if progress:
-            progress("正在尝试通达信股票列表，并用 Tencent 行情补充总市值")
-        result = fetch_tdx_ashare_universe(min_market_cap_100m, max_symbols)
-        write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
-        return result
-    except Exception as tdx_exc:
-        stale = stale_ashare_universe_cache(min_market_cap_100m, max_symbols, progress)
-        if stale:
-            return stale
-        if progress:
-            progress(f"通达信股票池不可用：{tdx_exc}；正在尝试代码/名称表兜底")
-        try:
-            result = fetch_akshare_code_name_universe(max_symbols)
-            write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
-            return result
-        except Exception as code_name_exc:
-            raise RuntimeError(f"A 股股票池拉取失败：通达信 {tdx_exc}；代码表 {code_name_exc}") from code_name_exc
-    try:
-        if progress:
-            progress("正在尝试 efinance 股票池")
-        result = fetch_efinance_ashare_universe(min_market_cap_100m, max_symbols)
-        write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
-        return result
-    except Exception:
-        if progress:
-            progress("efinance 股票池不可用，切换东方财富直连")
-    try:
-        result = fetch_eastmoney_ashare_universe(min_market_cap_100m, max_symbols, progress)
-        write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
-        return result
-    except Exception as eastmoney_exc:
-        eastmoney_error = eastmoney_exc
-        if progress:
-            progress("东方财富股票池不可用，切换通达信股票列表兜底")
-        try:
-            result = fetch_tdx_ashare_universe(min_market_cap_100m, max_symbols)
-            write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
-            return result
-        except Exception as tdx_exc:
-            stale = stale_ashare_universe_cache(min_market_cap_100m, max_symbols, progress)
-            if stale:
-                return stale
-            if progress:
-                progress(f"TDX universe unavailable: {tdx_exc}")
-        if progress:
-            progress("东方财富股票池不可用，切换代码/名称表快速兜底")
-        try:
-            result = fetch_akshare_code_name_universe(max_symbols)
-            write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
-            return result
-        except Exception:
-            if progress:
-                progress("代码/名称表兜底不可用，正在尝试 akshare 总市值接口")
-    try:
-        raise RuntimeError("akshare disabled")
-        import akshare as ak
-
-        df = ak.stock_zh_a_spot_em()
-        source = "akshare.stock_zh_a_spot_em"
-        has_market_cap = True
-    except Exception as exc:
-        try:
-            raise RuntimeError("akshare disabled")
-            import akshare as ak
-
-            if progress:
-                progress("akshare 总市值接口不可用，正在尝试普通行情接口")
-            df = ak.stock_zh_a_spot()
-            source = "akshare.stock_zh_a_spot fallback"
-            has_market_cap = False
-        except Exception as fallback_exc:
-            if progress:
-                progress("akshare 行情接口不可用，切换代码/名称表兜底")
-            try:
-                result = fetch_akshare_code_name_universe(max_symbols)
-                write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
-                return result
-            except Exception as code_name_exc:
-                raise RuntimeError(f"A 股股票池拉取失败：东方财富 {eastmoney_error}；akshare {fallback_exc}；代码表 {code_name_exc}") from code_name_exc
-
-    sector_map = load_ashare_sector_map()
-    items: list[AShareUniverseItem] = []
-    for _, row in df.iterrows():
-        try:
-            symbol = normalize_ashare_symbol(str(row_value(row, ("代码", "code"), 1)))
-            name = str(row_value(row, ("名称", "name"), 2))
-            if "ST" in name.upper() or "退" in name:
-                continue
-            latest = row.get("最新价", row.get("price", ""))
-            if str(latest).strip() in ("", "-", "--", "nan", "None"):
-                continue
-            market_cap = float(row.get("总市值", row.get("market_cap", 0.0))) / 100_000_000 if has_market_cap else 0.0
-            if has_market_cap and market_cap < min_market_cap_100m:
-                continue
-            turnover = float(row.get("成交额", row.get("amount", 0.0)))
-            items.append(
-                AShareUniverseItem(
-                    symbol=symbol,
-                    name=name,
-                    sector=sector_map.get(symbol, ""),
-                    market_cap_100m=market_cap,
-                    exchange=ashare_exchange(symbol),
-                    turnover=turnover,
-                )
-            )
-        except Exception:
-            continue
-    if has_market_cap:
-        items.sort(key=lambda item: item.market_cap_100m, reverse=True)
-    else:
-        items.sort(key=lambda item: item.turnover, reverse=True)
-    result = items[: max(1, int(max_symbols))], source, has_market_cap
-    write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
-    return result
+    return _load_ashare_universe_pipeline(min_market_cap_100m, max_symbols, progress)
 
 
 def load_ashare_universe_for_scan(
@@ -1495,127 +1433,7 @@ def load_ashare_universe_for_scan(
     max_symbols: int = 300,
     progress: Callable[[str], None] | None = None,
 ) -> tuple[list[AShareUniverseItem], str, bool]:
-    cached = read_ashare_universe_cache(min_market_cap_100m, max_symbols, progress)
-    if cached:
-        return cached
-    try:
-        if progress:
-            progress("正在尝试通达信股票列表，并用 Tencent 行情补充总市值")
-        result = fetch_tdx_ashare_universe(min_market_cap_100m, max_symbols)
-        write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
-        return result
-    except Exception as tdx_exc:
-        stale = stale_ashare_universe_cache(min_market_cap_100m, max_symbols, progress)
-        if stale:
-            return stale
-        if progress:
-            progress(f"通达信股票池不可用：{tdx_exc}；正在尝试代码/名称表兜底")
-        try:
-            result = fetch_akshare_code_name_universe(max_symbols)
-            write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
-            return result
-        except Exception as code_name_exc:
-            raise RuntimeError(f"A 股股票池拉取失败：通达信 {tdx_exc}；代码表 {code_name_exc}") from code_name_exc
-    try:
-        if progress:
-            progress("正在尝试 efinance 股票池")
-        result = fetch_efinance_ashare_universe(min_market_cap_100m, max_symbols)
-        write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
-        return result
-    except Exception:
-        if progress:
-            progress("efinance 股票池不可用，切换东方财富直连")
-    try:
-        result = fetch_eastmoney_ashare_universe(min_market_cap_100m, max_symbols, progress)
-        write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
-        return result
-    except Exception as eastmoney_exc:
-        eastmoney_error = eastmoney_exc
-        if progress:
-            progress("东方财富股票池不可用，切换通达信股票列表兜底")
-        try:
-            result = fetch_tdx_ashare_universe(min_market_cap_100m, max_symbols)
-            write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
-            return result
-        except Exception as tdx_exc:
-            stale = stale_ashare_universe_cache(min_market_cap_100m, max_symbols, progress)
-            if stale:
-                return stale
-            if progress:
-                progress(f"TDX universe unavailable: {tdx_exc}")
-        if progress:
-            progress("东方财富股票池不可用，切换代码/名称表快速兜底")
-        try:
-            result = fetch_akshare_code_name_universe(max_symbols)
-            write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
-            return result
-        except Exception:
-            if progress:
-                progress("代码/名称表兜底不可用，正在尝试 akshare 总市值接口")
-    try:
-        raise RuntimeError("akshare disabled")
-        import akshare as ak
-
-        df = ak.stock_zh_a_spot_em()
-        source = "akshare.stock_zh_a_spot_em"
-        has_market_cap = True
-    except Exception as exc:
-        try:
-            raise RuntimeError("akshare disabled")
-            import akshare as ak
-
-            if progress:
-                progress("akshare 总市值接口不可用，正在尝试普通行情接口")
-            df = ak.stock_zh_a_spot()
-            source = "akshare.stock_zh_a_spot fallback"
-            has_market_cap = False
-        except Exception as fallback_exc:
-            if progress:
-                progress("akshare 行情接口不可用，切换代码/名称表兜底")
-            try:
-                result = fetch_akshare_code_name_universe(max_symbols)
-                write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
-                return result
-            except Exception as code_name_exc:
-                raise RuntimeError(f"A 股股票池拉取失败：东方财富 {eastmoney_error}；akshare {fallback_exc}；代码表 {code_name_exc}") from code_name_exc
-
-    sector_map = load_ashare_sector_map()
-    items: list[AShareUniverseItem] = []
-    for _, row in df.iterrows():
-        try:
-            raw_symbol = str(row.get("代码", row.get("code", row.iloc[0])))
-            symbol = normalize_ashare_symbol(raw_symbol)
-            name = str(row.get("名称", row.get("name", row.iloc[1])) or "")
-            if not name or "ST" in name.upper() or "退" in name:
-                continue
-            latest = row.get("最新价", row.get("price", row.iloc[2] if len(row) > 2 else ""))
-            if str(latest).strip() in ("", "-", "--", "nan", "None"):
-                continue
-            if float(latest or 0) <= 0:
-                continue
-            market_cap = float(row.get("总市值", row.get("market_cap", 0.0)) or 0.0) / 100_000_000 if has_market_cap else 0.0
-            if has_market_cap and market_cap < min_market_cap_100m:
-                continue
-            turnover = float(row.get("成交额", row.get("amount", row.iloc[12] if len(row) > 12 else 0.0)) or 0.0)
-            items.append(
-                AShareUniverseItem(
-                    symbol=symbol,
-                    name=name,
-                    sector=sector_map.get(symbol, ""),
-                    market_cap_100m=market_cap,
-                    exchange=ashare_exchange(symbol),
-                    turnover=turnover,
-                )
-            )
-        except Exception:
-            continue
-    if has_market_cap:
-        items.sort(key=lambda item: item.market_cap_100m, reverse=True)
-    else:
-        items.sort(key=lambda item: item.turnover, reverse=True)
-    result = items[: max(1, int(max_symbols))], source, has_market_cap
-    write_ashare_universe_cache(min_market_cap_100m, max_symbols, *result)
-    return result
+    return _load_ashare_universe_pipeline(min_market_cap_100m, max_symbols, progress)
 
 
 def ashare_limit_pct(symbol: str) -> float:
@@ -1673,7 +1491,7 @@ def latest_ashare_signal(
     if len(bars) < 130:
         raise ValueError(f"数据不足：至少需要 130 根日 K，当前 {len(bars)} 根。")
 
-    from backtest import adjust_limit_volumes, build_ratchet_inputs, rolling_sma
+    from backtest import adjust_limit_volumes, build_ratchet_inputs, calculate_kdj, rolling_sma
 
     bt_bars = ashare_to_backtest_bars(bars)
     closes = [bar.close for bar in bt_bars]
@@ -1685,6 +1503,7 @@ def latest_ashare_signal(
     ma20_series = rolling_sma(closes, 20)
     vol_ma20 = rolling_sma(adjusted_volumes, 20)
     avg_amount20_series = rolling_sma(amounts, 20)
+    _, _, j_values = calculate_kdj(bt_bars)
     buy_signal, _, ma, vol_ma, buy_target_pct, buy_stage = build_ratchet_inputs(
         bt_bars,
         ma_length=5,
@@ -1748,7 +1567,9 @@ def latest_ashare_signal(
         )
         if enabled
     )
-    hard_candidate = bool(buy_signal[i] and amount_ok)
+    raw_j_value = j_values[i]
+    j_value = float(raw_j_value) if raw_j_value is not None else 0.0
+    j_oversold = bool(raw_j_value is not None and j_value < j_threshold)
 
     base_start = max(0, i - 80)
     base_end = max(0, i - 20)
@@ -1782,6 +1603,7 @@ def latest_ashare_signal(
         and red_to_green > 1.3
         and top5_red_count >= 3
     )
+    hard_candidate = bool(buy_signal[i] and amount_ok)
     volume_score = 0.0
     volume_score += min(1.5, peak_to_base / 3 * 1.5) if base_volume else 0.0
     volume_score += min(1.0, avg10_to_base / 1.5) if base_volume else 0.0
@@ -1822,9 +1644,9 @@ def latest_ashare_signal(
         zx_short_trend=ma5,
         zx_multi_trend=ma20,
         zx_multi_slope=(ma5 - float(ma5_series[i - 1] or ma5)) if i > 0 else 0.0,
-        j_value=volume_ratio,
+        j_value=j_value,
         trend_ok=bool(trend_ok),
-        j_oversold=bool(amount_ok),
+        j_oversold=j_oversold,
         volume_structure_ok=bool(volume_structure_ok),
         signal=hard_candidate,
         volume_score=volume_score,

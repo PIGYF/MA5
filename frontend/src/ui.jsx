@@ -18,6 +18,8 @@ const paths = {
   collapse: "M15 5l-7 7 7 7",
   expand: "M9 5l7 7-7 7",
   external: "M7 17 17 7 M10 7h7v7",
+  sun: "M12 3v2 M12 19v2 M3 12h2 M19 12h2 M5.6 5.6 1.4 1.4 M17 17l1.4 1.4 M18.4 5.6 17 7 M7 17l-1.4 1.4 M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z",
+  moon: "M20 15.2A8 8 0 0 1 8.8 4 8.2 8.2 0 1 0 20 15.2z",
 };
 
 export function Icon({ name }) {
@@ -35,6 +37,13 @@ export function Shell({ route, navigate, marketEnvironment, children }) {
   const market = route.market;
   const environment = marketEnvironment || {};
   const [riskOpen, setRiskOpen] = React.useState(false);
+  const [theme, setTheme] = usePersistentState("theme", "dark");
+  React.useEffect(() => {
+    const nextTheme = theme === "light" ? "light" : "dark";
+    document.documentElement.dataset.theme = nextTheme;
+    document.documentElement.style.colorScheme = nextTheme;
+    window.dispatchEvent(new CustomEvent("ma5-theme-change", { detail: { theme: nextTheme } }));
+  }, [theme]);
   const action = environment.tone === "bad" ? "暂停追高" : environment.tone === "warn" ? "降低仓位" : "正常复盘";
   return (
     <main className="app-shell">
@@ -52,6 +61,9 @@ export function Shell({ route, navigate, marketEnvironment, children }) {
               <Icon name={item.icon} />{item.label}
             </a>
           ))}
+          <button type="button" className="theme-toggle" onClick={() => setTheme((current) => current === "light" ? "dark" : "light")} aria-label={theme === "dark" ? "切换为白天模式" : "切换为夜间模式"} title={theme === "dark" ? "切换为白天模式" : "切换为夜间模式"}>
+            <Icon name={theme === "dark" ? "moon" : "sun"} /><span>{theme === "dark" ? "夜间" : "白天"}</span>
+          </button>
         </nav>
         <button type="button" className={`market-state tone-${environment.tone || "neutral"}`} onClick={() => setRiskOpen((open) => !open)} aria-expanded={riskOpen} title="市场风险参考">
           <i />

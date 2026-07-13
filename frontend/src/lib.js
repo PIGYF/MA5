@@ -18,6 +18,16 @@ export function usePersistentState(key, initialValue) {
   return [value, setValue];
 }
 
+export function useThemeMode() {
+  const [theme, setTheme] = useState(() => document.documentElement.dataset.theme === "light" ? "light" : "dark");
+  useEffect(() => {
+    const update = (event) => setTheme(event.detail?.theme === "light" ? "light" : "dark");
+    window.addEventListener("ma5-theme-change", update);
+    return () => window.removeEventListener("ma5-theme-change", update);
+  }, []);
+  return theme;
+}
+
 export async function getJson(url) {
   const response = await fetch(url);
   const contentType = response.headers.get("content-type") || "";
@@ -40,6 +50,10 @@ export function toQuery(params = {}) {
     query.set(key, typeof value === "boolean" ? (value ? "1" : "0") : String(value));
   });
   return query.toString();
+}
+
+export function xueqiuUrl(symbol) {
+  return `https://xueqiu.com/k?q=${encodeURIComponent(String(symbol || "").toUpperCase())}`;
 }
 
 export function routeFromLocation() {

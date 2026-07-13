@@ -13,6 +13,8 @@ export function filterCandidates(rows, market, filters) {
     if (filters.minScore !== "" && score < Number(filters.minScore)) return false;
     if (filters.onlyNew && !row.is_new_candidate) return false;
     if (filters.consecutive && Number(row.selection_streak || 1) < 2) return false;
+    if (filters.bigRedB1 && !row.big_red_b1) return false;
+    if (filters.aboveMa5ThreeDays && !row.above_ma5_3d) return false;
     return true;
   });
 }

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { getJson, isJobRunning, numberText, toQuery, usePersistentState } from "./lib";
+import { getJson, isJobRunning, numberText, toQuery, usePersistentState, xueqiuUrl } from "./lib";
 import { filterCandidates } from "./resultFilters";
 import { LazyStrategyChart } from "./LazyStrategyChart";
 import { Checkbox, Field, FilterSection, Icon, PageToolbar, Progress, ResizableWorkspace, WorkspaceEmpty } from "./ui";
@@ -44,7 +44,7 @@ function UsFilters({ form, setForm }) {
       <SelectField form={form} setForm={setForm} name="earnings_filter" label="财报风险" options={[{ value: "show", label: "显示全部" }, { value: "hide_3d", label: "隐藏3天内财报" }, { value: "hide_7d", label: "隐藏7天内财报" }, { value: "hide_unknown", label: "隐藏未知财报" }]} />
       <div className="check-grid"><Toggle form={form} setForm={setForm} name="hide_weak" label="隐藏 Weak 候选" /></div>
     </FilterSection>
-    <FilterSection title="信号参数" note="B1 / B2 与量能">
+    <FilterSection title="信号参数" note="B1 / B2；量能分仅用于评级">
       <NumberField form={form} setForm={setForm} name="ma_length" label="均线周期" step="1" />
       <NumberField form={form} setForm={setForm} name="vol_length" label="均量周期" step="1" />
       <NumberField form={form} setForm={setForm} name="vol_high_days" label="连续放量天数" step="1" />
@@ -59,8 +59,6 @@ function UsFilters({ form, setForm }) {
         <Toggle form={form} setForm={setForm} name="require_ma5_rising" label="MA5 向上" />
         <Toggle form={form} setForm={setForm} name="require_5ma_gt_20ma" label="MA5 > MA20" />
         <Toggle form={form} setForm={setForm} name="b1_require_20ma_gt_50ma" label="20MA > 50MA" />
-        <Toggle form={form} setForm={setForm} name="secondary_big_red_b1" label="大阴线 B1" />
-        <Toggle form={form} setForm={setForm} name="secondary_above_ma5_3d" label="连续三天 > MA5" />
       </div>
     </FilterSection>
   </>;
@@ -89,16 +87,14 @@ function CnFilters({ form, setForm, boards }) {
       <NumberField form={form} setForm={setForm} name="massive_window" label="巨量观察窗口" step="1" />
       <NumberField form={form} setForm={setForm} name="massive_min_count" label="巨量最少次数" step="1" />
       <NumberField form={form} setForm={setForm} name="reentry_pct" label="B2回踩距离（%）" />
-      <NumberField form={form} setForm={setForm} name="strong_volume_score" label="Strong 量能分" />
-      <NumberField form={form} setForm={setForm} name="medium_volume_score" label="Medium 量能分" />
+      <NumberField form={form} setForm={setForm} name="strong_volume_score" label="Strong 评级线" />
+      <NumberField form={form} setForm={setForm} name="medium_volume_score" label="Medium 评级线" />
     </FilterSection>
     <FilterSection title="可选条件" note="默认关闭">
       <div className="check-grid">
         <Toggle form={form} setForm={setForm} name="require_ma5_rising" label="MA5 向上" />
         <Toggle form={form} setForm={setForm} name="require_5ma_gt_20ma" label="MA5 > MA20" />
         <Toggle form={form} setForm={setForm} name="b1_require_20ma_gt_50ma" label="20MA > 50MA" />
-        <Toggle form={form} setForm={setForm} name="secondary_big_red_b1" label="大阴线 B1" />
-        <Toggle form={form} setForm={setForm} name="secondary_above_ma5_3d" label="连续三天 > MA5" />
       </div>
     </FilterSection>
   </>;
@@ -106,7 +102,10 @@ function CnFilters({ form, setForm, boards }) {
 
 function CandidateTable({ market, rows, selected, onSelect, onAdd }) {
   const [sort, setSort] = usePersistentState(`scanner.${market}.sort`, { key: "score", direction: "desc" });
-  const [widths, setWidths] = usePersistentState(`scanner.${market}.columns`, [52, 82, 180, 70, 260, 78, 72, 100, 150, 76]);
+  const [widths, setWidths] = usePersistentState(`scanner.${market}.columns`, [52, 82, 180, 70, 260, 78, 72, 100, 150, 68, 76]);
+  useEffect(() => {
+    setWidths((current) => current.length === 11 ? current : [...current.slice(0, 9), 68, current[9] || 76]);
+  }, [setWidths]);
   const sortedRows = useMemo(() => [...rows].sort((left, right) => {
     const read = (row) => sort.key === "score" ? Number(market === "cn" ? row.volume_score : row.technical_score) : sort.key === "volume" ? Number(row.volume_ratio) : String(row[sort.key] || row.symbol || "");
     const a = read(left); const b = read(right); const result = typeof a === "number" ? a - b : String(a).localeCompare(String(b));
@@ -120,7 +119,7 @@ function CandidateTable({ market, rows, selected, onSelect, onAdd }) {
     const stop = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", stop); };
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", stop);
   };
-  const headers = [{ label: "操作" }, { label: "代码", key: "symbol" }, { label: "公司", key: "company_name" }, { label: "B点", key: "signal_type" }, { label: "入选原因" }, { label: "技术分", key: "score" }, { label: "量比", key: "volume" }, { label: market === "cn" ? "20日额" : "市值", key: market === "cn" ? "avg_amount_20d" : "market_cap_billion" }, { label: "行业", key: "sector" }, { label: "入选", key: "selection_streak" }];
+  const headers = [{ label: "操作" }, { label: "代码", key: "symbol" }, { label: "公司", key: "company_name" }, { label: "B点", key: "signal_type" }, { label: "入选原因" }, { label: "技术分", key: "score" }, { label: "量比", key: "volume" }, { label: market === "cn" ? "20日额" : "市值", key: market === "cn" ? "avg_amount_20d" : "market_cap_billion" }, { label: "行业", key: "sector" }, { label: "资讯" }, { label: "入选", key: "selection_streak" }];
   return <div className="table-wrap"><table className="candidate-table"><colgroup>{widths.map((width, index) => <col key={index} style={{ width }} />)}</colgroup><thead><tr>{headers.map((header, index) => <th key={header.label} className={header.key ? "sortable" : ""} onClick={() => header.key && sortBy(header.key)}><span>{header.label}{sort.key === header.key ? (sort.direction === "asc" ? " ↑" : " ↓") : ""}</span><i onPointerDown={(event) => resizeColumn(index, event)} /></th>)}</tr></thead><tbody>
     {sortedRows.length ? sortedRows.map((row) => {
       const symbol = row.symbol;
@@ -139,9 +138,10 @@ function CandidateTable({ market, rows, selected, onSelect, onAdd }) {
         <td>{numberText(row.volume_ratio)}x</td>
         <td>{market === "cn" ? `${numberText(Number(row.avg_amount_20d || 0) / 100000000)}亿` : (row.market_cap_billion || "-")}</td>
         <td>{market === "cn" ? (row.sector || "-") : (row.industry_zh || row.sector_zh || "-")}</td>
+        <td><a className="candidate-external-link" href={xueqiuUrl(symbol)} target="_blank" rel="noreferrer" title={`${symbol} 雪球`} onClick={(event) => event.stopPropagation()}>雪球<Icon name="external" /></a></td>
         <td>{row.is_new_candidate ? <span className="new-candidate">新</span> : `${Number(row.selection_streak || 1)}次`}</td>
       </tr>;
-    }) : <tr><td colSpan="10" className="empty">当前筛选下暂无候选</td></tr>}
+    }) : <tr><td colSpan="11" className="empty">当前筛选下暂无候选</td></tr>}
   </tbody></table></div>;
 }
 
@@ -154,7 +154,7 @@ export function Scanner({ market, bootstrap, latest, setLatest, reloadWatchlist 
   const [selectedSymbol, setSelectedSymbol] = usePersistentState(`scanner.${market}.selected`, "");
   const [filtersOpen, setFiltersOpen] = usePersistentState(`scanner.${market}.filters.${isMobile ? "mobile" : "desktop"}`, () => !isMobile);
   const [tableHeight, setTableHeight] = usePersistentState(`scanner.${market}.tableHeight`, 220);
-  const [resultFilter, setResultFilter] = usePersistentState(`scanner.${market}.resultFilter`, { query: "", signal: "all", rating: "all", minScore: "", onlyNew: false, consecutive: false });
+  const [resultFilter, setResultFilter] = usePersistentState(`scanner.${market}.resultFilter`, { query: "", signal: "all", rating: "all", minScore: "", onlyNew: false, consecutive: false, bigRedB1: false, aboveMa5ThreeDays: false });
   const [starting, setStarting] = useState(false);
   const prefix = `/api/${market}`;
   const rows = latest?.candidates || [];
@@ -245,7 +245,9 @@ export function Scanner({ market, bootstrap, latest, setLatest, reloadWatchlist 
           <input aria-label="最低技术分" type="number" placeholder="最低分" value={resultFilter.minScore} onChange={(event) => setResultFilter({ ...resultFilter, minScore: event.target.value })} />
           <FilterChip label="新增" active={resultFilter.onlyNew} onClick={() => setResultFilter({ ...resultFilter, onlyNew: !resultFilter.onlyNew })} />
           <FilterChip label="连续" active={resultFilter.consecutive} onClick={() => setResultFilter({ ...resultFilter, consecutive: !resultFilter.consecutive })} />
-          <button className="icon-button" type="button" title="清除筛选" aria-label="清除筛选" onClick={() => setResultFilter({ query: "", signal: "all", rating: "all", minScore: "", onlyNew: false, consecutive: false })}><Icon name="close" /></button>
+          <FilterChip label="大阴线B1" active={resultFilter.bigRedB1} onClick={() => setResultFilter({ ...resultFilter, bigRedB1: !resultFilter.bigRedB1 })} />
+          <FilterChip label="连续3天>MA5" active={resultFilter.aboveMa5ThreeDays} onClick={() => setResultFilter({ ...resultFilter, aboveMa5ThreeDays: !resultFilter.aboveMa5ThreeDays })} />
+          <button className="icon-button" type="button" title="清除筛选" aria-label="清除筛选" onClick={() => setResultFilter({ query: "", signal: "all", rating: "all", minScore: "", onlyNew: false, consecutive: false, bigRedB1: false, aboveMa5ThreeDays: false })}><Icon name="close" /></button>
           <span>{visibleRows.length}/{rows.length}</span>
         </div>
         <CandidateTable market={market} rows={visibleRows} selected={selectedRow?.symbol} onSelect={(row) => setSelectedSymbol(row.symbol)} onAdd={add} />

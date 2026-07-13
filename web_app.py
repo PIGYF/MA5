@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
+from backend_storage import atomic_write_json, locked_path
 from backtest import (
     Bar,
     PRICE_CACHE_DIR,
@@ -71,6 +72,7 @@ from ma5_config import (
     validate_scan_range,
 )
 from macro_calendar import macro_risk_state
+from market_calendar import next_trading_day
 from ashare_lab import (
     ASHARE_ROUTE,
     ASHARE_BOARD_LABELS,
@@ -94,6 +96,20 @@ from ashare_lab import (
     suggest_ashare_symbols,
 )
 from scan_next_b import SignalResult, latest_b_signal, load_symbols, unique_symbols, write_html
+from task_runtime import (
+    active_scan_job,
+    append_task_history,
+    classify_scan_error,
+    clear_jobs_for_market,
+    get_job,
+    job_pause_requested,
+    job_stop_requested,
+    latest_job_for_market,
+    load_task_history,
+    normalize_job_payload,
+    set_job,
+    summarize_error_categories,
+)
 
 
 def load_local_env() -> None:
@@ -118,25 +134,8 @@ def load_local_env() -> None:
 load_local_env()
 
 
-SCAN_JOBS: dict[str, dict[str, object]] = {}
-SCAN_JOBS_LOCK = threading.Lock()
-TASK_HISTORY_PATH = SCAN_DIR / "task_history.json"
-TASK_HISTORY_LIMIT = 80
-TASK_HISTORY_LOCK = threading.Lock()
 FRONTEND_DIST_DIR = Path(__file__).resolve().parent / "frontend" / "dist"
-ACTIVE_SCAN_STATUSES = {"queued", "running", "pausing", "paused", "stopping"}
-FINISHED_SCAN_STATUSES = {"done", "stopped", "error"}
 ASHARE_DEFAULT_MAX_SCAN_SYMBOLS = 6000
-JOB_STATUS_LABELS = {
-    "queued": "排队中",
-    "running": "运行中",
-    "pausing": "正在暂停",
-    "paused": "已暂停",
-    "stopping": "正在终止",
-    "stopped": "已终止",
-    "done": "已完成",
-    "error": "失败",
-}
 
 
 def cleanup_old_reports() -> None:
@@ -161,188 +160,6 @@ def cleanup_old_reports() -> None:
             path.unlink()
         except OSError:
             pass
-
-
-def set_job(job_id: str, **updates: object) -> None:
-    with SCAN_JOBS_LOCK:
-        job = SCAN_JOBS.setdefault(job_id, {})
-        if "created_at" not in job:
-            job["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        job.update(updates)
-
-
-def get_job(job_id: str) -> dict[str, object] | None:
-    with SCAN_JOBS_LOCK:
-        job = SCAN_JOBS.get(job_id)
-        return dict(job) if job else None
-
-
-def active_scan_job(market: str | None = None) -> tuple[str, dict[str, object]] | None:
-    with SCAN_JOBS_LOCK:
-        for job_id, job in SCAN_JOBS.items():
-            if job.get("status") not in ACTIVE_SCAN_STATUSES:
-                continue
-            if market and job_market(job_id, job) != market:
-                continue
-            if job.get("status") in ACTIVE_SCAN_STATUSES:
-                return job_id, dict(job)
-    return None
-
-
-def job_market(job_id: str, job: dict[str, object] | None = None) -> str:
-    if job and isinstance(job.get("market"), str):
-        return str(job["market"])
-    if str(job_id).startswith("profile-"):
-        return "us_profile"
-    return "cn" if str(job_id).startswith("ashare-") else "us"
-
-
-def normalize_job_payload(job_id: str, job: dict[str, object]) -> dict[str, object]:
-    payload = dict(job)
-    status = str(payload.get("status", ""))
-    total = int(payload.get("total") or 0)
-    scanned = int(payload.get("scanned") or 0)
-    if status in FINISHED_SCAN_STATUSES:
-        progress_pct = 100
-    elif total > 0:
-        progress_pct = max(1, min(99, round(scanned / total * 100)))
-    elif status in ACTIVE_SCAN_STATUSES:
-        progress_pct = 8
-    else:
-        progress_pct = 0
-    market = job_market(job_id, payload)
-    if market == "cn":
-        market_label = "A股"
-    elif market == "us_profile":
-        market_label = "美股资料"
-    else:
-        market_label = "美股"
-    payload.update(
-        {
-            "job_id": job_id,
-            "market": market,
-            "market_label": market_label,
-            "status_label": JOB_STATUS_LABELS.get(status, status or "-"),
-            "is_active": status in ACTIVE_SCAN_STATUSES,
-            "is_finished": status in FINISHED_SCAN_STATUSES,
-            "can_stop": status in ACTIVE_SCAN_STATUSES,
-            "progress_pct": progress_pct,
-        }
-    )
-    return payload
-
-
-def latest_job_for_market(market: str, include_finished: bool = True) -> tuple[str, dict[str, object]] | None:
-    latest_job_id = ""
-    latest_job: dict[str, object] | None = None
-    with SCAN_JOBS_LOCK:
-        for job_id, job in SCAN_JOBS.items():
-            if job_market(job_id, job) != market:
-                continue
-            if job.get("status") in ACTIVE_SCAN_STATUSES:
-                return job_id, dict(job)
-            if include_finished and job.get("status") in FINISHED_SCAN_STATUSES:
-                latest_job_id = job_id
-                latest_job = dict(job)
-    if latest_job:
-        return latest_job_id, latest_job
-    return None
-
-
-def clear_jobs_for_market(market: str) -> int:
-    deleted = 0
-    with SCAN_JOBS_LOCK:
-        for job_id, job in list(SCAN_JOBS.items()):
-            if job_market(job_id, job) == market:
-                SCAN_JOBS.pop(job_id, None)
-                deleted += 1
-    return deleted
-
-
-def load_task_history(limit: int = 12) -> list[dict[str, object]]:
-    if not TASK_HISTORY_PATH.exists():
-        return []
-    try:
-        payload = json.loads(TASK_HISTORY_PATH.read_text(encoding="utf-8"))
-        items = payload.get("items", []) if isinstance(payload, dict) else []
-        if not isinstance(items, list):
-            return []
-        return [item for item in items if isinstance(item, dict)][: max(1, int(limit))]
-    except Exception:
-        return []
-
-
-def append_task_history(
-    job_id: str,
-    market: str,
-    status: str,
-    scanned: int = 0,
-    candidates: int = 0,
-    errors: int = 0,
-    source: str = "",
-    params: dict[str, list[str]] | None = None,
-    message: str = "",
-) -> None:
-    if market == "cn":
-        market_label = "A股"
-    elif market == "us_profile":
-        market_label = "美股资料"
-    else:
-        market_label = "美股"
-    with TASK_HISTORY_LOCK:
-        TASK_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        existing = load_task_history(TASK_HISTORY_LIMIT)
-        entry = {
-            "job_id": job_id,
-            "market": market,
-            "market_label": market_label,
-            "status": status,
-            "status_label": JOB_STATUS_LABELS.get(status, status),
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "scanned": int(scanned or 0),
-            "candidates": int(candidates or 0),
-            "errors": int(errors or 0),
-            "source": source,
-            "message": message,
-            "params": {key: values[-1] if values else "" for key, values in (params or {}).items()},
-        }
-        deduped = [item for item in existing if item.get("job_id") != job_id]
-        payload = {"updated_at": entry["created_at"], "items": [entry] + deduped[: TASK_HISTORY_LIMIT - 1]}
-        TASK_HISTORY_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def job_pause_requested(job_id: str) -> bool:
-    job = get_job(job_id)
-    return bool(job and job.get("pause_requested"))
-
-
-def job_stop_requested(job_id: str) -> bool:
-    job = get_job(job_id)
-    return bool(job and job.get("stop_requested"))
-
-
-def classify_scan_error(reason: str) -> str:
-    text = str(reason or "").lower()
-    if any(token in text for token in ("recent split", "split adjustment", "拆股", "复权", "volume regime")):
-        return "数据质量"
-    if any(token in text for token in ("缺少", "no module", "importerror", "install yfinance", "pip install")):
-        return "依赖缺失"
-    if any(token in text for token in ("timeout", "timed out", "connection", "network", "http", "urlopen", "远程", "网络")):
-        return "网络/接口"
-    if any(token in text for token in ("no data", "empty", "没有可用", "日线", "数据源", "possibly delisted")):
-        return "无数据"
-    if any(token in text for token in ("symbol", "代码", "6 位", "invalid", "not found")):
-        return "代码/标的"
-    return "其他"
-
-
-def summarize_error_categories(errors: list[tuple[str, str]]) -> dict[str, int]:
-    summary: dict[str, int] = {}
-    for _, reason in errors:
-        category = classify_scan_error(reason)
-        summary[category] = summary.get(category, 0) + 1
-    return summary
 
 
 def render_error_category_chips(errors: list[tuple[str, str]]) -> str:
@@ -943,7 +760,7 @@ def save_watchlist_items(items: list[dict[str, str]]) -> None:
     payload["items"] = clean_items
     payload["symbols"] = [item["symbol"] for item in clean_items]
     payload["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    WATCHLIST_PATH.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    atomic_write_json(WATCHLIST_PATH, payload, indent=2)
 
 
 def save_watchlist(symbols: list[str]) -> None:
@@ -1050,7 +867,7 @@ def save_divergence_events(events: list[dict[str, str]]) -> None:
         "events": events,
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
-    DIVERGENCE_EVENTS_PATH.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    atomic_write_json(DIVERGENCE_EVENTS_PATH, payload, indent=2)
 
 
 def add_divergence_event(params: dict[str, list[str]]) -> dict[str, str]:
@@ -1273,7 +1090,7 @@ def save_ashare_watchlist_items(items: list[dict[str, str]]) -> None:
                 "added_at": str(item.get("added_at", "") or time.strftime("%Y-%m-%d %H:%M:%S")),
             }
         )
-    path.write_text(json.dumps({"items": clean_items, "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")}, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(path, {"items": clean_items, "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")}, indent=2)
 
 
 def ashare_snapshot_to_dict(row: AShareSignalSnapshot) -> dict[str, object]:
@@ -1313,10 +1130,12 @@ def save_latest_ashare_scan(
     path = ashare_latest_scan_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     signal_dates = [row.latest_date for row in candidates if row.latest_date]
-    signal_date = max(signal_dates) if signal_dates else date.today().isoformat()
+    signal_date = max(signal_dates) if signal_dates else ashare_required_latest_date(date.today()).isoformat()
+    signal_day = date.fromisoformat(signal_date)
     payload = {
         "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "signal_date": signal_date,
+        "planned_trade_date": next_trading_day(signal_day, "cn").isoformat(),
         "source": universe_source,
         "market_cap_filter_applied": market_cap_filter_applied,
         "summary": {"scanned": scanned, "candidates": len(candidates), "failed": len(errors)},
@@ -1324,7 +1143,7 @@ def save_latest_ashare_scan(
         "candidates": [ashare_snapshot_to_dict(row) for row in candidates],
         "errors": [{"symbol": symbol, "reason": reason} for symbol, reason in errors],
     }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(path, payload, indent=2)
     update_scan_history_index("cn", signal_date, [row.symbol for row in candidates])
 
 
@@ -5369,7 +5188,7 @@ def build_us_profile_payload(profiles: dict[str, dict[str, object]], source: str
         "progress": progress or {},
         "profiles": profiles,
     }
-    US_COMPANY_PROFILE_CACHE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(US_COMPANY_PROFILE_CACHE_PATH, payload, indent=2)
     read_us_company_profile_cache()
     cn_name_count = sum(1 for item in profiles.values() if item.get("cn_name"))
     return {
@@ -5651,7 +5470,7 @@ def load_earnings_cache() -> dict[str, dict[str, object]]:
 
 def save_earnings_cache(cache: dict[str, dict[str, object]]) -> None:
     EARNINGS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    EARNINGS_CACHE_PATH.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(EARNINGS_CACHE_PATH, cache, indent=2)
 
 
 def normalize_earnings_date(value: object) -> str:
@@ -6267,13 +6086,13 @@ def load_scan_history_index() -> dict[str, dict[str, list[str]]]:
 def update_scan_history_index(market: str, signal_date: str, symbols: list[str]) -> None:
     if not signal_date:
         return
-    payload = load_scan_history_index()
-    market_rows = payload.setdefault(market, {})
-    market_rows[signal_date] = sorted(set(symbols))
-    recent_dates = sorted(market_rows, reverse=True)[:45]
-    payload[market] = {day: market_rows[day] for day in recent_dates}
-    SCAN_HISTORY_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SCAN_HISTORY_INDEX_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    with locked_path(SCAN_HISTORY_INDEX_PATH):
+        payload = load_scan_history_index()
+        market_rows = payload.setdefault(market, {})
+        market_rows[signal_date] = sorted(set(symbols))
+        recent_dates = sorted(market_rows, reverse=True)[:45]
+        payload[market] = {day: market_rows[day] for day in recent_dates}
+        atomic_write_json(SCAN_HISTORY_INDEX_PATH, payload, indent=2)
 
 
 def annotate_candidate_history(market: str, signal_date: str, rows: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -6337,7 +6156,7 @@ def save_latest_scan(
         "candidates": [row.__dict__ for row in display_rows],
         "errors": [{"symbol": symbol, "reason": reason} for symbol, reason in errors],
     }
-    LATEST_SCAN_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(LATEST_SCAN_PATH, payload, indent=2)
     update_scan_history_index("us", end, [row.symbol for row in display_rows])
     try:
         start_us_profile_update_for_symbols([row.symbol for row in display_rows], "latest scan")
@@ -6444,7 +6263,7 @@ def fetch_nasdaq_screener_rows() -> list[dict[str, object]]:
         raise RuntimeError(f"无法拉取 Nasdaq 股票池，且本地没有可用缓存：{exc}") from exc
     rows = payload.get("data", {}).get("rows", [])
     NASDAQ_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    NASDAQ_CACHE_PATH.write_text(json.dumps(rows), encoding="utf-8")
+    atomic_write_json(NASDAQ_CACHE_PATH, rows)
     return rows
 
 
@@ -8064,14 +7883,29 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
             "shape": "arrowUp",
             "text": str(row.get("buy_action_stage", "") or "买"),
         }
-        for row in equity_curve
-        if str(row.get("buy_action", ""))
+        for index, row in enumerate(equity_curve)
+        if float(row.get("position_shares", 0) or 0)
+        > (float(equity_curve[index - 1].get("position_shares", 0) or 0) if index > 0 else 0.0)
     ] + [
         {"time": trade.exit_date, "position": "aboveBar", "color": "#f23645", "shape": "arrowDown", "text": "卖"}
         for trade in trades
     ]
     signal_markers: list[dict[str, object]] = []
     markers = list(execution_markers)
+    holding_periods: list[dict[str, str]] = []
+    holding_start = ""
+    previous_position = 0.0
+    for row in equity_curve:
+        current_position = float(row.get("position_shares", 0) or 0)
+        current_date = str(row.get("date", ""))
+        if previous_position <= 0 < current_position:
+            holding_start = current_date
+        elif previous_position > 0 >= current_position and holding_start:
+            holding_periods.append({"start": holding_start, "end": current_date, "label": "持仓"})
+            holding_start = ""
+        previous_position = current_position
+    if holding_start and equity_curve:
+        holding_periods.append({"start": holding_start, "end": str(equity_curve[-1].get("date", "")), "label": "持仓中"})
     symbol_events = divergence_events_for_symbol(symbol, date.fromisoformat(bars[-1].date))
     event_by_time: dict[str, list[dict[str, object]]] = {}
     bar_dates = [date.fromisoformat(bar.date) for bar in bars]
@@ -8200,6 +8034,7 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
         "markers": sorted(markers, key=lambda item: str(item["time"])),
         "executionMarkers": sorted(execution_markers, key=lambda item: str(item["time"])),
         "signalMarkers": sorted(signal_markers, key=lambda item: str(item["time"])),
+        "holdingPeriods": holding_periods,
         "rows": rows,
         "divergenceEvents": symbol_events,
     }
