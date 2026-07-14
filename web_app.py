@@ -8827,7 +8827,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(normalize_job_payload(job_id, job))
 
     def ashare_scan_job_active(self) -> None:
-        latest_job = latest_job_for_market("cn", include_finished=True)
+        latest_job = latest_job_for_market("cn", include_finished=False)
         if latest_job:
             job_id, job = latest_job
             self.send_json(normalize_job_payload(job_id, job))
@@ -8970,7 +8970,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(normalize_job_payload(job_id, job))
 
     def scan_job_active(self) -> None:
-        latest_job = latest_job_for_market("us", include_finished=True)
+        latest_job = latest_job_for_market("us", include_finished=False)
         if latest_job:
             job_id, job = latest_job
             self.send_json(normalize_job_payload(job_id, job))

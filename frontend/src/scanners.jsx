@@ -1,8 +1,28 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { getJson, isJobRunning, numberText, toQuery, usePersistentState, xueqiuUrl } from "./lib";
 import { filterCandidates } from "./resultFilters";
 import { LazyStrategyChart } from "./LazyStrategyChart";
 import { Checkbox, Field, FilterSection, Icon, PageToolbar, Progress, ResizableWorkspace, WorkspaceEmpty } from "./ui";
+
+const EMPTY_RESULT_FILTER = {
+  query: "",
+  signal: "all",
+  rating: "all",
+  minScore: "",
+  onlyNew: false,
+  consecutive: false,
+  bigRedB1: false,
+  aboveMa5ThreeDays: false,
+};
+
+function freshResultFilter() {
+  return { ...EMPTY_RESULT_FILTER };
+}
+
+function scanIdentity(scan) {
+  if (!scan) return "";
+  return [scan.created_at || scan.saved_at || "", scan.signal_date || "", scan.candidates?.length || 0].join("|");
+}
 
 function value(form, key) {
   return form?.[key] ?? "";
@@ -154,8 +174,9 @@ export function Scanner({ market, bootstrap, latest, setLatest, reloadWatchlist 
   const [selectedSymbol, setSelectedSymbol] = usePersistentState(`scanner.${market}.selected`, "");
   const [filtersOpen, setFiltersOpen] = usePersistentState(`scanner.${market}.filters.${isMobile ? "mobile" : "desktop"}`, () => !isMobile);
   const [tableHeight, setTableHeight] = usePersistentState(`scanner.${market}.tableHeight`, 220);
-  const [resultFilter, setResultFilter] = usePersistentState(`scanner.${market}.resultFilter`, { query: "", signal: "all", rating: "all", minScore: "", onlyNew: false, consecutive: false, bigRedB1: false, aboveMa5ThreeDays: false });
+  const [resultFilter, setResultFilter] = useState(freshResultFilter);
   const [starting, setStarting] = useState(false);
+  const latestIdentity = useRef(scanIdentity(latest));
   const prefix = `/api/${market}`;
   const rows = latest?.candidates || [];
   const visibleRows = useMemo(() => filterCandidates(rows, market, resultFilter), [market, resultFilter, rows]);
@@ -166,14 +187,39 @@ export function Scanner({ market, bootstrap, latest, setLatest, reloadWatchlist 
   useEffect(() => setForm((current) => ({ ...(bootstrap?.defaults || {}), ...current })), [bootstrap, setForm]);
 
   useEffect(() => {
+    latestIdentity.current = scanIdentity(latest);
+  }, [latest]);
+
+  useEffect(() => {
     if (!selectedRow && visibleRows.length) setSelectedSymbol(visibleRows[0].symbol);
     if (!visibleRows.length && selectedSymbol) setSelectedSymbol("");
   }, [selectedRow, selectedSymbol, setSelectedSymbol, visibleRows]);
 
   useEffect(() => {
     let cancelled = false;
-    getJson(`${prefix}/scan/active`).then((payload) => { if (!cancelled && payload.job_id) setJob(payload); }).catch(() => {});
-    return () => { cancelled = true; };
+    const syncServerState = async () => {
+      const [activeResult, latestResult] = await Promise.allSettled([
+        getJson(`${prefix}/scan/active`),
+        getJson(`${prefix}/scan/latest`),
+      ]);
+      if (cancelled) return;
+      if (activeResult.status === "fulfilled") {
+        const activeJob = activeResult.value;
+        setJob(activeJob.job_id && isJobRunning(activeJob) ? activeJob : null);
+      }
+      if (latestResult.status === "fulfilled") {
+        const remoteLatest = latestResult.value.latest || null;
+        const remoteIdentity = scanIdentity(remoteLatest);
+        if (remoteIdentity !== latestIdentity.current) {
+          latestIdentity.current = remoteIdentity;
+          setLatest(remoteLatest);
+          setResultFilter(freshResultFilter());
+        }
+      }
+    };
+    syncServerState();
+    const timer = window.setInterval(syncServerState, 5000);
+    return () => { cancelled = true; window.clearInterval(timer); };
   }, [prefix]);
 
   useEffect(() => {
@@ -181,10 +227,19 @@ export function Scanner({ market, bootstrap, latest, setLatest, reloadWatchlist 
     const timer = window.setInterval(async () => {
       try {
         const payload = await getJson(`${prefix}/scan/status?${toQuery({ id: jobId, job_id: jobId })}`);
-        setJob(payload);
         if (["done", "stopped"].includes(payload.status)) {
           const latestPayload = await getJson(`${prefix}/scan/latest`);
-          setLatest(latestPayload.latest || null);
+          const remoteLatest = latestPayload.latest || null;
+          latestIdentity.current = scanIdentity(remoteLatest);
+          setLatest(remoteLatest);
+          setResultFilter(freshResultFilter());
+          setJob(null);
+          setNotice(payload.status === "done" ? "扫描完成，已显示最新结果" : "扫描已终止，已显示保留结果");
+        } else if (payload.status === "error") {
+          setJob(null);
+          setError(payload.error || payload.message || "扫描失败");
+        } else {
+          setJob(payload);
         }
       } catch (exception) {
         setError(exception.message);
@@ -195,6 +250,7 @@ export function Scanner({ market, bootstrap, latest, setLatest, reloadWatchlist 
 
   async function startScan() {
     setError(""); setNotice(""); setSelectedSymbol("");
+    setResultFilter(freshResultFilter());
     setStarting(true);
     try { setJob(await getJson(`${prefix}/scan/start?${toQuery(form)}`)); }
     catch (exception) { setError(exception.message); }
@@ -247,7 +303,7 @@ export function Scanner({ market, bootstrap, latest, setLatest, reloadWatchlist 
           <FilterChip label="连续" active={resultFilter.consecutive} onClick={() => setResultFilter({ ...resultFilter, consecutive: !resultFilter.consecutive })} />
           <FilterChip label="大阴线B1" active={resultFilter.bigRedB1} onClick={() => setResultFilter({ ...resultFilter, bigRedB1: !resultFilter.bigRedB1 })} />
           <FilterChip label="连续3天>MA5" active={resultFilter.aboveMa5ThreeDays} onClick={() => setResultFilter({ ...resultFilter, aboveMa5ThreeDays: !resultFilter.aboveMa5ThreeDays })} />
-          <button className="icon-button" type="button" title="清除筛选" aria-label="清除筛选" onClick={() => setResultFilter({ query: "", signal: "all", rating: "all", minScore: "", onlyNew: false, consecutive: false, bigRedB1: false, aboveMa5ThreeDays: false })}><Icon name="close" /></button>
+          <button className="icon-button" type="button" title="清除筛选" aria-label="清除筛选" onClick={() => setResultFilter(freshResultFilter())}><Icon name="close" /></button>
           <span>{visibleRows.length}/{rows.length}</span>
         </div>
         <CandidateTable market={market} rows={visibleRows} selected={selectedRow?.symbol} onSelect={(row) => setSelectedSymbol(row.symbol)} onAdd={add} />
