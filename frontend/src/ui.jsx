@@ -69,12 +69,12 @@ export function Shell({ route, navigate, marketEnvironment, children }) {
           <i />
           <span>{environment.state || (market === "cn" ? "盘后复盘" : "Market")}</span>
           <b>{environment.symbol || (market === "cn" ? "A股" : "QQQ")}</b>
-          {environment.vix ? <em>VIX {Number(environment.vix).toFixed(1)}</em> : null}
+          {environment.is_stale ? <em>数据延迟</em> : environment.vix ? <em>VIX {Number(environment.vix).toFixed(1)}</em> : null}
         </button>
       </header>
       {riskOpen ? <aside className={`risk-center tone-${environment.tone || "neutral"}`}>
         <header><span><i /><strong>{environment.state || "市场状态"}</strong><b>{action}</b></span><button className="icon-button" type="button" aria-label="关闭风险提示" onClick={() => setRiskOpen(false)}><Icon name="close" /></button></header>
-        <div className="risk-facts"><span><small>参考指数</small><strong>{environment.symbol || (market === "cn" ? "A股" : "QQQ")}</strong></span><span><small>数据日期</small><strong>{environment.date || "-"}</strong></span>{market === "us" ? <><span><small>距MA20</small><strong>{Number.isFinite(Number(environment.dist20)) ? `${Number(environment.dist20).toFixed(2)}%` : "-"}</strong></span><span><small>MA20</small><strong>{environment.ma20_direction || "-"}</strong></span><span><small>VIX</small><strong>{environment.vix ? `${Number(environment.vix).toFixed(1)} · ${environment.vix_label || ""}` : "-"}</strong></span></> : null}</div>
+        <div className="risk-facts"><span><small>参考指数</small><strong>{environment.symbol || (market === "cn" ? "A股" : "QQQ")}</strong></span><span><small>数据日期</small><strong>{environment.date || "-"}{environment.is_stale ? " · 延迟" : ""}</strong></span>{market === "us" ? <><span><small>距MA20</small><strong>{Number.isFinite(Number(environment.dist20)) ? `${Number(environment.dist20).toFixed(2)}%` : "-"}</strong></span><span><small>MA20</small><strong>{environment.ma20_direction || "-"}</strong></span><span><small>VIX</small><strong>{environment.vix ? `${Number(environment.vix).toFixed(1)} · ${environment.vix_label || ""}` : "-"}</strong></span></> : null}</div>
         <p>{environment.message || (market === "cn" ? "盘后信号仅供次日交易计划参考。" : "市场环境只作为仓位和追高风险参考，不改变策略信号。")}</p>
         {environment.macro?.events?.length ? <div className="risk-events"><strong>近期大事</strong>{environment.macro.events.slice(0, 3).map((event, index) => <span key={`${event.date || index}-${event.title || event.name || "event"}`}>{event.date || ""} {event.title || event.name || String(event)}</span>)}</div> : null}
       </aside> : null}

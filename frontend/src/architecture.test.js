@@ -13,7 +13,9 @@ test("React workspace does not regress to iframe rendering", () => {
 
 test("market risk state refreshes after initial bootstrap", () => {
   const main = readFileSync(new URL("main.jsx", import.meta.url), "utf8");
+  const ui = readFileSync(new URL("ui.jsx", import.meta.url), "utf8");
   assert.match(main, /setInterval\(refreshMarketState, 300000\)/);
   assert.match(main, /window\.addEventListener\("focus", refreshMarketState\)/);
   assert.match(main, /visibilitychange/);
+  assert.match(ui, /environment\.is_stale \? <em>数据延迟<\/em>/);
 });

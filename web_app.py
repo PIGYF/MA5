@@ -567,6 +567,8 @@ def market_environment(symbol: str = "QQQ") -> dict[str, object]:
         dist20 = (latest.close / ma20_now - 1) * 100 if ma20_now else 0.0
         dist50 = (latest.close / ma50_now - 1) * 100 if ma50_now else 0.0
         ma20_rising = bool(ma20_now and ma20_prev and ma20_now >= ma20_prev)
+        expected_date = end.isoformat()
+        is_stale = latest.date < expected_date
         if vix_value >= 30:
             state = "Risk-Off"
             tone = "bad"
@@ -583,9 +585,13 @@ def market_environment(symbol: str = "QQQ") -> dict[str, object]:
             state = "Neutral"
             tone = "warn"
             message = "环境一般，优先看强催化和低乖离"
+        if is_stale:
+            message = f"行情源最新有效收盘为 {latest.date}，系统正在自动重试；当前状态仅按该交易日数据计算。"
         return {
             "symbol": symbol,
             "date": latest.date,
+            "expected_date": expected_date,
+            "is_stale": is_stale,
             "state": state,
             "tone": tone,
             "dist20": dist20,
