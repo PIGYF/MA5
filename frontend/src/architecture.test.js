@@ -10,3 +10,10 @@ test("React workspace does not regress to iframe rendering", () => {
   assert.equal(sources.includes("<iframe"), false);
   assert.equal(sources.includes("ChartFrame"), false);
 });
+
+test("market risk state refreshes after initial bootstrap", () => {
+  const main = readFileSync(new URL("main.jsx", import.meta.url), "utf8");
+  assert.match(main, /setInterval\(refreshMarketState, 300000\)/);
+  assert.match(main, /window\.addEventListener\("focus", refreshMarketState\)/);
+  assert.match(main, /visibilitychange/);
+});

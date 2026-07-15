@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { getJson, isJobRunning, numberText, toQuery, usePersistentState, xueqiuUrl } from "./lib";
-import { filterCandidates } from "./resultFilters";
+import { filterCandidates, refreshStaleDefaultRange } from "./resultFilters";
 import { LazyStrategyChart } from "./LazyStrategyChart";
 import { Checkbox, Field, FilterSection, Icon, PageToolbar, Progress, ResizableWorkspace, WorkspaceEmpty } from "./ui";
 
@@ -184,7 +184,7 @@ export function Scanner({ market, bootstrap, latest, setLatest, reloadWatchlist 
   const running = isJobRunning(job);
   const jobId = job?.job_id;
 
-  useEffect(() => setForm((current) => ({ ...(bootstrap?.defaults || {}), ...current })), [bootstrap, setForm]);
+  useEffect(() => setForm((current) => refreshStaleDefaultRange(current, bootstrap?.defaults || {})), [bootstrap, setForm]);
 
   useEffect(() => {
     latestIdentity.current = scanIdentity(latest);
@@ -252,7 +252,16 @@ export function Scanner({ market, bootstrap, latest, setLatest, reloadWatchlist 
     setError(""); setNotice(""); setSelectedSymbol("");
     setResultFilter(freshResultFilter());
     setStarting(true);
-    try { setJob(await getJson(`${prefix}/scan/start?${toQuery(form)}`)); }
+    try {
+      let requestForm = form;
+      if (market === "us") {
+        const freshBootstrap = await getJson(`${prefix}/scanner/bootstrap`);
+        requestForm = refreshStaleDefaultRange(form, freshBootstrap?.defaults || {});
+        setForm(requestForm);
+        if (requestForm.end !== form.end) setNotice(`扫描日期已更新至最新交易日 ${requestForm.end}`);
+      }
+      setJob(await getJson(`${prefix}/scan/start?${toQuery(requestForm)}`));
+    }
     catch (exception) { setError(exception.message); }
     finally { setStarting(false); }
   }
@@ -261,6 +270,19 @@ export function Scanner({ market, bootstrap, latest, setLatest, reloadWatchlist 
     if (!jobId) return;
     try { setJob(await getJson(`${prefix}/scan/${action}?${toQuery({ id: jobId, job_id: jobId })}`)); }
     catch (exception) { setError(exception.message); }
+  }
+
+  async function deleteResult() {
+    if (!window.confirm("确认删除当前选股结果？")) return;
+    try {
+      const payload = await getJson(`${prefix}/scan/delete`);
+      latestIdentity.current = "";
+      setLatest(null);
+      setSelectedSymbol("");
+      setResultFilter(freshResultFilter());
+      setJob(null);
+      setNotice(payload.message || "当前选股结果已删除");
+    } catch (exception) { setError(exception.message); }
   }
 
   async function add(row) {
@@ -283,6 +305,7 @@ export function Scanner({ market, bootstrap, latest, setLatest, reloadWatchlist 
   return <>
     <PageToolbar title={`${market === "cn" ? "A股" : "美股"}选股器`} subtitle={`盘后扫描最后一根已完成日 K · 信号日 ${signalDate}`} actions={<>
       {latest?.csv ? <a className="tool-button" href={latest.csv}><Icon name="download" />CSV</a> : null}
+      {latest ? <button className="danger-action" type="button" onClick={deleteResult}><Icon name="trash" />删除结果</button> : null}
       <button className="tool-button mobile-filter-action" type="button" onClick={() => setFiltersOpen((open) => !open)} aria-expanded={filtersOpen}><Icon name="filter" />{filtersOpen ? "收起条件" : "选股条件"}</button>
       <button className="primary-action" type="button" disabled={running || starting} onClick={startScan}><Icon name="play" />{starting ? "正在启动" : "开始选股"}</button>
       {running && market === "us" ? <button className="tool-button" type="button" onClick={() => jobAction(job.status === "paused" ? "resume" : "pause")}><Icon name={job.status === "paused" ? "play" : "pause"} />{job.status === "paused" ? "继续" : "暂停"}</button> : null}

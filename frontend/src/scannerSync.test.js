@@ -11,4 +11,6 @@ test("scanner refreshes server results and keeps result filters session-local", 
   assert.match(source, /getJson\(`\$\{prefix\}\/scan\/latest`\)/);
   assert.match(source, /setInterval\(syncServerState, 5000\)/);
   assert.doesNotMatch(source, /usePersistentState\(`scanner\.\$\{market\}\.resultFilter`/);
+  assert.match(source, /refreshStaleDefaultRange\(form, freshBootstrap\?\.defaults \|\| \{\}\)/);
+  assert.match(source, /getJson\(`\$\{prefix\}\/scan\/delete`\)/);
 });

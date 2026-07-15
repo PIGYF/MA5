@@ -8604,6 +8604,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(scanner_bootstrap_api_payload(params))
             elif route_path == "/api/us/scan/latest":
                 self.send_json(latest_scan_api_payload())
+            elif route_path == "/api/us/scan/delete":
+                deleted = delete_latest_scan()
+                cleared_jobs = clear_jobs_for_market("us")
+                self.send_json({"ok": True, "deleted": deleted, "cleared_jobs": cleared_jobs, "message": "当前美股选股结果已删除。"})
             elif route_path == "/api/us/scan/start":
                 self.start_scan_job(params)
             elif route_path == "/api/us/scan/status":
@@ -8630,6 +8634,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(ashare_scanner_bootstrap_api_payload())
             elif route_path == "/api/cn/scan/latest":
                 self.send_json(ashare_latest_scan_api_payload())
+            elif route_path == "/api/cn/scan/delete":
+                deleted = 1 if delete_latest_ashare_scan() else 0
+                cleared_jobs = clear_jobs_for_market("cn")
+                self.send_json({"ok": True, "deleted": deleted, "cleared_jobs": cleared_jobs, "message": "当前 A 股选股结果已删除。"})
             elif route_path == "/api/cn/scan/start":
                 self.start_ashare_scan_job(params)
             elif route_path == "/api/cn/scan/status":

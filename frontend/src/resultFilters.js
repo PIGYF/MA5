@@ -2,6 +2,25 @@ export function candidateScore(market, row) {
   return Number(market === "cn" ? row.volume_score : row.technical_score);
 }
 
+function isoDay(value) {
+  const parsed = Date.parse(`${String(value || "")}T00:00:00Z`);
+  return Number.isFinite(parsed) ? Math.floor(parsed / 86400000) : null;
+}
+
+export function refreshStaleDefaultRange(form, defaults) {
+  const merged = { ...(defaults || {}), ...(form || {}) };
+  const currentStart = isoDay(form?.start);
+  const currentEnd = isoDay(form?.end);
+  const defaultStart = isoDay(defaults?.start);
+  const defaultEnd = isoDay(defaults?.end);
+  if ([currentStart, currentEnd, defaultStart, defaultEnd].some((value) => value === null)) return merged;
+  const stillUsesDefaultSpan = currentEnd - currentStart === defaultEnd - defaultStart;
+  if (stillUsesDefaultSpan && currentEnd < defaultEnd) {
+    return { ...merged, start: defaults.start, end: defaults.end };
+  }
+  return merged;
+}
+
 export function filterCandidates(rows, market, filters) {
   const query = String(filters.query || "").trim().toLowerCase();
   return rows.filter((row) => {

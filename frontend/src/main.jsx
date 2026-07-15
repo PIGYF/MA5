@@ -62,6 +62,36 @@ function App() {
     return () => { cancelled = true; };
   }, []); // Initial market data streams independently; route changes reuse the loaded cache.
 
+  useEffect(() => {
+    let cancelled = false;
+    let refreshing = false;
+    const refreshMarketState = async () => {
+      if (refreshing || document.visibilityState === "hidden") return;
+      refreshing = true;
+      try {
+        const payload = await getJson(`/api/${route.market}/scanner/bootstrap`);
+        if (cancelled) return;
+        setBootstraps((current) => ({ ...current, [route.market]: payload }));
+        setLatest((current) => ({ ...current, [route.market]: payload.latest_scan?.latest || null }));
+      } catch (exception) {
+        if (!cancelled) setError(exception.message);
+      } finally {
+        refreshing = false;
+      }
+    };
+    const onVisible = () => { if (document.visibilityState === "visible") refreshMarketState(); };
+    refreshMarketState();
+    const timer = window.setInterval(refreshMarketState, 300000);
+    window.addEventListener("focus", refreshMarketState);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshMarketState);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [route.market]);
+
   const market = route.market;
   const bootstrap = bootstraps[market];
   const setMarketLatest = (next) => setLatest((current) => ({ ...current, [market]: next }));

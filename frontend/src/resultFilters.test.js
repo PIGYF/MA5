@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { filterCandidates } from "./resultFilters.js";
+import { filterCandidates, refreshStaleDefaultRange } from "./resultFilters.js";
 
 const rows = [
   { symbol: "NVDA", company_display_name: "英伟达", signal_type: "B1_trend_confirm", technical_rating: "Strong", technical_score: 4.6, selection_streak: 2, big_red_b1: true, above_ma5_3d: true },
@@ -13,4 +13,16 @@ test("filters candidates without another market request", () => {
   assert.deepEqual(filterCandidates(rows, "us", { query: "", signal: "all", rating: "Strong", minScore: 4, onlyNew: false, consecutive: true }).map((row) => row.symbol), ["NVDA"]);
   assert.deepEqual(filterCandidates(rows, "us", { query: "", signal: "all", rating: "all", minScore: "", onlyNew: false, consecutive: false, bigRedB1: true }).map((row) => row.symbol), ["NVDA"]);
   assert.deepEqual(filterCandidates(rows, "us", { query: "", signal: "all", rating: "all", minScore: "", onlyNew: false, consecutive: false, aboveMa5ThreeDays: true }).map((row) => row.symbol), ["NVDA"]);
+});
+
+test("refreshes only a stale default scan range", () => {
+  const defaults = { start: "2026-05-05", end: "2026-07-14", max_symbols: 500 };
+  assert.deepEqual(
+    refreshStaleDefaultRange({ start: "2026-05-04", end: "2026-07-13", max_symbols: 300 }, defaults),
+    { start: "2026-05-05", end: "2026-07-14", max_symbols: 300 },
+  );
+  assert.deepEqual(
+    refreshStaleDefaultRange({ start: "2026-01-01", end: "2026-07-13", max_symbols: 300 }, defaults),
+    { start: "2026-01-01", end: "2026-07-13", max_symbols: 300 },
+  );
 });
