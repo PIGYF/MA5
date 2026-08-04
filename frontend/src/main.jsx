@@ -6,6 +6,9 @@ import { Scanner } from "./scanners";
 import { Shell } from "./ui";
 import "./styles.css";
 
+const ReboundBacktest = React.lazy(() => import("./rebound").then((module) => ({ default: module.ReboundBacktest })));
+const ReboundWatchlist = React.lazy(() => import("./rebound").then((module) => ({ default: module.ReboundWatchlist })));
+
 async function loadWatchlist(market) {
   if (market !== "cn") {
     const payload = await getJson(`/api/${market}/watchlist`);
@@ -41,9 +44,11 @@ function App() {
   const [watchlists, setWatchlists] = useState({ us: [], cn: [] });
   const [error, setError] = useState("");
 
-  function navigate(market, page) {
-    const next = { market, page };
-    window.history.pushState({}, "", routePath(market, page));
+  function navigate(market, page, requestedStrategy) {
+    const strategy = market === "cn" ? "ma5" : (requestedStrategy || route.strategy || "ma5");
+    const allowedPage = strategy === "rebound" && !["backtest", "watchlist"].includes(page) ? "backtest" : page;
+    const next = { market, strategy, page: allowedPage };
+    window.history.pushState({}, "", routePath(market, allowedPage, strategy));
     setRoute(next);
     window.scrollTo({ top: 0, left: 0 });
   }
@@ -105,6 +110,7 @@ function App() {
   }, [route.market]);
 
   const market = route.market;
+  const strategy = route.strategy || "ma5";
   const bootstrap = bootstraps[market];
   const setMarketLatest = (next) => setLatest((current) => ({ ...current, [market]: next }));
 
@@ -114,11 +120,13 @@ function App() {
 
   return <Shell route={route} navigate={navigate} marketEnvironment={bootstrap?.market_environment}>
     {error ? <div className="message error global-message">{error}</div> : null}
-    {route.page === "home" ? <Home market={market} navigate={navigate} /> : null}
-    {route.page === "scan" ? <Scanner key={market} market={market} bootstrap={bootstrap} latest={latest[market]} setLatest={setMarketLatest} reloadWatchlist={reloadWatchlist} /> : null}
-    {route.page === "watchlist" ? <Watchlist key={market} market={market} items={watchlists[market]} reload={reloadWatchlist} /> : null}
-    {route.page === "backtest" ? <Backtest key={market} market={market} defaults={bootstrap?.defaults || {}} /> : null}
-    {route.page === "batch" ? <BatchBacktest key={market} market={market} defaults={bootstrap?.defaults || {}} /> : null}
+    {strategy === "ma5" && route.page === "home" ? <Home market={market} navigate={navigate} /> : null}
+    {strategy === "ma5" && route.page === "scan" ? <Scanner key={market} market={market} bootstrap={bootstrap} latest={latest[market]} setLatest={setMarketLatest} reloadWatchlist={reloadWatchlist} /> : null}
+    {strategy === "ma5" && route.page === "watchlist" ? <Watchlist key={market} market={market} items={watchlists[market]} reload={reloadWatchlist} /> : null}
+    {strategy === "ma5" && route.page === "backtest" ? <Backtest key={market} market={market} defaults={bootstrap?.defaults || {}} /> : null}
+    {strategy === "ma5" && route.page === "batch" ? <BatchBacktest key={market} market={market} defaults={bootstrap?.defaults || {}} /> : null}
+    {strategy === "rebound" && route.page === "backtest" ? <React.Suspense fallback={<main className="loading-screen"><div className="loading-mark" /><strong>正在载入超跌反弹策略</strong></main>}><ReboundBacktest defaults={bootstrap?.defaults || {}} /></React.Suspense> : null}
+    {strategy === "rebound" && route.page === "watchlist" ? <React.Suspense fallback={<main className="loading-screen"><div className="loading-mark" /><strong>正在载入超跌反弹策略</strong></main>}><ReboundWatchlist /></React.Suspense> : null}
   </Shell>;
 }
 

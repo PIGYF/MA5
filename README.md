@@ -42,6 +42,8 @@ pnpm build
 - `/app/watchlist`：新版美股自选池
 - `/app/backtest`：新版美股回测
 - `/app/batch`：新版美股批量回测
+- `/app/rebound/watchlist`：美股超跌反弹独立观察池
+- `/app/rebound/backtest`：美股超跌反弹参数回测
 - `/app/cn/scan`：新版A股选股器
 - `/app/cn/watchlist`：新版 A 股 / 港股自选池；港股图表复用美股策略信号
 - `/app/cn/backtest`：新版A股回测
@@ -50,6 +52,7 @@ pnpm build
 
 - `data/`：自选池、扫描结果、行情缓存等本地数据
 - `data/hk/watchlist.json`：港股自选池，与 A 股自选数据分开保存
+- `data/us/rebound/watchlist.json`：超跌反弹观察池，与 MA5 自选池分开保存
 - `reports/`：回测和扫描生成的 HTML/CSV 报告
 
 这些目录不要提交到 GitHub。

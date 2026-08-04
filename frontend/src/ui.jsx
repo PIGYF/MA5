@@ -35,6 +35,7 @@ const pages = [
 
 export function Shell({ route, navigate, marketEnvironment, children }) {
   const market = route.market;
+  const strategy = route.strategy || "ma5";
   const environment = marketEnvironment || {};
   const [riskOpen, setRiskOpen] = React.useState(false);
   const [theme, setTheme] = usePersistentState("theme", "dark");
@@ -45,19 +46,20 @@ export function Shell({ route, navigate, marketEnvironment, children }) {
     window.dispatchEvent(new CustomEvent("ma5-theme-change", { detail: { theme: nextTheme } }));
   }, [theme]);
   const action = environment.tone === "bad" ? "暂停追高" : environment.tone === "warn" ? "降低仓位" : "正常复盘";
+  const reboundPage = route.page === "watchlist" ? "watchlist" : "backtest";
   return (
-    <main className="app-shell">
-      <header className="topbar">
+    <main className={`app-shell market-${market}`}>
+      <header className={`topbar market-${market}`}>
         <a className="brand" href="/app/" onClick={(event) => { event.preventDefault(); navigate(market, "home"); }}>
           <Icon name="chart" /><strong>MA5 Strategy Lab</strong>
         </a>
         <div className="market-switch" aria-label="市场切换">
-          <button className={market === "us" ? "active" : ""} onClick={() => navigate("us", route.page === "home" ? "scan" : route.page)}>美股</button>
-          <button className={market === "cn" ? "active" : ""} onClick={() => navigate("cn", route.page === "home" ? "scan" : route.page)}>A股</button>
+          <button className={market === "us" ? "active" : ""} onClick={() => navigate("us", route.page === "home" ? "scan" : route.page, strategy)}>美股</button>
+          <button className={market === "cn" ? "active" : ""} onClick={() => navigate("cn", route.page === "home" ? "scan" : route.page, "ma5")}>A股</button>
         </div>
         <nav className="main-nav" aria-label="功能导航">
-          {pages.map((item) => (
-            <a key={item.key} href={routePath(market, item.key)} className={route.page === item.key ? "active" : ""} onClick={(event) => { event.preventDefault(); navigate(market, item.key); }}>
+          {(strategy === "rebound" ? pages.filter((item) => ["watchlist", "backtest"].includes(item.key)).map((item) => item.key === "backtest" ? { ...item, label: "参数回测" } : { ...item, label: "观察池" }) : pages).map((item) => (
+            <a key={item.key} href={routePath(market, item.key, strategy)} className={route.page === item.key ? "active" : ""} onClick={(event) => { event.preventDefault(); navigate(market, item.key, strategy); }}>
               <Icon name={item.icon} />{item.label}
             </a>
           ))}
@@ -72,6 +74,10 @@ export function Shell({ route, navigate, marketEnvironment, children }) {
           {environment.is_stale ? <em>数据延迟</em> : environment.vix ? <em>VIX {Number(environment.vix).toFixed(1)}</em> : null}
         </button>
       </header>
+      {market === "us" ? <div className="strategy-tabs" role="tablist" aria-label="美股策略选择">
+        <button type="button" role="tab" aria-selected={strategy === "ma5"} className={strategy === "ma5" ? "active" : ""} onClick={() => navigate("us", route.page, "ma5")}>MA5策略</button>
+        <button type="button" role="tab" aria-selected={strategy === "rebound"} className={strategy === "rebound" ? "active" : ""} onClick={() => navigate("us", reboundPage, "rebound")}>超跌反弹</button>
+      </div> : null}
       {riskOpen ? <aside className={`risk-center tone-${environment.tone || "neutral"}`}>
         <header><span><i /><strong>{environment.state || "市场状态"}</strong><b>{action}</b></span><button className="icon-button" type="button" aria-label="关闭风险提示" onClick={() => setRiskOpen(false)}><Icon name="close" /></button></header>
         <div className="risk-facts"><span><small>参考指数</small><strong>{environment.symbol || (market === "cn" ? "A股" : "QQQ")}</strong></span><span><small>数据日期</small><strong>{environment.date || "-"}{environment.is_stale ? " · 延迟" : ""}</strong></span>{market === "us" ? <><span><small>距MA20</small><strong>{Number.isFinite(Number(environment.dist20)) ? `${Number(environment.dist20).toFixed(2)}%` : "-"}</strong></span><span><small>MA20</small><strong>{environment.ma20_direction || "-"}</strong></span><span><small>VIX</small><strong>{environment.vix ? `${Number(environment.vix).toFixed(1)} · ${environment.vix_label || ""}` : "-"}</strong></span></> : null}</div>

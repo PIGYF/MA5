@@ -73,6 +73,7 @@ from ma5_config import (
 )
 from macro_calendar import macro_risk_state
 from market_calendar import next_trading_day
+from rebound_strategy import ReboundSettings, analyze_rebound
 from ashare_lab import (
     ASHARE_ROUTE,
     ASHARE_BOARD_LABELS,
@@ -1154,6 +1155,140 @@ def delete_hk_watchlist_symbol(symbol: str) -> list[dict[str, str]]:
     items = [item for item in load_hk_watchlist_items() if item["symbol"] != clean]
     save_hk_watchlist_items(items)
     return load_hk_watchlist_items()
+
+
+def rebound_watchlist_path() -> Path:
+    return DATA_DIR / "us" / "rebound" / "watchlist.json"
+
+
+def load_rebound_watchlist_items() -> list[dict[str, str]]:
+    path = rebound_watchlist_path()
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in payload.get("items", []):
+        if not isinstance(raw, dict):
+            continue
+        symbol = normalize_yahoo_symbol(str(raw.get("symbol", ""))).upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        items.append(
+            {
+                "symbol": symbol,
+                "group": str(raw.get("group", "") or "R1观察"),
+                "note": str(raw.get("note", "") or ""),
+                "added_at": str(raw.get("added_at", "") or ""),
+                "market": "us",
+                "strategy": "rebound",
+            }
+        )
+    return items
+
+
+def save_rebound_watchlist_items(items: list[dict[str, str]]) -> None:
+    path = rebound_watchlist_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    clean_items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in items:
+        symbol = normalize_yahoo_symbol(str(item.get("symbol", ""))).upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        clean_items.append(
+            {
+                "symbol": symbol,
+                "group": str(item.get("group", "") or "R1观察")[:40],
+                "note": str(item.get("note", "") or "")[:240],
+                "added_at": str(item.get("added_at", "") or time.strftime("%Y-%m-%d %H:%M:%S")),
+            }
+        )
+    atomic_write_json(path, {"items": clean_items, "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")}, indent=2)
+
+
+def add_rebound_watchlist_symbol(symbol: str, group: str = "R1观察", note: str = "") -> list[dict[str, str]]:
+    clean = normalize_yahoo_symbol(symbol).upper()
+    if not clean:
+        raise ValueError("请输入美股代码。")
+    items = load_rebound_watchlist_items()
+    for item in items:
+        if item["symbol"] == clean:
+            item["group"] = group or item.get("group", "R1观察")
+            item["note"] = note or item.get("note", "")
+            save_rebound_watchlist_items(items)
+            return load_rebound_watchlist_items()
+    items.append({"symbol": clean, "group": group, "note": note, "added_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+    save_rebound_watchlist_items(items)
+    return load_rebound_watchlist_items()
+
+
+def delete_rebound_watchlist_symbol(symbol: str) -> list[dict[str, str]]:
+    clean = normalize_yahoo_symbol(symbol).upper()
+    items = [item for item in load_rebound_watchlist_items() if item["symbol"] != clean]
+    save_rebound_watchlist_items(items)
+    return load_rebound_watchlist_items()
+
+
+def rebound_settings_from_params(params: dict[str, list[str]]) -> ReboundSettings:
+    return ReboundSettings(
+        rsi_length=max(2, int(number_field(params, "rsi_length", 14))),
+        bias_short_length=max(2, int(number_field(params, "bias_short_length", 6))),
+        bias_mid_length=max(2, int(number_field(params, "bias_mid_length", 12))),
+        bias_long_length=max(2, int(number_field(params, "bias_long_length", 24))),
+        oversold_rsi=number_field(params, "oversold_rsi", 30),
+        oversold_bias_short=number_field(params, "oversold_bias_short", -6),
+        oversold_bias_mid=number_field(params, "oversold_bias_mid", -8),
+        oversold_bias_long=number_field(params, "oversold_bias_long", -10),
+        decline_days=max(1, int(number_field(params, "decline_days", 5))),
+        decline_pct=number_field(params, "decline_pct", -10),
+        wait_days=max(1, int(number_field(params, "wait_days", 5))),
+        trigger_rsi=number_field(params, "trigger_rsi", 35),
+        require_bias_mid_turn=checkbox_field(params, "require_bias_mid_turn", True),
+        require_previous_high_break=checkbox_field(params, "require_previous_high_break", True),
+        require_bullish_candle=checkbox_field(params, "require_bullish_candle", True),
+        require_volume_confirmation=checkbox_field(params, "require_volume_confirmation", True),
+        volume_length=max(1, int(number_field(params, "volume_length", 5))),
+        volume_multiplier=max(0, number_field(params, "volume_multiplier", 1.0)),
+        low_stop_buffer_pct=max(0, number_field(params, "low_stop_buffer_pct", 2)),
+        hard_stop_pct=max(0.1, number_field(params, "hard_stop_pct", 8)),
+        exit_rsi=number_field(params, "exit_rsi", 60),
+        target_bias_long=number_field(params, "target_bias_long", -2),
+        max_hold_days=max(1, int(number_field(params, "max_hold_days", 10))),
+    )
+
+
+def rebound_analysis_payload(params: dict[str, list[str]]) -> dict[str, object]:
+    symbol = normalize_yahoo_symbol(field(params, "symbol", "")).upper()
+    if not symbol:
+        raise ValueError("请输入美股代码。")
+    end_value = field(params, "end", default_scan_end_date().isoformat())
+    preset = field(params, "preset", "1y")
+    if preset != "custom":
+        end_day = date.fromisoformat(end_value)
+        start_value = chart_start_for_preset(preset, end_day).isoformat()
+    else:
+        start_value = field(params, "start", "")
+    settings = rebound_settings_from_params(params)
+    validate_backtest_range(start_value, end_value, max(24, settings.bias_long_length))
+    bars = fetch_bars("yfinance", symbol, start_value, end_value, "qfq", None)
+    result = analyze_rebound(
+        bars,
+        settings,
+        initial_cash=number_field(params, "initial_cash", 100000),
+        commission_pct=number_field(params, "commission_pct", 0.1),
+        slippage_pct=number_field(params, "slippage_pct", 0),
+    )
+    result["symbol"] = symbol
+    result["start"] = bars[0].date
+    result["end"] = bars[-1].date
+    result["chart"]["symbol"] = symbol
+    return result
 
 
 def ashare_latest_scan_path() -> Path:
@@ -8767,6 +8902,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "items": load_watchlist_items()})
             elif route_path == "/api/us/watchlist/chart":
                 self.send_json(watchlist_chart_payload(params))
+            elif route_path == "/api/us/rebound/analyze":
+                self.send_json(rebound_analysis_payload(params))
+            elif route_path == "/api/us/rebound/watchlist":
+                self.send_json({"ok": True, "items": watchlist_items_with_performance(load_rebound_watchlist_items(), "us")})
+            elif route_path == "/api/us/rebound/watchlist/add":
+                items = add_rebound_watchlist_symbol(
+                    field(params, "symbol", ""),
+                    field(params, "group", "R1观察"),
+                    field(params, "note", ""),
+                )
+                self.send_json({"ok": True, "items": items})
+            elif route_path == "/api/us/rebound/watchlist/delete":
+                items = delete_rebound_watchlist_symbol(field(params, "symbol", ""))
+                self.send_json({"ok": True, "items": items})
             elif route_path == "/api/hk/watchlist":
                 self.send_json({"ok": True, "items": watchlist_items_with_performance(load_hk_watchlist_items(), "hk")})
             elif route_path == "/api/hk/watchlist/add":

@@ -58,13 +58,15 @@ export function xueqiuUrl(symbol) {
 
 export function routeFromLocation() {
   const parts = window.location.pathname.replace(/^\/app\/?/, "").split("/").filter(Boolean);
-  if (!parts.length) return { market: "us", page: "home" };
-  if (parts[0] === "cn") return { market: "cn", page: parts[1] || "scan" };
-  return { market: "us", page: parts[0] || "home" };
+  if (!parts.length) return { market: "us", strategy: "ma5", page: "home" };
+  if (parts[0] === "cn") return { market: "cn", strategy: "ma5", page: parts[1] || "scan" };
+  if (parts[0] === "rebound") return { market: "us", strategy: "rebound", page: parts[1] || "backtest" };
+  return { market: "us", strategy: "ma5", page: parts[0] || "home" };
 }
 
-export function routePath(market, page) {
+export function routePath(market, page, strategy = "ma5") {
   if (page === "home") return "/app/";
+  if (market === "us" && strategy === "rebound") return `/app/rebound/${page}`;
   return market === "cn" ? `/app/cn/${page}` : `/app/${page}`;
 }
 
