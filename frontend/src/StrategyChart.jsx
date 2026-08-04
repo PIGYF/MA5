@@ -49,7 +49,11 @@ export function StrategyChart({ market, symbol, params = {}, title, onClose, cla
   const [loading, setLoading] = useState(true);
   const priceRef = useRef(null); const kdjRef = useRef(null); const holdingRef = useRef(null);
   const visibleRangeRef = useRef(null); const chartRuntimeRef = useRef(null); const chartPayloadRef = useRef(null);
-  const url = useMemo(() => data ? "" : `${market === "cn" ? "/cn/watchlist/chart" : "/watchlist/chart"}?${toQuery({ ...params, symbol, preset })}`, [data, market, params, preset, symbol]);
+  const url = useMemo(() => {
+    if (data) return "";
+    const endpoint = market === "cn" ? "/cn/watchlist/chart" : market === "hk" ? "/api/hk/watchlist/chart" : "/watchlist/chart";
+    return `${endpoint}?${toQuery({ ...params, symbol, preset })}`;
+  }, [data, market, params, preset, symbol]);
 
   useEffect(() => {
     if (typeof controls.holding !== "boolean") setControls((current) => ({ ...current, holding: true }));

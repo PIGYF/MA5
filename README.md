@@ -43,12 +43,13 @@ pnpm build
 - `/app/backtest`：新版美股回测
 - `/app/batch`：新版美股批量回测
 - `/app/cn/scan`：新版A股选股器
-- `/app/cn/watchlist`：新版A股自选池
+- `/app/cn/watchlist`：新版 A 股 / 港股自选池；港股图表复用美股策略信号
 - `/app/cn/backtest`：新版A股回测
 
 ## 数据和缓存
 
 - `data/`：自选池、扫描结果、行情缓存等本地数据
+- `data/hk/watchlist.json`：港股自选池，与 A 股自选数据分开保存
 - `reports/`：回测和扫描生成的 HTML/CSV 报告
 
 这些目录不要提交到 GitHub。

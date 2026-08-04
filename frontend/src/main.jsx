@@ -6,6 +6,18 @@ import { Scanner } from "./scanners";
 import { Shell } from "./ui";
 import "./styles.css";
 
+async function loadWatchlist(market) {
+  if (market !== "cn") {
+    const payload = await getJson(`/api/${market}/watchlist`);
+    return payload.items || [];
+  }
+  const [cnPayload, hkPayload] = await Promise.all([
+    getJson("/api/cn/watchlist"),
+    getJson("/api/hk/watchlist"),
+  ]);
+  return [...(cnPayload.items || []), ...(hkPayload.items || [])];
+}
+
 try {
   const savedTheme = JSON.parse(window.localStorage.getItem("ma5.ui.v1.theme"));
   document.documentElement.dataset.theme = savedTheme === "light" ? "light" : "dark";
@@ -37,8 +49,8 @@ function App() {
   }
 
   async function reloadWatchlist(market) {
-    const payload = await getJson(`/api/${market}/watchlist`);
-    setWatchlists((current) => ({ ...current, [market]: payload.items || [] }));
+    const items = await loadWatchlist(market);
+    setWatchlists((current) => ({ ...current, [market]: items }));
   }
 
   useEffect(() => {
@@ -55,8 +67,8 @@ function App() {
         setBootstraps((current) => ({ ...current, [targetMarket]: payload }));
         setLatest((current) => ({ ...current, [targetMarket]: payload.latest_scan?.latest || null }));
       }).catch((exception) => { if (!cancelled && targetMarket === route.market) setError(exception.message); });
-      getJson(`/api/${targetMarket}/watchlist`).then((payload) => {
-        if (!cancelled) setWatchlists((current) => ({ ...current, [targetMarket]: payload.items || [] }));
+      loadWatchlist(targetMarket).then((items) => {
+        if (!cancelled) setWatchlists((current) => ({ ...current, [targetMarket]: items }));
       }).catch((exception) => { if (!cancelled && targetMarket === route.market) setError(exception.message); });
     });
     return () => { cancelled = true; };

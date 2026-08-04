@@ -140,17 +140,22 @@ function CacheMaintenance() {
 
 export function Watchlist({ market, items, reload }) {
   const [symbol, setSymbol] = useState("");
+  const [assetMarket, setAssetMarket] = usePersistentState(`watchlist.${market}.assetMarket`, market === "cn" ? "cn" : "us");
+  const [marketFilter, setMarketFilter] = usePersistentState(`watchlist.${market}.marketFilter`, "all");
   const [query, setQuery] = usePersistentState(`watchlist.${market}.query`, "");
   const [sortMode, setSortMode] = usePersistentState(`watchlist.${market}.sort`, "added");
-  const orderedItems = React.useMemo(() => [...items].filter((item) => [item.symbol, item.name, item.group, item.sector].join(" ").toLowerCase().includes(query.trim().toLowerCase())).sort((left, right) => {
+  const orderedItems = React.useMemo(() => [...items].filter((item) => {
+    if (market === "cn" && marketFilter !== "all" && (item.market || "cn") !== marketFilter) return false;
+    return [item.symbol, item.name, item.group, item.sector].join(" ").toLowerCase().includes(query.trim().toLowerCase());
+  }).sort((left, right) => {
     if (sortMode === "symbol") return String(left.symbol).localeCompare(String(right.symbol));
     if (sortMode === "performance") return Number(right.performance_pct || -Infinity) - Number(left.performance_pct || -Infinity);
     return String(right.added_at || "").localeCompare(String(left.added_at || ""));
-  }), [items, query, sortMode]);
-  const [selected, setSelected] = usePersistentState(`watchlist.${market}.selected`, orderedItems[0]?.symbol || "");
+  }), [items, market, marketFilter, query, sortMode]);
+  const itemKey = (item) => `${item.market || market}:${item.symbol}`;
+  const [selected, setSelected] = usePersistentState(`watchlist.${market}.selected`, orderedItems[0] ? itemKey(orderedItems[0]) : "");
   const [error, setError] = useState("");
-  const prefix = `/api/${market}`;
-  const selectedItem = orderedItems.find((item) => item.symbol === selected) || orderedItems[0];
+  const selectedItem = orderedItems.find((item) => itemKey(item) === selected) || orderedItems[0];
   const groupedItems = orderedItems.reduce((groups, item) => {
     const date = String(item.added_at || "").slice(0, 10) || "日期未知";
     if (!groups[date]) groups[date] = [];
@@ -160,19 +165,21 @@ export function Watchlist({ market, items, reload }) {
   const watchGroups = Object.entries(groupedItems).sort(([left], [right]) => right.localeCompare(left));
 
   useEffect(() => {
-    if (!items.length) setSelected("");
-    else if (!items.some((item) => item.symbol === selected)) setSelected(orderedItems[0].symbol);
-  }, [items, selected, orderedItems]);
+    if (!orderedItems.length) setSelected("");
+    else if (!orderedItems.some((item) => itemKey(item) === selected)) setSelected(itemKey(orderedItems[0]));
+  }, [orderedItems, selected]);
 
   async function add(event) {
     event.preventDefault(); setError("");
-    try { await getJson(`${prefix}/watchlist/add?${toQuery({ symbol, group: "观察" })}`); setSymbol(""); await reload(market); }
+    const targetMarket = market === "cn" ? assetMarket : market;
+    try { await getJson(`/api/${targetMarket}/watchlist/add?${toQuery({ symbol, group: "观察" })}`); setSymbol(""); await reload(market); }
     catch (exception) { setError(exception.message); }
   }
 
-  async function remove(symbolToDelete) {
+  async function remove(item) {
     setError("");
-    try { await getJson(`${prefix}/watchlist/delete?${toQuery({ symbol: symbolToDelete })}`); await reload(market); }
+    const targetMarket = item.market || market;
+    try { await getJson(`/api/${targetMarket}/watchlist/delete?${toQuery({ symbol: item.symbol })}`); await reload(market); }
     catch (exception) { setError(exception.message); }
   }
 
@@ -186,19 +193,20 @@ export function Watchlist({ market, items, reload }) {
     } catch { window.location.href = "/app/batch"; }
   }
   return <>
-    <PageToolbar title={`${market === "cn" ? "A股" : "美股"}自选池`} subtitle="左侧管理股票，右侧直接查看策略图表" actions={market === "us" ? <button className="tool-button" type="button" disabled={!orderedItems.length} onClick={openBatch}><Icon name="batch" />批量回测</button> : null} />
+    <PageToolbar title={`${market === "cn" ? "A股 / 港股" : "美股"}自选池`} subtitle={market === "cn" ? "A股使用本地策略，港股图表复用美股买卖逻辑" : "左侧管理股票，右侧直接查看策略图表"} actions={market === "us" ? <button className="tool-button" type="button" disabled={!orderedItems.length} onClick={openBatch}><Icon name="batch" />批量回测</button> : null} />
     {error ? <div className="message error">{error}</div> : null}
     <ResizableWorkspace storageKey={`watchlist.${market}.rail`} className="watch-workspace" initial={250} min={220} max={420}>
-      <aside className="watch-rail">
-        <form onSubmit={add}>{market === "cn" ? <AShareSymbolInput bare value={symbol} onChange={setSymbol} /> : <input required placeholder="输入股票代码" value={symbol} onChange={(event) => setSymbol(event.target.value.toUpperCase())} />}<button type="submit" title="加入自选"><Icon name="plus" /></button></form>
+      <aside className={`watch-rail ${market === "cn" ? "has-market-tabs" : ""}`}>
+        {market === "cn" ? <div className="watch-market-tabs" role="tablist" aria-label="自选市场筛选">{[["all", "全部"], ["cn", "A股"], ["hk", "港股"]].map(([value, label]) => <button key={value} type="button" role="tab" aria-selected={marketFilter === value} className={marketFilter === value ? "active" : ""} onClick={() => setMarketFilter(value)}>{label}</button>)}</div> : null}
+        <form className={market === "cn" ? "watch-add-form with-market" : "watch-add-form"} onSubmit={add}>{market === "cn" ? <select aria-label="新增股票市场" value={assetMarket} onChange={(event) => { setAssetMarket(event.target.value); setSymbol(""); }}><option value="cn">A股</option><option value="hk">港股</option></select> : null}{market === "cn" && assetMarket === "cn" ? <AShareSymbolInput bare value={symbol} onChange={setSymbol} /> : <input required placeholder={assetMarket === "hk" ? "港股代码，如 700" : "输入股票代码"} value={symbol} onChange={(event) => setSymbol(event.target.value.toUpperCase())} />}<button type="submit" title="加入自选"><Icon name="plus" /></button></form>
         <div className="watch-tools"><input aria-label="搜索自选股" placeholder="搜索" value={query} onChange={(event) => setQuery(event.target.value)} /><select aria-label="自选股排序" value={sortMode} onChange={(event) => setSortMode(event.target.value)}><option value="added">加入日期</option><option value="symbol">代码</option><option value="performance">涨跌幅</option></select></div>
-        <div className="watch-list">{items.length ? watchGroups.map(([date, groupItems]) => <section className="watch-date-group" key={date}><header><strong>{date}</strong><span>{groupItems.length} 只</span></header>{groupItems.map((item) => {
+        <div className="watch-list">{orderedItems.length ? watchGroups.map(([date, groupItems]) => <section className="watch-date-group" key={date}><header><strong>{date}</strong><span>{groupItems.length} 只</span></header>{groupItems.map((item) => {
           const gain = Number(item.performance_pct);
           const hasGain = Number.isFinite(gain);
-          return <button key={item.symbol} type="button" className={selectedItem?.symbol === item.symbol ? "active" : ""} onClick={() => setSelected(item.symbol)}><span className="watch-item-copy"><span><strong>{item.symbol}</strong><b className={hasGain ? (gain >= 0 ? "gain-up" : "gain-down") : "gain-waiting"}>{hasGain ? `${gain >= 0 ? "+" : ""}${gain.toFixed(2)}%` : "待更新"}</b></span><small>{item.name || item.group || "观察"}</small></span><i role="button" tabIndex="0" title="删除" onClick={(event) => { event.stopPropagation(); remove(item.symbol); }}><Icon name="trash" /></i></button>;
+          return <button key={itemKey(item)} type="button" className={selectedItem && itemKey(selectedItem) === itemKey(item) ? "active" : ""} onClick={() => setSelected(itemKey(item))}><span className="watch-item-copy"><span><strong>{item.symbol}</strong>{market === "cn" ? <em className={`watch-market-badge ${item.market || "cn"}`}>{item.market === "hk" ? "港" : "A"}</em> : null}<b className={hasGain ? (gain >= 0 ? "gain-up" : "gain-down") : "gain-waiting"}>{hasGain ? `${gain >= 0 ? "+" : ""}${gain.toFixed(2)}%` : "待更新"}</b></span><small>{item.name || item.group || "观察"}</small></span><i role="button" tabIndex="0" title="删除" onClick={(event) => { event.stopPropagation(); remove(item); }}><Icon name="trash" /></i></button>;
         })}</section>) : <div className="empty">暂无自选股票</div>}</div>
       </aside>
-      {selectedItem ? <LazyStrategyChart className="watch-chart" market={market} symbol={selectedItem.symbol} title={`${selectedItem.symbol} · ${selectedItem.name || selectedItem.note || selectedItem.sector || "策略图表"}`} /> : <section className="watch-chart"><div className="empty">从左侧加入或选择一只股票</div></section>}
+      {selectedItem ? <LazyStrategyChart className="watch-chart" market={selectedItem.market || market} symbol={selectedItem.symbol} title={`${selectedItem.symbol} · ${selectedItem.name || selectedItem.note || selectedItem.sector || "策略图表"}`} /> : <section className="watch-chart"><div className="empty">从左侧加入或选择一只股票</div></section>}
     </ResizableWorkspace>
   </>;
 }

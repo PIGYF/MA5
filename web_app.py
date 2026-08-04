@@ -1025,6 +1025,137 @@ def ashare_watchlist_path() -> Path:
     return DATA_DIR / "ashare" / "watchlist.json"
 
 
+def hk_watchlist_path() -> Path:
+    return DATA_DIR / "hk" / "watchlist.json"
+
+
+def normalize_hk_code_for_storage(symbol: str) -> str:
+    clean = str(symbol or "").strip().upper().replace(" ", "")
+    if clean.startswith("HK:"):
+        clean = clean[3:]
+    if clean.endswith(".HK"):
+        clean = clean[:-3]
+    clean = clean.lstrip("0") or "0"
+    if not clean.isdigit() or not 1 <= len(clean) <= 5 or clean == "0":
+        raise ValueError("请输入港股代码，例如 700、0700.HK 或 9988。")
+    return f"{int(clean):04d}.HK"
+
+
+def load_hk_watchlist_items() -> list[dict[str, str]]:
+    path = hk_watchlist_path()
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in payload.get("items", []):
+        if not isinstance(raw, dict):
+            continue
+        try:
+            symbol = normalize_hk_code_for_storage(str(raw.get("symbol", "")))
+        except Exception:
+            continue
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        items.append(
+            {
+                "symbol": symbol,
+                "name": str(raw.get("name", "") or ""),
+                "sector": str(raw.get("sector", "") or ""),
+                "group": str(raw.get("group", "") or "观察"),
+                "note": str(raw.get("note", "") or ""),
+                "added_at": str(raw.get("added_at", "") or ""),
+                "market": "hk",
+                "currency": "HKD",
+            }
+        )
+    return items
+
+
+def save_hk_watchlist_items(items: list[dict[str, str]]) -> None:
+    path = hk_watchlist_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    clean_items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in items:
+        try:
+            symbol = normalize_hk_code_for_storage(str(item.get("symbol", "")))
+        except Exception:
+            continue
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        clean_items.append(
+            {
+                "symbol": symbol,
+                "name": str(item.get("name", "") or "").strip()[:80],
+                "sector": str(item.get("sector", "") or "").strip()[:80],
+                "group": str(item.get("group", "") or "观察").strip()[:40],
+                "note": str(item.get("note", "") or "").strip()[:240],
+                "added_at": str(item.get("added_at", "") or time.strftime("%Y-%m-%d %H:%M:%S")),
+            }
+        )
+    atomic_write_json(path, {"items": clean_items, "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")}, indent=2)
+
+
+def fetch_hk_profile(symbol: str) -> tuple[str, str]:
+    try:
+        import yfinance as yf
+    except ImportError:
+        return "", ""
+    try:
+        info = yf.Ticker(symbol).get_info() or {}
+    except Exception:
+        return "", ""
+    name = str(info.get("longName") or info.get("shortName") or "").strip()
+    sector = str(info.get("sector") or info.get("industry") or "").strip()
+    return name, sector
+
+
+def add_hk_watchlist_symbol(symbol: str, group: str = "观察", note: str = "", name: str = "", sector: str = "") -> list[dict[str, str]]:
+    clean = normalize_hk_code_for_storage(symbol)
+    if not name or not sector:
+        fetched_name, fetched_sector = fetch_hk_profile(clean)
+        name = name or fetched_name
+        sector = sector or fetched_sector
+    items = load_hk_watchlist_items()
+    for item in items:
+        if item["symbol"] == clean:
+            item["name"] = name or item.get("name", "")
+            item["sector"] = sector or item.get("sector", "")
+            item["group"] = group.strip()[:40] or item.get("group", "观察")
+            if note:
+                item["note"] = note.strip()[:240]
+            save_hk_watchlist_items(items)
+            return load_hk_watchlist_items()
+    items.append(
+        {
+            "symbol": clean,
+            "name": name,
+            "sector": sector,
+            "group": group or "观察",
+            "note": note,
+            "added_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    )
+    save_hk_watchlist_items(items)
+    return load_hk_watchlist_items()
+
+
+def delete_hk_watchlist_symbol(symbol: str) -> list[dict[str, str]]:
+    try:
+        clean = normalize_hk_code_for_storage(symbol)
+    except Exception:
+        return load_hk_watchlist_items()
+    items = [item for item in load_hk_watchlist_items() if item["symbol"] != clean]
+    save_hk_watchlist_items(items)
+    return load_hk_watchlist_items()
+
+
 def ashare_latest_scan_path() -> Path:
     return DATA_DIR / "ashare" / "latest_scan.json"
 
@@ -8636,6 +8767,24 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "items": load_watchlist_items()})
             elif route_path == "/api/us/watchlist/chart":
                 self.send_json(watchlist_chart_payload(params))
+            elif route_path == "/api/hk/watchlist":
+                self.send_json({"ok": True, "items": watchlist_items_with_performance(load_hk_watchlist_items(), "hk")})
+            elif route_path == "/api/hk/watchlist/add":
+                items = add_hk_watchlist_symbol(
+                    field(params, "symbol", ""),
+                    field(params, "group", "观察"),
+                    field(params, "note", ""),
+                    field(params, "name", ""),
+                    field(params, "sector", ""),
+                )
+                self.send_json({"ok": True, "items": items})
+            elif route_path == "/api/hk/watchlist/delete":
+                items = delete_hk_watchlist_symbol(field(params, "symbol", ""))
+                self.send_json({"ok": True, "items": items})
+            elif route_path == "/api/hk/watchlist/chart":
+                normalized_params = dict(params)
+                normalized_params["symbol"] = [normalize_hk_code_for_storage(field(params, "symbol", ""))]
+                self.send_json(watchlist_chart_payload(normalized_params))
             elif route_path == "/api/cn/scanner/bootstrap":
                 self.send_json(ashare_scanner_bootstrap_api_payload())
             elif route_path == "/api/cn/scan/latest":
@@ -8653,7 +8802,11 @@ class Handler(BaseHTTPRequestHandler):
             elif route_path == "/api/cn/scan/stop":
                 self.stop_ashare_scan_job({"job_id": params.get("job_id", params.get("id", [""]))})
             elif route_path == "/api/cn/watchlist":
-                self.send_json({"ok": True, "items": watchlist_items_with_performance(load_ashare_watchlist_items(), "cn")})
+                items = watchlist_items_with_performance(load_ashare_watchlist_items(), "cn")
+                for item in items:
+                    item["market"] = "cn"
+                    item["currency"] = "CNY"
+                self.send_json({"ok": True, "items": items})
             elif route_path == "/api/cn/watchlist/add":
                 items = add_ashare_watchlist_symbol(
                     field(params, "symbol", ""),
