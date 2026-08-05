@@ -16,6 +16,8 @@ class ReboundSettings:
     oversold_bias_short: float = -6.0
     oversold_bias_mid: float = -8.0
     oversold_bias_long: float = -10.0
+    decline_days: int = 5
+    decline_pct: float = -10.0
     wait_days: int = 5
     trigger_rsi: float = 35.0
     require_bias_mid_turn: bool = True
@@ -68,13 +70,14 @@ def calculate_bias(bars: Sequence[Bar], period: int) -> tuple[list[float | None]
 
 
 def rebound_signal_series(bars: Sequence[Bar], settings: ReboundSettings) -> dict[str, list[object]]:
-    if settings.wait_days < 1:
-        raise ValueError("观察窗口必须至少为 1 天。")
+    if settings.wait_days < 1 or settings.decline_days < 1:
+        raise ValueError("观察窗口和跌幅周期必须至少为 1 天。")
     rsi = calculate_rsi(bars, settings.rsi_length)
     ma_short, bias_short = calculate_bias(bars, settings.bias_short_length)
     ma_mid, bias_mid = calculate_bias(bars, settings.bias_mid_length)
     ma_long, bias_long = calculate_bias(bars, settings.bias_long_length)
     volume_ma = rolling_sma([bar.volume for bar in bars], settings.volume_length)
+    decline: list[float | None] = [None] * len(bars)
     setup = [False] * len(bars)
     signal = [False] * len(bars)
     setup_low_by_signal: list[float | None] = [None] * len(bars)
@@ -82,15 +85,19 @@ def rebound_signal_series(bars: Sequence[Bar], settings: ReboundSettings) -> dic
     active_low: float | None = None
 
     for index, bar in enumerate(bars):
+        if index >= settings.decline_days and bars[index - settings.decline_days].close:
+            decline[index] = (bar.close / bars[index - settings.decline_days].close - 1.0) * 100
         is_setup = (
             rsi[index] is not None
             and bias_short[index] is not None
             and bias_mid[index] is not None
             and bias_long[index] is not None
+            and decline[index] is not None
             and rsi[index] <= settings.oversold_rsi
             and bias_short[index] <= settings.oversold_bias_short
             and bias_mid[index] <= settings.oversold_bias_mid
             and bias_long[index] <= settings.oversold_bias_long
+            and decline[index] <= settings.decline_pct
         )
         if is_setup:
             setup[index] = True
@@ -129,6 +136,7 @@ def rebound_signal_series(bars: Sequence[Bar], settings: ReboundSettings) -> dic
         "bias_mid": bias_mid,
         "bias_long": bias_long,
         "volume_ma": volume_ma,
+        "decline": decline,
         "setup": setup,
         "signal": signal,
         "setup_low": setup_low_by_signal,
@@ -261,6 +269,7 @@ def analyze_rebound(
         "bias6": points(series["bias_short"]),
         "bias12": points(series["bias_mid"]),
         "bias24": points(series["bias_long"]),
+        "decline": points(series["decline"]),
         "markers": sorted(execution_markers, key=lambda item: str(item["time"])),
         "signals": sorted(signal_markers, key=lambda item: str(item["time"])),
         "holdingPeriods": holding_periods,

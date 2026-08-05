@@ -48,6 +48,7 @@ export function ReboundChart({ payload, title }) {
     ["MA60", decimal(cursorData.ma60)], ["MA120", decimal(cursorData.ma120)], ["MA180", decimal(cursorData.ma180)],
     ["RSI", decimal(cursorData.rsi, 1)], ["BIAS6", decimal(cursorData.bias6, 2, "%")],
     ["BIAS12", decimal(cursorData.bias12, 2, "%")], ["BIAS24", decimal(cursorData.bias24, 2, "%")],
+    ["累计跌幅", decimal(cursorData.decline, 2, "%")],
     ["信号", cursorData.signal || "-"],
   ] : [], [cursorData]);
 
@@ -110,6 +111,7 @@ export function ReboundChart({ payload, title }) {
       ma5: valueMap(payload.ma5), ma20: valueMap(payload.ma20), ma60: valueMap(payload.ma60),
       ma120: valueMap(payload.ma120), ma180: valueMap(payload.ma180), rsi: valueMap(payload.rsi),
       bias6: valueMap(payload.bias6), bias12: valueMap(payload.bias12), bias24: valueMap(payload.bias24),
+      decline: valueMap(payload.decline),
     };
     const signalsByTime = new Map();
     chartMarkers.forEach((marker) => {
@@ -126,7 +128,8 @@ export function ReboundChart({ payload, title }) {
         time: key, open: Number(bar.open), high: Number(bar.high), low: Number(bar.low), close: Number(bar.close),
         volume: volumeByTime.get(key), ma5: maps.ma5.get(key), ma20: maps.ma20.get(key), ma60: maps.ma60.get(key),
         ma120: maps.ma120.get(key), ma180: maps.ma180.get(key), rsi: maps.rsi.get(key), bias6: maps.bias6.get(key),
-        bias12: maps.bias12.get(key), bias24: maps.bias24.get(key), signal: (signalsByTime.get(key) || []).join(" / "),
+        bias12: maps.bias12.get(key), bias24: maps.bias24.get(key), decline: maps.decline.get(key),
+        signal: (signalsByTime.get(key) || []).join(" / "),
       });
     };
 

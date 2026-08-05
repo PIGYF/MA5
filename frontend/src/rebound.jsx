@@ -7,6 +7,7 @@ const defaultForm = (end) => ({
   symbol: "NVDA", preset: "1y", ...backtestDates(end), initial_cash: 100000, commission_pct: 0.1, slippage_pct: 0,
   rsi_length: 14, bias_short_length: 6, bias_mid_length: 12, bias_long_length: 24,
   oversold_rsi: 30, oversold_bias_short: -6, oversold_bias_mid: -8, oversold_bias_long: -10,
+  decline_days: 5, decline_pct: -10,
   wait_days: 5, trigger_rsi: 35,
   require_bias_mid_turn: true, require_previous_high_break: true, require_bullish_candle: true,
   require_volume_confirmation: true, volume_length: 5, volume_multiplier: 1,
@@ -33,6 +34,8 @@ function ReboundParameters({ form, setForm, compact = false }) {
         <Input form={form} setForm={setForm} name="oversold_bias_mid" label="中期BIAS阈值（%）" />
         <Input form={form} setForm={setForm} name="bias_long_length" label="长期BIAS周期" step="1" />
         <Input form={form} setForm={setForm} name="oversold_bias_long" label="长期BIAS阈值（%）" />
+        <Input form={form} setForm={setForm} name="decline_days" label="累计跌幅周期" step="1" />
+        <Input form={form} setForm={setForm} name="decline_pct" label="累计跌幅阈值（%）" />
       </div>
     </FilterSection>
     <FilterSection title="反弹确认" note="观察后触发">

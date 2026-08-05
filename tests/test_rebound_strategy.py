@@ -5,7 +5,7 @@ from datetime import date, timedelta
 from unittest.mock import patch
 
 from backtest import Bar
-from rebound_strategy import ReboundSettings, analyze_rebound, calculate_bias, calculate_rsi
+from rebound_strategy import ReboundSettings, analyze_rebound, calculate_bias, calculate_rsi, rebound_signal_series
 
 
 def sample_bars(count: int = 12) -> list[Bar]:
@@ -51,6 +51,7 @@ class ReboundStrategyTests(unittest.TestCase):
             "bias_mid": [-7.0] * len(bars),
             "bias_long": [-10.0] * len(bars),
             "volume_ma": empty,
+            "decline": empty,
             "setup": [False] * len(bars),
             "signal": signal,
             "setup_low": setup_low,
@@ -70,6 +71,20 @@ class ReboundStrategyTests(unittest.TestCase):
             points = result["chart"][f"ma{period}"]
             self.assertEqual(points[0]["time"], bars[period - 1].date)
             self.assertEqual(len(points), len(bars) - period + 1)
+
+    def test_setup_requires_configured_decline(self) -> None:
+        bars = sample_bars(30)
+        strict = ReboundSettings(
+            oversold_rsi=100,
+            oversold_bias_short=100,
+            oversold_bias_mid=100,
+            oversold_bias_long=100,
+            decline_days=5,
+            decline_pct=-10,
+        )
+        relaxed = ReboundSettings(**{**strict.__dict__, "decline_pct": 10})
+        self.assertFalse(any(rebound_signal_series(bars, strict)["setup"]))
+        self.assertTrue(any(rebound_signal_series(bars, relaxed)["setup"]))
 
 
 if __name__ == "__main__":
