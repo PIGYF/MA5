@@ -16,8 +16,6 @@ class ReboundSettings:
     oversold_bias_short: float = -6.0
     oversold_bias_mid: float = -8.0
     oversold_bias_long: float = -10.0
-    decline_days: int = 5
-    decline_pct: float = -10.0
     wait_days: int = 5
     trigger_rsi: float = 35.0
     require_bias_mid_turn: bool = True
@@ -70,8 +68,8 @@ def calculate_bias(bars: Sequence[Bar], period: int) -> tuple[list[float | None]
 
 
 def rebound_signal_series(bars: Sequence[Bar], settings: ReboundSettings) -> dict[str, list[object]]:
-    if settings.wait_days < 1 or settings.decline_days < 1:
-        raise ValueError("观察窗口和跌幅周期必须至少为 1 天。")
+    if settings.wait_days < 1:
+        raise ValueError("观察窗口必须至少为 1 天。")
     rsi = calculate_rsi(bars, settings.rsi_length)
     ma_short, bias_short = calculate_bias(bars, settings.bias_short_length)
     ma_mid, bias_mid = calculate_bias(bars, settings.bias_mid_length)
@@ -84,20 +82,15 @@ def rebound_signal_series(bars: Sequence[Bar], settings: ReboundSettings) -> dic
     active_low: float | None = None
 
     for index, bar in enumerate(bars):
-        decline = None
-        if index >= settings.decline_days and bars[index - settings.decline_days].close:
-            decline = (bar.close / bars[index - settings.decline_days].close - 1.0) * 100
         is_setup = (
             rsi[index] is not None
             and bias_short[index] is not None
             and bias_mid[index] is not None
             and bias_long[index] is not None
-            and decline is not None
             and rsi[index] <= settings.oversold_rsi
             and bias_short[index] <= settings.oversold_bias_short
             and bias_mid[index] <= settings.oversold_bias_mid
             and bias_long[index] <= settings.oversold_bias_long
-            and decline <= settings.decline_pct
         )
         if is_setup:
             setup[index] = True

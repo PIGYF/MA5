@@ -1245,8 +1245,6 @@ def rebound_settings_from_params(params: dict[str, list[str]]) -> ReboundSetting
         oversold_bias_short=number_field(params, "oversold_bias_short", -6),
         oversold_bias_mid=number_field(params, "oversold_bias_mid", -8),
         oversold_bias_long=number_field(params, "oversold_bias_long", -10),
-        decline_days=max(1, int(number_field(params, "decline_days", 5))),
-        decline_pct=number_field(params, "decline_pct", -10),
         wait_days=max(1, int(number_field(params, "wait_days", 5))),
         trigger_rsi=number_field(params, "trigger_rsi", 35),
         require_bias_mid_turn=checkbox_field(params, "require_bias_mid_turn", True),
