@@ -46,8 +46,9 @@ export function ReboundChart({ payload, title }) {
     ["开", decimal(cursorData.open)], ["高", decimal(cursorData.high)], ["低", decimal(cursorData.low)], ["收", decimal(cursorData.close)],
     ["成交量", compactVolume(cursorData.volume)], ["MA5", decimal(cursorData.ma5)], ["MA20", decimal(cursorData.ma20)],
     ["MA60", decimal(cursorData.ma60)], ["MA120", decimal(cursorData.ma120)], ["MA180", decimal(cursorData.ma180)],
-    ["RSI", decimal(cursorData.rsi, 1)], ["BIAS6", decimal(cursorData.bias6, 2, "%")],
-    ["BIAS12", decimal(cursorData.bias12, 2, "%")], ["BIAS24", decimal(cursorData.bias24, 2, "%")],
+    ["RSI", decimal(cursorData.rsi, 1)], ["RSI阈值", decimal(cursorData.rsiThreshold, 1)],
+    ["BIAS6", decimal(cursorData.bias6, 2, "%")], ["BIAS12", decimal(cursorData.bias12, 2, "%")],
+    ["BIAS12阈值", decimal(cursorData.bias12Threshold, 2, "%")], ["BIAS24", decimal(cursorData.bias24, 2, "%")],
     ["累计跌幅", decimal(cursorData.decline, 2, "%")],
     ["信号", cursorData.signal || "-"],
   ] : [], [cursorData]);
@@ -92,8 +93,8 @@ export function ReboundChart({ payload, title }) {
     const rsiChart = createChart(rsiRef.current, { ...options, width: rsiRef.current.clientWidth, height: rsiRef.current.clientHeight });
     const rsi = rsiChart.addLineSeries({ color: "#f59e0b", lineWidth: 2, title: "RSI", priceLineVisible: false });
     rsi.setData(line(payload.rsi));
-    const rsi30 = rsiChart.addLineSeries({ color: "#7c3aed", lineWidth: 1, lineStyle: LineStyle.Dashed, title: "超跌", priceLineVisible: false, lastValueVisible: false });
-    rsi30.setData(payload.ohlc.map((row) => ({ time: row.time, value: Number(payload.settings?.oversold_rsi ?? 30) })));
+    const rsiOversold = rsiChart.addLineSeries({ color: "#7c3aed", lineWidth: 1, lineStyle: LineStyle.Dashed, title: "动态阈值", priceLineVisible: false, lastValueVisible: false });
+    rsiOversold.setData(line(payload.rsiThreshold));
     const rsi35 = rsiChart.addLineSeries({ color: "#64748b", lineWidth: 1, lineStyle: LineStyle.Dotted, title: "触发", priceLineVisible: false, lastValueVisible: false });
     rsi35.setData(payload.ohlc.map((row) => ({ time: row.time, value: Number(payload.settings?.trigger_rsi ?? 35) })));
 
@@ -102,6 +103,8 @@ export function ReboundChart({ payload, title }) {
     const bias12 = biasChart.addLineSeries({ color: "#4c8dff", lineWidth: 1, title: "BIAS12", priceLineVisible: false });
     const bias24 = biasChart.addLineSeries({ color: "#94a3b8", lineWidth: 1, title: "BIAS24", priceLineVisible: false });
     bias6.setData(line(payload.bias6)); bias12.setData(line(payload.bias12)); bias24.setData(line(payload.bias24));
+    const biasOversold = biasChart.addLineSeries({ color: "#7c3aed", lineWidth: 1, lineStyle: LineStyle.Dashed, title: "动态阈值", priceLineVisible: false, lastValueVisible: false });
+    biasOversold.setData(line(payload.bias12Threshold));
     const zero = biasChart.addLineSeries({ color: "#64748b", lineWidth: 1, lineStyle: LineStyle.Dotted, priceLineVisible: false, lastValueVisible: false });
     zero.setData(payload.ohlc.map((row) => ({ time: row.time, value: 0 })));
 
@@ -110,7 +113,9 @@ export function ReboundChart({ payload, title }) {
     const maps = {
       ma5: valueMap(payload.ma5), ma20: valueMap(payload.ma20), ma60: valueMap(payload.ma60),
       ma120: valueMap(payload.ma120), ma180: valueMap(payload.ma180), rsi: valueMap(payload.rsi),
+      rsiThreshold: valueMap(payload.rsiThreshold),
       bias6: valueMap(payload.bias6), bias12: valueMap(payload.bias12), bias24: valueMap(payload.bias24),
+      bias12Threshold: valueMap(payload.bias12Threshold),
       decline: valueMap(payload.decline),
     };
     const signalsByTime = new Map();
@@ -127,8 +132,9 @@ export function ReboundChart({ payload, title }) {
       setCursorData({
         time: key, open: Number(bar.open), high: Number(bar.high), low: Number(bar.low), close: Number(bar.close),
         volume: volumeByTime.get(key), ma5: maps.ma5.get(key), ma20: maps.ma20.get(key), ma60: maps.ma60.get(key),
-        ma120: maps.ma120.get(key), ma180: maps.ma180.get(key), rsi: maps.rsi.get(key), bias6: maps.bias6.get(key),
-        bias12: maps.bias12.get(key), bias24: maps.bias24.get(key), decline: maps.decline.get(key),
+        ma120: maps.ma120.get(key), ma180: maps.ma180.get(key), rsi: maps.rsi.get(key), rsiThreshold: maps.rsiThreshold.get(key),
+        bias6: maps.bias6.get(key), bias12: maps.bias12.get(key), bias12Threshold: maps.bias12Threshold.get(key),
+        bias24: maps.bias24.get(key), decline: maps.decline.get(key),
         signal: (signalsByTime.get(key) || []).join(" / "),
       });
     };
@@ -207,7 +213,7 @@ export function ReboundChart({ payload, title }) {
   }, [payload, themeMode]);
 
   return <section className="rebound-chart">
-    <header><strong>{title || payload?.symbol || "超跌反弹"}</strong><span><i className="setup-dot" />超跌观察</span><span><i className="signal-dot" />反弹买点</span></header>
+    <header><strong>{title || payload?.symbol || "超跌反弹"}</strong><span><i className="setup-dot" />超跌观察</span><span><i className="signal-dot" />止跌确认</span></header>
     <div className="rebound-cursor-strip" aria-live="polite">
       <div className="rebound-cursor-date"><small>交易日</small><b>{cursorData?.time || "-"}</b></div>
       <div className="rebound-cursor-values">{cursorItems.map(([label, value]) => <span key={label}><small>{label}</small><b>{value}</b></span>)}</div>

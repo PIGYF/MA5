@@ -12,10 +12,9 @@ class ReboundSettings:
     bias_short_length: int = 6
     bias_mid_length: int = 12
     bias_long_length: int = 24
-    oversold_rsi: float = 30.0
-    oversold_bias_short: float = -6.0
-    oversold_bias_mid: float = -8.0
-    oversold_bias_long: float = -10.0
+    percentile_lookback_years: int = 1
+    rsi_percentile: float = 10.0
+    bias_mid_percentile: float = 10.0
     decline_days: int = 5
     decline_pct: float = -10.0
     wait_days: int = 5
@@ -69,13 +68,43 @@ def calculate_bias(bars: Sequence[Bar], period: int) -> tuple[list[float | None]
     return moving_average, bias
 
 
-def rebound_signal_series(bars: Sequence[Bar], settings: ReboundSettings) -> dict[str, list[object]]:
+def rolling_percentile(
+    values: Sequence[float | None],
+    lookback: int,
+    percentile: float,
+) -> list[float | None]:
+    if lookback < 1:
+        raise ValueError("分位数回看周期必须至少为 1。")
+    if not 0 < percentile < 100:
+        raise ValueError("分位数必须大于 0 且小于 100。")
+    result: list[float | None] = [None] * len(values)
+    for index in range(lookback, len(values)):
+        window = [float(value) for value in values[index - lookback:index] if value is not None]
+        if len(window) < lookback:
+            continue
+        window.sort()
+        rank = (len(window) - 1) * percentile / 100
+        lower = int(rank)
+        upper = min(lower + 1, len(window) - 1)
+        weight = rank - lower
+        result[index] = window[lower] * (1 - weight) + window[upper] * weight
+    return result
+
+
+def rebound_signal_series(
+    bars: Sequence[Bar],
+    settings: ReboundSettings,
+    signal_start_index: int = 0,
+) -> dict[str, list[object]]:
     if settings.wait_days < 1 or settings.decline_days < 1:
         raise ValueError("观察窗口和跌幅周期必须至少为 1 天。")
     rsi = calculate_rsi(bars, settings.rsi_length)
     ma_short, bias_short = calculate_bias(bars, settings.bias_short_length)
     ma_mid, bias_mid = calculate_bias(bars, settings.bias_mid_length)
     ma_long, bias_long = calculate_bias(bars, settings.bias_long_length)
+    percentile_lookback = settings.percentile_lookback_years * 252
+    rsi_threshold = rolling_percentile(rsi, percentile_lookback, settings.rsi_percentile)
+    bias_mid_threshold = rolling_percentile(bias_mid, percentile_lookback, settings.bias_mid_percentile)
     volume_ma = rolling_sma([bar.volume for bar in bars], settings.volume_length)
     decline: list[float | None] = [None] * len(bars)
     setup = [False] * len(bars)
@@ -87,16 +116,16 @@ def rebound_signal_series(bars: Sequence[Bar], settings: ReboundSettings) -> dic
     for index, bar in enumerate(bars):
         if index >= settings.decline_days and bars[index - settings.decline_days].close:
             decline[index] = (bar.close / bars[index - settings.decline_days].close - 1.0) * 100
+        if index < signal_start_index:
+            continue
         is_setup = (
             rsi[index] is not None
-            and bias_short[index] is not None
             and bias_mid[index] is not None
-            and bias_long[index] is not None
+            and rsi_threshold[index] is not None
+            and bias_mid_threshold[index] is not None
             and decline[index] is not None
-            and rsi[index] <= settings.oversold_rsi
-            and bias_short[index] <= settings.oversold_bias_short
-            and bias_mid[index] <= settings.oversold_bias_mid
-            and bias_long[index] <= settings.oversold_bias_long
+            and rsi[index] <= rsi_threshold[index]
+            and bias_mid[index] <= bias_mid_threshold[index]
             and decline[index] <= settings.decline_pct
         )
         if is_setup:
@@ -112,7 +141,6 @@ def rebound_signal_series(bars: Sequence[Bar], settings: ReboundSettings) -> dic
         if index < 1 or index > active_until or active_low is None:
             continue
         rsi_cross = rsi[index - 1] is not None and rsi[index] is not None and rsi[index - 1] <= settings.trigger_rsi < rsi[index]
-        short_turn = bias_short[index - 1] is not None and bias_short[index] is not None and bias_short[index] > bias_short[index - 1]
         mid_turn = not settings.require_bias_mid_turn or (
             bias_mid[index - 1] is not None and bias_mid[index] is not None and bias_mid[index] >= bias_mid[index - 1]
         )
@@ -121,7 +149,7 @@ def rebound_signal_series(bars: Sequence[Bar], settings: ReboundSettings) -> dic
         volume_confirmed = not settings.require_volume_confirmation or (
             volume_ma[index] is not None and bar.volume >= volume_ma[index] * settings.volume_multiplier
         )
-        if rsi_cross and short_turn and mid_turn and high_break and bullish and volume_confirmed:
+        if rsi_cross and mid_turn and high_break and bullish and volume_confirmed:
             signal[index] = True
             setup_low_by_signal[index] = active_low
             active_until = -1
@@ -129,11 +157,13 @@ def rebound_signal_series(bars: Sequence[Bar], settings: ReboundSettings) -> dic
 
     return {
         "rsi": rsi,
+        "rsi_threshold": rsi_threshold,
         "ma_short": ma_short,
         "ma_mid": ma_mid,
         "ma_long": ma_long,
         "bias_short": bias_short,
         "bias_mid": bias_mid,
+        "bias_mid_threshold": bias_mid_threshold,
         "bias_long": bias_long,
         "volume_ma": volume_ma,
         "decline": decline,
@@ -149,10 +179,14 @@ def analyze_rebound(
     initial_cash: float = 100000.0,
     commission_pct: float = 0.1,
     slippage_pct: float = 0.0,
+    report_start: str = "",
 ) -> dict[str, object]:
     if not bars:
         raise ValueError("没有可用于超跌反弹验证的日线数据。")
-    series = rebound_signal_series(bars, settings)
+    report_start_index = next((index for index, bar in enumerate(bars) if not report_start or bar.date >= report_start), len(bars))
+    if report_start_index >= len(bars):
+        raise ValueError("所选回测区间没有可用日线数据。")
+    series = rebound_signal_series(bars, settings, report_start_index)
     closes = [bar.close for bar in bars]
     price_mas = {period: rolling_sma(closes, period) for period in (5, 20, 60, 120, 180)}
     cash = float(initial_cash)
@@ -168,8 +202,11 @@ def analyze_rebound(
     execution_markers: list[dict[str, object]] = []
     signal_markers: list[dict[str, object]] = []
     holding_periods: list[dict[str, str]] = []
+    events: list[dict[str, object]] = []
 
     for index, bar in enumerate(bars):
+        if index < report_start_index:
+            continue
         if pending and pending[1] == index:
             action, _, reason = pending
             if action == "buy" and shares == 0:
@@ -215,8 +252,28 @@ def analyze_rebound(
 
         if bool(series["setup"][index]):
             signal_markers.append({"time": bar.date, "position": "belowBar", "color": "#8b5cf6", "shape": "circle", "text": "超跌"})
+            events.append({
+                "date": bar.date,
+                "type": "超跌",
+                "close": round(bar.close, 4),
+                "rsi": round(float(series["rsi"][index]), 2),
+                "rsi_threshold": round(float(series["rsi_threshold"][index]), 2),
+                "bias12": round(float(series["bias_mid"][index]), 2),
+                "bias12_threshold": round(float(series["bias_mid_threshold"][index]), 2),
+                "decline": round(float(series["decline"][index]), 2),
+            })
         if bool(series["signal"][index]):
-            signal_markers.append({"time": bar.date, "position": "belowBar", "color": "#f59e0b", "shape": "circle", "text": "反弹"})
+            signal_markers.append({"time": bar.date, "position": "belowBar", "color": "#f59e0b", "shape": "circle", "text": "止跌"})
+            events.append({
+                "date": bar.date,
+                "type": "止跌",
+                "close": round(bar.close, 4),
+                "rsi": round(float(series["rsi"][index]), 2) if series["rsi"][index] is not None else None,
+                "rsi_threshold": round(float(series["rsi_threshold"][index]), 2) if series["rsi_threshold"][index] is not None else None,
+                "bias12": round(float(series["bias_mid"][index]), 2) if series["bias_mid"][index] is not None else None,
+                "bias12_threshold": round(float(series["bias_mid_threshold"][index]), 2) if series["bias_mid_threshold"][index] is not None else None,
+                "decline": round(float(series["decline"][index]), 2) if series["decline"][index] is not None else None,
+            })
 
         equity_curve.append({"date": bar.date, "equity": cash + shares * bar.close, "shares": shares})
         if index >= len(bars) - 1:
@@ -254,20 +311,27 @@ def analyze_rebound(
             max_drawdown = max(max_drawdown, (peak - equity) / peak * 100)
 
     def points(values: Sequence[object]) -> list[dict[str, object]]:
-        return [{"time": bar.date, "value": value} for bar, value in zip(bars, values) if value is not None]
+        return [
+            {"time": bars[index].date, "value": values[index]}
+            for index in range(report_start_index, len(bars))
+            if values[index] is not None
+        ]
 
+    report_bars = bars[report_start_index:]
     chart = {
         "symbol": "",
-        "ohlc": [{"time": bar.date, "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close} for bar in bars],
-        "volume": [{"time": bar.date, "value": bar.volume, "color": "rgba(8,153,129,.42)" if bar.close >= bar.open else "rgba(242,54,69,.42)"} for bar in bars],
+        "ohlc": [{"time": bar.date, "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close} for bar in report_bars],
+        "volume": [{"time": bar.date, "value": bar.volume, "color": "rgba(8,153,129,.42)" if bar.close >= bar.open else "rgba(242,54,69,.42)"} for bar in report_bars],
         "ma5": points(price_mas[5]),
         "ma20": points(price_mas[20]),
         "ma60": points(price_mas[60]),
         "ma120": points(price_mas[120]),
         "ma180": points(price_mas[180]),
         "rsi": points(series["rsi"]),
+        "rsiThreshold": points(series["rsi_threshold"]),
         "bias6": points(series["bias_short"]),
         "bias12": points(series["bias_mid"]),
+        "bias12Threshold": points(series["bias_mid_threshold"]),
         "bias24": points(series["bias_long"]),
         "decline": points(series["decline"]),
         "markers": sorted(execution_markers, key=lambda item: str(item["time"])),
@@ -289,5 +353,6 @@ def analyze_rebound(
             "setups": sum(bool(item) for item in series["setup"]),
         },
         "trades": trades,
+        "events": events,
         "chart": chart,
     }

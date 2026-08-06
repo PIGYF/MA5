@@ -17,6 +17,22 @@ function normalize(payload) {
   const uniqueMarkers = (rows) => [...new Map(rows.filter((row) => row?.time).map((row) => [`${row.time}|${row.position}|${row.text}|${row.shape}`, row])).values()];
   const ohlc = ohlcData(payload.ohlc);
   const timeline = ohlc.map((row) => row.time);
+  const suppliedModes = payload.strategyModes || {};
+  const hasSuppliedModes = Object.keys(suppliedModes).length > 0;
+  const strategyModes = Object.fromEntries(Object.entries(suppliedModes).map(([key, mode]) => [key, {
+    ...mode,
+    entryMarkers: uniqueMarkers(mode.entryMarkers || []),
+    exitMarkers: uniqueMarkers(mode.exitMarkers || []),
+    holdingPeriods: mode.holdingPeriods || [],
+  }]));
+  if (!strategyModes.original) {
+    strategyModes.original = {
+      label: "原策略持仓",
+      entryMarkers: uniqueMarkers(payload.entryMarkers || payload.executionMarkers || []),
+      exitMarkers: uniqueMarkers(payload.exitMarkers || []),
+      holdingPeriods: payload.holdingPeriods || [],
+    };
+  }
   return {
     ...payload,
     ohlc,
@@ -30,9 +46,9 @@ function normalize(payload) {
     j: alignLineToTimeline(payload.kdjJ || payload.j, timeline),
     defense: lineData(payload.ma5Stop),
     defense25: lineData(payload.ma5Stop25),
-    markers: uniqueMarkers([...(payload.markers || []), ...(payload.entryMarkers || []), ...(payload.exitMarkers || [])]),
+    contextMarkers: uniqueMarkers(payload.contextMarkers || (hasSuppliedModes ? [] : payload.markers || [])),
     signals: uniqueMarkers([...(payload.signalMarkers || []), ...(payload.holdBuyMarkers || []), ...(payload.holdSellMarkers || []), ...(payload.signals || []).map((row) => ({ time: row.x, position: "belowBar", color: "#089981", shape: "circle", text: row.text || "B" }))]),
-    holdingPeriods: payload.holdingPeriods || [],
+    strategyModes,
   };
 }
 
@@ -44,20 +60,27 @@ export function StrategyChart({ market, symbol, params = {}, title, onClose, cla
   const themeMode = useThemeMode();
   const [preset, setPreset] = usePersistentState("chart.preset", params.preset || "1y");
   const [controls, setControls] = usePersistentState("chart.controls", defaultControls);
+  const [strategyMode, setStrategyMode] = useState("original");
+  const [conditionOverrides, setConditionOverrides] = useState({});
   const [payload, setPayload] = useState(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const priceRef = useRef(null); const kdjRef = useRef(null); const holdingRef = useRef(null);
   const visibleRangeRef = useRef(null); const chartRuntimeRef = useRef(null); const chartPayloadRef = useRef(null);
+  const chartIdentityRef = useRef("");
   const url = useMemo(() => {
     if (data) return "";
     const endpoint = market === "cn" ? "/cn/watchlist/chart" : market === "hk" ? "/api/hk/watchlist/chart" : "/watchlist/chart";
-    return `${endpoint}?${toQuery({ ...params, symbol, preset })}`;
-  }, [data, market, params, preset, symbol]);
+    return `${endpoint}?${toQuery({ ...params, ...conditionOverrides, symbol, preset, market })}`;
+  }, [conditionOverrides, data, market, params, preset, symbol]);
 
   useEffect(() => {
     if (typeof controls.holding !== "boolean") setControls((current) => ({ ...current, holding: true }));
   }, [controls.holding, setControls]);
+
+  useEffect(() => {
+    if (payload && !payload.strategyModes?.[strategyMode]) setStrategyMode("original");
+  }, [payload, strategyMode]);
 
   useEffect(() => {
     if (data) { setPayload(normalize(data)); setLoading(false); setError(""); return undefined; }
@@ -68,7 +91,10 @@ export function StrategyChart({ market, symbol, params = {}, title, onClose, cla
 
   useEffect(() => {
     if (!payload?.ohlc?.length || !priceRef.current || !kdjRef.current) return undefined;
-    if (chartPayloadRef.current !== payload) { visibleRangeRef.current = null; chartPayloadRef.current = payload; }
+    const chartIdentity = `${market}|${symbol}|${preset}|${payload.start || ""}|${payload.end || ""}`;
+    if (chartIdentityRef.current !== chartIdentity) visibleRangeRef.current = null;
+    chartIdentityRef.current = chartIdentity;
+    chartPayloadRef.current = payload;
     const isLight = themeMode === "light";
     const chartColors = isLight ? { background: "#ffffff", text: "#5f6673", grid: "#edf0f4", border: "#d6dbe3", crosshair: "#87909d", crosshairLabel: "#596474" } : { background: "#101722", text: "#9aa6b5", grid: "#1b2632", border: "#2a3745", crosshair: "#5d6b7a", crosshairLabel: "#334155" };
     const options = { layout: { background: { type: ColorType.Solid, color: chartColors.background }, textColor: chartColors.text, fontFamily: "Inter, Microsoft YaHei UI, sans-serif" }, grid: { vertLines: { color: chartColors.grid }, horzLines: { color: chartColors.grid } }, rightPriceScale: { borderColor: chartColors.border, minimumWidth: 72 }, timeScale: { borderColor: chartColors.border, rightOffset: 6, barSpacing: 8, minBarSpacing: 3 }, crosshair: { mode: CrosshairMode.Normal, vertLine: { color: chartColors.crosshair, labelBackgroundColor: chartColors.crosshairLabel }, horzLine: { color: chartColors.crosshair, labelBackgroundColor: chartColors.crosshairLabel } }, handleScroll: { mouseWheel: true, pressedMouseMove: true }, handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true } };
@@ -90,6 +116,8 @@ export function StrategyChart({ market, symbol, params = {}, title, onClose, cla
     let syncing = false;
     let holdingFrame = null;
     let holdingEnabled = controls.holding !== false;
+    let appliedControls = controls;
+    let activeScenario = payload.strategyModes?.original || { entryMarkers: [], exitMarkers: [], holdingPeriods: [] };
     const renderHoldingPeriods = () => {
       if (!holdingRef.current || !priceRef.current) return;
       holdingRef.current.replaceChildren();
@@ -103,7 +131,7 @@ export function StrategyChart({ market, symbol, params = {}, title, onClose, cla
       holdingRef.current.style.left = `${plotLeft}px`;
       holdingRef.current.style.right = "auto";
       holdingRef.current.style.width = `${width}px`;
-      (holdingEnabled ? payload.holdingPeriods : []).forEach((period) => {
+      (holdingEnabled ? activeScenario.holdingPeriods || [] : []).forEach((period) => {
         const startX = priceChart.timeScale().timeToCoordinate(period.start);
         const endX = priceChart.timeScale().timeToCoordinate(period.end);
         if (startX === null || endX === null) return;
@@ -115,6 +143,7 @@ export function StrategyChart({ market, symbol, params = {}, title, onClose, cla
     };
     const scheduleHoldingPeriods = () => { if (holdingFrame !== null) cancelAnimationFrame(holdingFrame); holdingFrame = requestAnimationFrame(() => { holdingFrame = null; renderHoldingPeriods(); }); };
     const applyControls = (current) => {
+      appliedControls = current;
       ma5Series.setData(current.ma5 ? payload.ma5 : []);
       ma20Series.setData(current.ma20 ? payload.ma20 : []);
       defense25Series.setData(current.defense25 ? payload.defense25 : []);
@@ -123,13 +152,22 @@ export function StrategyChart({ market, symbol, params = {}, title, onClose, cla
       volumeMaSeries.setData(current.volume ? payload.volumeMa : []);
       thresholdSeries.setData(current.volume ? payload.volumeThreshold : []);
       kSeries.setData(current.kdj ? payload.k : []); dSeries.setData(current.kdj ? payload.d : []); jSeries.setData(current.kdj ? payload.j : []);
-      candle.setMarkers([...(payload.markers || []), ...((showSignals || current.signals) ? payload.signals : [])].sort((a, b) => String(a.time).localeCompare(String(b.time))));
+      candle.setMarkers([
+        ...(payload.contextMarkers || []),
+        ...(activeScenario.entryMarkers || []),
+        ...(activeScenario.exitMarkers || []),
+        ...((showSignals || current.signals) ? payload.signals : []),
+      ].sort((a, b) => String(a.time).localeCompare(String(b.time))));
       holdingEnabled = current.holding !== false;
       scheduleHoldingPeriods();
     };
-    const runtime = { applyControls };
+    const applyStrategyMode = (mode) => {
+      activeScenario = payload.strategyModes?.[mode] || payload.strategyModes?.original || activeScenario;
+      applyControls(appliedControls);
+    };
+    const runtime = { applyControls, applyStrategyMode };
     chartRuntimeRef.current = runtime;
-    applyControls(controls);
+    applyStrategyMode(strategyMode);
     priceChart.timeScale().subscribeVisibleLogicalRangeChange((range) => { scheduleHoldingPeriods(); if (!range || syncing) return; visibleRangeRef.current = range; syncing = true; kdjChart.timeScale().setVisibleLogicalRange(range); syncing = false; });
     kdjChart.timeScale().subscribeVisibleLogicalRangeChange((range) => { if (!range || syncing) return; syncing = true; priceChart.timeScale().setVisibleLogicalRange(range); syncing = false; });
     if (visibleRangeRef.current) {
@@ -145,12 +183,40 @@ export function StrategyChart({ market, symbol, params = {}, title, onClose, cla
   }, [payload, showSignals, themeMode]);
 
   useEffect(() => { chartRuntimeRef.current?.applyControls(controls); }, [controls]);
+  useEffect(() => { chartRuntimeRef.current?.applyStrategyMode(strategyMode); }, [strategyMode]);
 
   const toggle = (key) => setControls((current) => ({ ...current, [key]: !current[key] }));
-  return <section className={`native-chart ${controls.kdj ? "" : "hide-kdj"} ${className}`} data-execution-markers={payload?.markers?.length || 0} data-signal-markers={payload?.signals?.length || 0} data-holding-periods={payload?.holdingPeriods?.length || 0}>
+  const toggleCondition = (key) => {
+    if (data || loading) return;
+    setConditionOverrides((current) => ({
+      ...current,
+      [key]: !(Object.prototype.hasOwnProperty.call(current, key) ? Boolean(current[key]) : Boolean(payload?.conditions?.[key])),
+    }));
+  };
+  const activeScenario = payload?.strategyModes?.[strategyMode] || payload?.strategyModes?.original || {};
+  const showConditionRow = market === "us";
+  const conditionItems = [
+    ["require_ma5_rising", "MA5向上"],
+    ["require_5ma_gt_20ma", "MA5>MA20"],
+    ["b1_require_20ma_gt_50ma", "MA20>MA50"],
+    ["secondary_big_red_b1", "大阴线B1"],
+    ["secondary_above_ma5_3d", "连续3天>MA5"],
+  ];
+  const pressureMode = payload?.strategyModes?.double_index_pressure;
+  return <section className={`native-chart ${controls.kdj ? "" : "hide-kdj"} ${showConditionRow ? "has-condition-row" : ""} ${className}`} data-execution-markers={(activeScenario.entryMarkers?.length || 0) + (activeScenario.exitMarkers?.length || 0)} data-signal-markers={payload?.signals?.length || 0} data-holding-periods={activeScenario.holdingPeriods?.length || 0} data-strategy-mode={strategyMode}>
     <header className="native-chart-toolbar"><strong>{title || symbol}</strong>{data ? null : <div className="native-periods">{periods.map((item) => <button key={item} type="button" className={preset === item ? "active" : ""} onClick={() => setPreset(item)}>{item.toUpperCase()}</button>)}</div>}<span className="chart-separator" />
       <ChartToggle label="MA5" active={controls.ma5} onClick={() => toggle("ma5")} /><ChartToggle label="MA20" active={controls.ma20} onClick={() => toggle("ma20")} /><ChartToggle label="成交量" active={controls.volume} onClick={() => toggle("volume")} /><ChartToggle label="KDJ" active={controls.kdj} onClick={() => toggle("kdj")} />{showSignals ? null : <ChartToggle label="B/S" active={controls.signals} onClick={() => toggle("signals")} />}<ChartToggle label="持仓区间" active={controls.holding !== false} onClick={() => toggle("holding")} /><ChartToggle label="2.5%防守线" active={controls.defense25} onClick={() => toggle("defense25")} /><ChartToggle label={`${payload?.ma5StopPct || 7.5}%止损线`} active={controls.defense} onClick={() => toggle("defense")} />
       <button className="icon-button" type="button" title="适应窗口" onClick={() => priceRef.current?.__fitChart?.()}><Icon name="expand" /></button>{onClose ? <button className="icon-button" type="button" title="关闭" onClick={onClose}><Icon name="close" /></button> : null}</header>
+    {showConditionRow ? <div className="native-chart-conditions" aria-label="选股条件">
+      <strong>选股条件</strong>
+      <div className="strategy-mode-options" role="group" aria-label="指数过滤方式">
+        <button type="button" className={strategyMode === "original" ? "active" : ""} aria-pressed={strategyMode === "original"} onClick={() => setStrategyMode("original")}>原策略</button>
+        <button type="button" className={strategyMode === "double_index_pressure" ? "active" : ""} aria-pressed={strategyMode === "double_index_pressure"} disabled={!pressureMode} title={pressureMode?.description || "指数数据暂不可用"} onClick={() => setStrategyMode("double_index_pressure")}>纳指+标普受压</button>
+      </div>
+      <span className="condition-separator" />
+      <div className="condition-statuses" role="group" aria-label="可选买入条件">{conditionItems.map(([key, label]) => <button type="button" key={key} className={payload?.conditions?.[key] ? "active" : ""} aria-pressed={Boolean(payload?.conditions?.[key])} disabled={Boolean(data) || loading} title={data ? "请在回测设置中修改该条件" : `切换${label}`} onClick={() => toggleCondition(key)}>{label}</button>)}</div>
+      {strategyMode === "double_index_pressure" && pressureMode ? <small>受压 {pressureMode.blockedDays || 0} 日 · 拦截 {pressureMode.blockedSignalCount || 0} 个信号</small> : null}
+    </div> : null}
     <div className="native-chart-body">{loading ? <div className="frame-loading"><span /><b>正在加载图表</b></div> : null}{error ? <div className="frame-error"><strong>{error}</strong><button type="button" onClick={() => setPreset((current) => current)}>重试</button></div> : null}<div className="native-price-wrap"><div ref={priceRef} className="native-price-chart" /><div ref={holdingRef} className="native-holding-periods" /></div><div ref={kdjRef} className="native-kdj-chart" /></div>
   </section>;
 }

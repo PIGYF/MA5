@@ -440,6 +440,39 @@ def rolling_sum(values: list[int], length: int) -> list[int | None]:
     return result
 
 
+def index_ma_pressure_dates(bars: list[Bar], length: int = 5, consecutive_days: int = 2) -> set[str]:
+    """Return dates where an index is below a falling MA for consecutive sessions."""
+    if length < 1 or consecutive_days < 1:
+        raise ValueError("均线周期和连续天数必须大于 0")
+    closes = [bar.close for bar in bars]
+    ma_values = rolling_sma(closes, length)
+    pressured: set[str] = set()
+    for i, bar in enumerate(bars):
+        if i == 0 or ma_values[i] is None or ma_values[i - 1] is None:
+            continue
+        start = i - consecutive_days + 1
+        if start < 0:
+            continue
+        closes_below_ma = all(
+            ma_values[index] is not None and bars[index].close < float(ma_values[index])
+            for index in range(start, i + 1)
+        )
+        if closes_below_ma and float(ma_values[i]) < float(ma_values[i - 1]):
+            pressured.add(bar.date)
+    return pressured
+
+
+def double_index_pressure_dates(
+    nasdaq_bars: list[Bar],
+    sp500_bars: list[Bar],
+    length: int = 5,
+    consecutive_days: int = 2,
+) -> set[str]:
+    return index_ma_pressure_dates(nasdaq_bars, length, consecutive_days) & index_ma_pressure_dates(
+        sp500_bars, length, consecutive_days
+    )
+
+
 def apply_buy_price(open_price: float, slippage_pct: float) -> float:
     return open_price * (1 + slippage_pct / 100)
 
@@ -540,6 +573,8 @@ def build_ratchet_inputs(
     require_5ma_gt_20ma: bool = True,
     signal_volumes: list[float] | None = None,
     symbol: str = "",
+    secondary_big_red_b1: bool = False,
+    secondary_above_ma5_3d: bool = False,
 ) -> tuple[list[bool], list[bool], list[float | None], list[float | None], list[float], list[str]]:
     closes = [bar.close for bar in bars]
     volumes = signal_volumes if signal_volumes is not None and len(signal_volumes) == len(bars) else [bar.volume for bar in bars]
@@ -626,6 +661,22 @@ def build_ratchet_inputs(
             target = max(target, 100.0)
             stage = "B2" if target == 100.0 else stage
 
+        if target > 0:
+            previous_close = bars[i - 1].close if i > 0 else bar.close
+            body_pct = (bar.open - bar.close) / previous_close if previous_close else 0.0
+            big_red_b1 = bool(
+                stage == "B1"
+                and bar.close < bar.open
+                and (body_pct >= 0.025 or (body_pct >= 0.018 and close_position <= 0.35))
+            )
+            above_ma5_3d = bool(
+                i >= 2
+                and all(ma[index] is not None and bars[index].close > ma[index] for index in range(i - 2, i + 1))
+            )
+            if (secondary_big_red_b1 and not big_red_b1) or (secondary_above_ma5_3d and not above_ma5_3d):
+                target = 0.0
+                stage = ""
+
         buy_signal.append(target > 0)
         buy_target_pct.append(target)
         buy_stage.append(stage)
@@ -667,6 +718,9 @@ def backtest(
     weak_volume_down_multiplier: float = 1.5,
     weak_event_low_lookback: int = 27,
     symbol: str = "",
+    entry_blocked_dates: set[str] | None = None,
+    secondary_big_red_b1: bool = False,
+    secondary_above_ma5_3d: bool = False,
 ) -> tuple[list[Trade], list[dict[str, float | str]]]:
     if strategy_name == "ratchet":
         signal_volumes = adjust_limit_volumes(bars, limit_pct, buy_limit_tolerance_pct) if market == "cn" else None
@@ -686,6 +740,8 @@ def backtest(
             require_5ma_gt_20ma,
             signal_volumes,
             symbol,
+            secondary_big_red_b1,
+            secondary_above_ma5_3d,
         )
         sell_signal = [False] * len(bars)
         closes = [bar.close for bar in bars]
@@ -940,6 +996,7 @@ def backtest(
                 "buy_signal": int(buy_signal[i]),
                 "buy_target_pct": buy_target_pct[i],
                 "buy_stage": buy_stage[i],
+                "entry_blocked": int(bool(entry_blocked_dates and bar.date in entry_blocked_dates)),
                 "buy_action": buy_action,
                 "buy_action_signal_date": buy_action_signal_date,
                 "buy_action_target_pct": buy_action_target_pct,
@@ -975,7 +1032,8 @@ def backtest(
             target_pct_today = buy_target_pct[i]
             if strategy_name == "ratchet" and shares == 0 and buy_stage[i] == "B2":
                 target_pct_today = min(target_pct_today, 50.0)
-            if buy_signal[i] and target_pct_today > current_position_pct + 1:
+            entry_blocked_today = bool(entry_blocked_dates and bar.date in entry_blocked_dates)
+            if buy_signal[i] and not entry_blocked_today and target_pct_today > current_position_pct + 1:
                 pending_action = "buy"
                 pending_signal_date = bar.date
                 pending_signal_close = bar.close
@@ -998,6 +1056,54 @@ def backtest(
                     pending_exit_reason = "MA crossunder"
 
     return trades, equity_curve
+
+
+def build_chart_strategy_scenario(
+    trades: list[Trade],
+    equity_curve: list[dict[str, float | str]],
+    label: str,
+) -> dict[str, object]:
+    entry_markers = [
+        {
+            "time": str(row.get("date", "")),
+            "position": "belowBar",
+            "color": "#089981",
+            "shape": "arrowUp",
+            "text": str(row.get("buy_action_stage", "") or "买"),
+        }
+        for index, row in enumerate(equity_curve)
+        if float(row.get("position_shares", 0) or 0)
+        > (float(equity_curve[index - 1].get("position_shares", 0) or 0) if index > 0 else 0.0)
+    ]
+    exit_markers = [
+        {"time": trade.exit_date, "position": "aboveBar", "color": "#f23645", "shape": "arrowDown", "text": "卖"}
+        for trade in trades
+    ]
+    holding_periods: list[dict[str, str]] = []
+    holding_start = ""
+    previous_position = 0.0
+    for row in equity_curve:
+        current_position = float(row.get("position_shares", 0) or 0)
+        current_date = str(row.get("date", ""))
+        if previous_position <= 0 < current_position:
+            holding_start = current_date
+        elif previous_position > 0 >= current_position and holding_start:
+            holding_periods.append({"start": holding_start, "end": current_date, "label": label})
+            holding_start = ""
+        previous_position = current_position
+    if holding_start and equity_curve:
+        holding_periods.append(
+            {"start": holding_start, "end": str(equity_curve[-1].get("date", "")), "label": f"{label}中"}
+        )
+    return {
+        "label": label,
+        "entryMarkers": entry_markers,
+        "exitMarkers": exit_markers,
+        "holdingPeriods": holding_periods,
+        "blockedSignalCount": sum(
+            1 for row in equity_curve if int(row.get("buy_signal", 0) or 0) and int(row.get("entry_blocked", 0) or 0)
+        ),
+    }
 
 
 def summarize(trades: list[Trade], equity_curve: list[dict[str, float | str]], initial_cash: float) -> dict[str, float | int]:
@@ -1481,6 +1587,7 @@ def make_report(
     benchmark: dict[str, object] | None = None,
     strategy_settings: dict[str, object] | None = None,
     report_mode: str = "backtest",
+    chart_strategy_modes: dict[str, dict[str, object]] | None = None,
 ) -> None:
     is_candidate_report = report_mode == "candidate"
     is_batch_chart_report = report_mode == "batch_chart"
@@ -1702,6 +1809,14 @@ def make_report(
         "holdBuyText": hold_buy_text if show_context_markers else [],
         "holdSellText": hold_sell_text if show_context_markers else [],
         "holdingPeriods": holding_periods,
+        "conditions": {
+            "require_ma5_rising": bool((strategy_settings or {}).get("require_ma5_rising", False)),
+            "require_5ma_gt_20ma": bool((strategy_settings or {}).get("require_5ma_gt_20ma", False)),
+            "b1_require_20ma_gt_50ma": bool((strategy_settings or {}).get("b1_require_20ma_gt_50ma", False)),
+            "secondary_big_red_b1": bool((strategy_settings or {}).get("secondary_big_red_b1", False)),
+            "secondary_above_ma5_3d": bool((strategy_settings or {}).get("secondary_above_ma5_3d", False)),
+        },
+        "strategyModes": chart_strategy_modes or {},
     }
 
     benchmark_html = ""

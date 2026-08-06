@@ -75,6 +75,7 @@ a { color: var(--blue); text-decoration: none; }
 .risk-facts > span { min-width: 0; display: grid; gap: 3px; padding: 7px; background: #fff; }
 .risk-facts small { color: var(--muted); font-size: 10px; }
 .risk-facts strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.risk-facts > span:last-child strong { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
 .risk-center > p { margin: 9px 1px 0; color: #475569; font-size: 12px; }
 .risk-events { display: grid; gap: 4px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border-soft); }
 .risk-events span { color: var(--muted); font-size: 11px; }
@@ -135,6 +136,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .new-candidate { display: inline-flex; padding: 2px 5px; color: #087f6c; border-radius: var(--radius-tag); background: #e5f6f1; font-weight: 800; }
 
 .native-chart { min-height: 0; display: grid; grid-template-rows: 40px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-panel); background: #fff; }
+.native-chart.has-condition-row { grid-template-rows: 40px 36px minmax(0, 1fr); }
 .native-chart-toolbar { min-width: 0; display: flex; align-items: center; gap: 5px; padding: 5px 7px; overflow-x: auto; border-bottom: 1px solid var(--border); background: var(--surface-2); scrollbar-width: thin; }
 .native-chart-toolbar > strong { min-width: 115px; max-width: 210px; overflow: hidden; margin-right: 3px; text-overflow: ellipsis; white-space: nowrap; }
 .native-periods { display: inline-flex; flex: 0 0 auto; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-control); background: #fff; }
@@ -144,6 +146,20 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .chart-separator { width: 1px; height: 22px; flex: 0 0 auto; background: var(--border); }
 .chart-chip { height: 28px; flex: 0 0 auto; padding: 0 7px; color: #4f5360; border: 1px solid var(--border); border-radius: var(--radius-control); background: #fff; cursor: pointer; font-size: 10px; font-weight: 750; }
 .chart-chip.active { color: var(--blue); border-color: #9db5ff; background: #edf3ff; }
+.native-chart-conditions { min-width: 0; display: flex; align-items: center; gap: 6px; padding: 4px 7px; overflow-x: auto; border-bottom: 1px solid var(--border); background: var(--surface); scrollbar-width: thin; }
+.native-chart-conditions > strong { flex: 0 0 auto; color: var(--muted); font-size: 10px; }
+.strategy-mode-options { display: inline-flex; flex: 0 0 auto; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-control); }
+.strategy-mode-options button { height: 26px; padding: 0 8px; color: var(--muted); border: 0; border-right: 1px solid var(--border); background: transparent; cursor: pointer; font-size: 10px; font-weight: 750; }
+.strategy-mode-options button:last-child { border-right: 0; }
+.strategy-mode-options button.active { color: #fff; background: var(--blue); }
+.strategy-mode-options button:disabled { cursor: not-allowed; opacity: .45; }
+.condition-separator { width: 1px; height: 20px; flex: 0 0 auto; background: var(--border); }
+.condition-statuses { display: inline-flex; flex: 0 0 auto; gap: 4px; }
+.condition-statuses button { height: 24px; display: inline-flex; align-items: center; padding: 0 7px; color: var(--muted); border: 1px solid var(--border-soft); border-radius: var(--radius-control); background: transparent; cursor: pointer; font-size: 10px; font-weight: 700; opacity: .72; }
+.condition-statuses button:hover:not(:disabled) { color: var(--text); border-color: var(--border); background: var(--hover); opacity: 1; }
+.condition-statuses button.active { color: #087f6c; border-color: rgba(8,127,108,.28); background: #e5f6f1; opacity: 1; }
+.condition-statuses button:disabled { cursor: not-allowed; opacity: .45; }
+.native-chart-conditions > small { flex: 0 0 auto; margin-left: auto; color: var(--muted); white-space: nowrap; }
 .native-chart-body { position: relative; min-height: 0; display: grid; grid-template-rows: minmax(260px, 3fr) minmax(110px, 1fr); padding: 0 5px 5px; }
 .native-chart.hide-kdj .native-chart-body { grid-template-rows: minmax(0, 1fr) 0; }
 .native-price-wrap { position: relative; min-height: 0; overflow: hidden; }
@@ -167,6 +183,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .native-trades { margin-top: 8px; border: 1px solid var(--border); border-radius: var(--radius-panel); background: #fff; }
 .native-trades > summary { min-height: 38px; display: flex; align-items: center; padding: 7px 10px; cursor: pointer; font-weight: 800; }
 .native-trades .table-wrap { max-height: 380px; border: 0; border-top: 1px solid var(--border); border-radius: 0; }
+.signal-tag { display: inline-flex; align-items: center; min-height: 22px; padding: 2px 7px; border-radius: 4px; font-size: 12px; font-weight: 700; }
+.signal-tag.setup { color: #6d28d9; background: rgba(124, 58, 237, .1); }
+.signal-tag.confirmed { color: #a16207; background: rgba(245, 158, 11, .13); }
 .batch-hint { margin: 0 0 8px; color: var(--muted); }
 .batch-chart-tabs { display: flex; gap: 4px; margin-top: 8px; overflow-x: auto; }
 .batch-chart-tabs button { height: 30px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius-control); background: #fff; cursor: pointer; font-weight: 800; }
@@ -414,7 +433,6 @@ body { color: var(--text); font-variant-numeric: tabular-nums; }
 .market-state:hover { background: #131d27; }
 .market-state b, .market-state em { color: #9aa6b4; }
 .market-state.tone-good i { background: var(--green); }
-
 .page-toolbar { min-height: 60px; margin-bottom: 6px; color: var(--text); background: #0d151e; border-bottom-color: var(--border); }
 .page-toolbar h1 { color: #edf2f7; font-size: 20px; font-weight: 700; }
 .page-toolbar p { color: var(--muted); }
@@ -477,6 +495,7 @@ tbody tr.selected td { background: var(--selected); }
 .score-Weak { color: #ff8582; background: #351d22; }
 
 .native-chart { grid-template-rows: 40px minmax(0,1fr); }
+.native-chart.has-condition-row { grid-template-rows: 40px 36px minmax(0,1fr); }
 .native-chart-toolbar, .native-report > header, .equity-compare > header { background: #121b25; border-bottom-color: var(--border); }
 .native-chart-toolbar > strong, .native-report > header strong { color: #e3e9ef; }
 .native-periods { border-color: #344250; background: #0e1620; }
@@ -484,6 +503,14 @@ tbody tr.selected td { background: var(--selected); }
 .native-periods button:hover { color: #eef3f8; background: #192531; }
 .native-periods button.active { color: #fff; background: var(--blue); }
 .chart-separator { background: var(--border); }
+.native-chart-conditions { border-bottom-color: var(--border); background: #0f1822; }
+.strategy-mode-options { border-color: #344250; }
+.strategy-mode-options button { color: #9ca8b5; border-right-color: #344250; }
+.strategy-mode-options button:hover:not(:disabled) { color: #eef3f8; background: #192531; }
+.strategy-mode-options button.active { color: #fff; background: var(--blue); }
+.condition-statuses button { color: #83909e; border-color: #293744; }
+.condition-statuses button:hover:not(:disabled) { color: #eef3f8; border-color: #3b4b5b; background: #192531; }
+.condition-statuses button.active { color: #62d2c3; border-color: #285c57; background: #11312f; }
 .native-chart-body { background: #101722; }
 .native-kdj-chart { border-top-color: #253240; }
 .native-holding-band { background: rgba(38,166,154,.075); border-color: rgba(38,166,154,.20); }
@@ -668,6 +695,14 @@ tbody tr.selected td { background: var(--selected); }
 :root[data-theme="light"] .native-periods button:hover { color: #18202a; background: #eef3f8; }
 :root[data-theme="light"] .native-periods button.active { color: #fff; background: var(--blue); }
 :root[data-theme="light"] .chart-separator { background: var(--border); }
+:root[data-theme="light"] .native-chart-conditions { border-bottom-color: var(--border); background: #fff; }
+:root[data-theme="light"] .strategy-mode-options { border-color: #cbd3dc; }
+:root[data-theme="light"] .strategy-mode-options button { color: #687382; border-right-color: #d9dfe6; }
+:root[data-theme="light"] .strategy-mode-options button:hover:not(:disabled) { color: #18202a; background: #eef3f8; }
+:root[data-theme="light"] .strategy-mode-options button.active { color: #fff; background: var(--blue); }
+:root[data-theme="light"] .condition-statuses button { color: #748090; border-color: #dbe1e8; }
+:root[data-theme="light"] .condition-statuses button:hover:not(:disabled) { color: #18202a; border-color: #cbd3dc; background: #eef3f8; }
+:root[data-theme="light"] .condition-statuses button.active { color: #087967; border-color: #a8d9cf; background: #ddf4ef; }
 :root[data-theme="light"] .native-chart-body,
 :root[data-theme="light"] .native-report-scroll { background: #fff; }
 :root[data-theme="light"] .native-kdj-chart { border-top-color: #d8dee6; }

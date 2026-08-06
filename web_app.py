@@ -26,8 +26,10 @@ from backtest import (
     PRICE_CACHE_MAX_BARS,
     SPLIT_CACHE_PATH,
     backtest,
+    build_chart_strategy_scenario,
     build_signal_detail_rows,
     calculate_kdj,
+    double_index_pressure_dates,
     fetch_bars,
     make_report,
     open_position_snapshot,
@@ -616,6 +618,31 @@ def market_environment(symbol: str = "QQQ") -> dict[str, object]:
             "vix_label": "Unavailable",
             "message": f"大盘环境暂不可用：{exc}",
             "macro": macro,
+        }
+
+
+DOUBLE_INDEX_PRESSURE_RULE = "纳指与标普均连续2日收盘低于MA5，且MA5向下时跳过买点"
+
+
+def double_index_pressure_context(start: str, end: str) -> dict[str, object]:
+    try:
+        lookback_start = (date.fromisoformat(start) - timedelta(days=30)).isoformat()
+        nasdaq_bars = fetch_bars("yfinance", "^IXIC", lookback_start, end, "qfq", None)
+        sp500_bars = fetch_bars("yfinance", "^GSPC", lookback_start, end, "qfq", None)
+        blocked_dates = double_index_pressure_dates(nasdaq_bars, sp500_bars)
+        return {
+            "available": True,
+            "symbols": ["^IXIC", "^GSPC"],
+            "rule": DOUBLE_INDEX_PRESSURE_RULE,
+            "blockedDates": sorted(day for day in blocked_dates if start <= day <= end),
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "symbols": ["^IXIC", "^GSPC"],
+            "rule": DOUBLE_INDEX_PRESSURE_RULE,
+            "blockedDates": [],
+            "error": str(exc),
         }
 
 
@@ -1237,14 +1264,9 @@ def delete_rebound_watchlist_symbol(symbol: str) -> list[dict[str, str]]:
 
 def rebound_settings_from_params(params: dict[str, list[str]]) -> ReboundSettings:
     return ReboundSettings(
-        rsi_length=max(2, int(number_field(params, "rsi_length", 14))),
-        bias_short_length=max(2, int(number_field(params, "bias_short_length", 6))),
-        bias_mid_length=max(2, int(number_field(params, "bias_mid_length", 12))),
-        bias_long_length=max(2, int(number_field(params, "bias_long_length", 24))),
-        oversold_rsi=number_field(params, "oversold_rsi", 30),
-        oversold_bias_short=number_field(params, "oversold_bias_short", -6),
-        oversold_bias_mid=number_field(params, "oversold_bias_mid", -8),
-        oversold_bias_long=number_field(params, "oversold_bias_long", -10),
+        percentile_lookback_years=max(1, min(5, int(number_field(params, "percentile_lookback_years", 1)))),
+        rsi_percentile=max(1, min(50, number_field(params, "rsi_percentile", 10))),
+        bias_mid_percentile=max(1, min(50, number_field(params, "bias_mid_percentile", 10))),
         decline_days=max(1, int(number_field(params, "decline_days", 5))),
         decline_pct=number_field(params, "decline_pct", -10),
         wait_days=max(1, int(number_field(params, "wait_days", 5))),
@@ -1276,16 +1298,19 @@ def rebound_analysis_payload(params: dict[str, list[str]]) -> dict[str, object]:
         start_value = field(params, "start", "")
     settings = rebound_settings_from_params(params)
     validate_backtest_range(start_value, end_value, max(24, settings.bias_long_length))
-    bars = fetch_bars("yfinance", symbol, start_value, end_value, "qfq", None)
+    warmup_days = settings.percentile_lookback_years * 366 + 90
+    warmup_start = (date.fromisoformat(start_value) - timedelta(days=warmup_days)).isoformat()
+    bars = fetch_bars("yfinance", symbol, warmup_start, end_value, "qfq", None)
     result = analyze_rebound(
         bars,
         settings,
         initial_cash=number_field(params, "initial_cash", 100000),
         commission_pct=number_field(params, "commission_pct", 0.1),
         slippage_pct=number_field(params, "slippage_pct", 0),
+        report_start=start_value,
     )
     result["symbol"] = symbol
-    result["start"] = bars[0].date
+    result["start"] = next(bar.date for bar in bars if bar.date >= start_value)
     result["end"] = bars[-1].date
     result["chart"]["symbol"] = symbol
     return result
@@ -4552,7 +4577,7 @@ def run_strategy(params: dict[str, list[str]]) -> str:
     validate_backtest_range(start, end, vol_length)
 
     bars = fetch_bars("yfinance", symbol, start, end, "qfq", None)
-    trades, equity_curve = backtest(
+    backtest_options = dict(
         bars=bars,
         ma_length=ma_length,
         vol_length=vol_length,
@@ -4572,6 +4597,8 @@ def run_strategy(params: dict[str, list[str]]) -> str:
         b1_require_20ma_gt_50ma=checkbox_field(params, "b1_require_20ma_gt_50ma", False),
         require_ma5_rising=checkbox_field(params, "require_ma5_rising", False),
         require_5ma_gt_20ma=checkbox_field(params, "require_5ma_gt_20ma", False),
+        secondary_big_red_b1=checkbox_field(params, "secondary_big_red_b1", False),
+        secondary_above_ma5_3d=checkbox_field(params, "secondary_above_ma5_3d", False),
         below_20ma_stop_days=int(number_field(params, "below_20ma_stop_days", 2)),
         weak_trend_exit_mode=field(params, "weak_trend_exit_mode", "hybrid"),
         weak_ma5_reclaim_days=int(number_field(params, "weak_ma5_reclaim_days", 5)),
@@ -4580,6 +4607,21 @@ def run_strategy(params: dict[str, list[str]]) -> str:
         weak_event_low_lookback=int(number_field(params, "weak_event_low_lookback", 27)),
         symbol=symbol,
     )
+    trades, equity_curve = backtest(**backtest_options)
+    pressure_context = double_index_pressure_context(start, end)
+    chart_strategy_modes = {
+        "original": build_chart_strategy_scenario(trades, equity_curve, "原策略持仓"),
+    }
+    if pressure_context["available"]:
+        pressure_trades, pressure_curve = backtest(
+            **backtest_options,
+            entry_blocked_dates=set(pressure_context["blockedDates"]),
+        )
+        pressure_scenario = build_chart_strategy_scenario(pressure_trades, pressure_curve, "纳指+标普受压过滤持仓")
+        pressure_scenario.update(
+            {"description": DOUBLE_INDEX_PRESSURE_RULE, "blockedDays": len(pressure_context["blockedDates"])}
+        )
+        chart_strategy_modes["double_index_pressure"] = pressure_scenario
     summary = summarize(trades, equity_curve, initial_cash)
     benchmark = build_benchmark(benchmark_symbol, start, end, initial_cash)
     buy_hold = build_buy_hold(symbol, bars, initial_cash)
@@ -4604,8 +4646,20 @@ def run_strategy(params: dict[str, list[str]]) -> str:
         "stop_5ma_pct": number_field(params, "stop_5ma_pct", 7.5),
         "hard_stop_pct": number_field(params, "hard_stop_pct", 20),
         "below_20ma_stop_days": int(number_field(params, "below_20ma_stop_days", 2)),
+        "secondary_big_red_b1": checkbox_field(params, "secondary_big_red_b1", False),
+        "secondary_above_ma5_3d": checkbox_field(params, "secondary_above_ma5_3d", False),
     }
-    make_report(report_path, f"{symbol} {strategy_name} backtest {start} to {end}", bars, trades, equity_curve, summary, benchmark=benchmark, strategy_settings=strategy_settings)
+    make_report(
+        report_path,
+        f"{symbol} {strategy_name} backtest {start} to {end}",
+        bars,
+        trades,
+        equity_curve,
+        summary,
+        benchmark=benchmark,
+        strategy_settings=strategy_settings,
+        chart_strategy_modes=chart_strategy_modes,
+    )
     write_trades(trades_path, trades)
     write_equity(equity_path, equity_curve)
 
@@ -4777,13 +4831,16 @@ def run_batch_backtest(params: dict[str, list[str]]) -> str:
         "weak_ma20_reclaim_days": int(number_field(params, "weak_ma20_reclaim_days", 10)),
         "weak_volume_down_multiplier": number_field(params, "weak_volume_down_multiplier", 1.5),
         "weak_event_low_lookback": int(number_field(params, "weak_event_low_lookback", 27)),
+        "secondary_big_red_b1": checkbox_field(params, "secondary_big_red_b1", False),
+        "secondary_above_ma5_3d": checkbox_field(params, "secondary_above_ma5_3d", False),
     }
+    pressure_context = double_index_pressure_context(start, end)
     symbol_data: dict[str, dict[str, object]] = {}
     errors: list[tuple[str, str]] = []
     for symbol in symbols:
         try:
             bars = fetch_bars("yfinance", symbol, start, end, "qfq", None)
-            chart_trades, signal_curve = backtest(
+            chart_backtest_options = dict(
                 bars=bars,
                 ma_length=ma_length,
                 vol_length=vol_length,
@@ -4803,6 +4860,8 @@ def run_batch_backtest(params: dict[str, list[str]]) -> str:
                 b1_require_20ma_gt_50ma=checkbox_field(params, "b1_require_20ma_gt_50ma", False),
                 require_ma5_rising=checkbox_field(params, "require_ma5_rising", False),
                 require_5ma_gt_20ma=checkbox_field(params, "require_5ma_gt_20ma", False),
+                secondary_big_red_b1=checkbox_field(params, "secondary_big_red_b1", False),
+                secondary_above_ma5_3d=checkbox_field(params, "secondary_above_ma5_3d", False),
                 below_20ma_stop_days=int(number_field(params, "below_20ma_stop_days", 2)),
                 weak_trend_exit_mode=field(params, "weak_trend_exit_mode", "hybrid"),
                 weak_ma5_reclaim_days=int(number_field(params, "weak_ma5_reclaim_days", 5)),
@@ -4811,7 +4870,21 @@ def run_batch_backtest(params: dict[str, list[str]]) -> str:
                 weak_event_low_lookback=int(number_field(params, "weak_event_low_lookback", 27)),
                 symbol=symbol,
             )
+            chart_trades, signal_curve = backtest(**chart_backtest_options)
             chart_summary = summarize(chart_trades, signal_curve, initial_cash)
+            chart_strategy_modes = {
+                "original": build_chart_strategy_scenario(chart_trades, signal_curve, "原策略持仓"),
+            }
+            if pressure_context["available"]:
+                pressure_trades, pressure_curve = backtest(
+                    **chart_backtest_options,
+                    entry_blocked_dates=set(pressure_context["blockedDates"]),
+                )
+                pressure_scenario = build_chart_strategy_scenario(pressure_trades, pressure_curve, "纳指+标普受压过滤持仓")
+                pressure_scenario.update(
+                    {"description": DOUBLE_INDEX_PRESSURE_RULE, "blockedDays": len(pressure_context["blockedDates"])}
+                )
+                chart_strategy_modes["double_index_pressure"] = pressure_scenario
             chart_path = REPORT_DIR / f"{safe_name(f'batch_{symbol}_{start}_{end}_{int(time.time())}')}.html"
             make_report(
                 chart_path,
@@ -4823,6 +4896,7 @@ def run_batch_backtest(params: dict[str, list[str]]) -> str:
                 benchmark=None,
                 strategy_settings=strategy_settings,
                 report_mode="batch_chart",
+                chart_strategy_modes=chart_strategy_modes,
             )
             symbol_data[symbol] = {
                 "bars": bars,
@@ -8115,6 +8189,9 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
     require_ma5_rising = checkbox_field(params, "require_ma5_rising", False)
     require_5ma_gt_20ma = checkbox_field(params, "require_5ma_gt_20ma", False)
     b1_require_20ma_gt_50ma = checkbox_field(params, "b1_require_20ma_gt_50ma", False)
+    secondary_big_red_b1 = checkbox_field(params, "secondary_big_red_b1", False)
+    secondary_above_ma5_3d = checkbox_field(params, "secondary_above_ma5_3d", False)
+    market = field(params, "market", "us").lower()
     end_day = default_scan_end_date()
     start_day = chart_start_for_preset(preset, end_day)
     try:
@@ -8128,7 +8205,7 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
     if not bars:
         return {"error": f"{symbol} 没有可用日线数据。"}
     try:
-        trades, equity_curve = backtest(
+        backtest_options = dict(
             bars=bars,
             ma_length=5,
             vol_length=20,
@@ -8143,10 +8220,34 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
             b1_require_20ma_gt_50ma=b1_require_20ma_gt_50ma,
             require_ma5_rising=require_ma5_rising,
             require_5ma_gt_20ma=require_5ma_gt_20ma,
+            secondary_big_red_b1=secondary_big_red_b1,
+            secondary_above_ma5_3d=secondary_above_ma5_3d,
             symbol=symbol,
         )
+        trades, equity_curve = backtest(**backtest_options)
     except Exception as exc:
         return {"error": str(exc)}
+    pressure_context: dict[str, object] = {
+        "available": False,
+        "symbols": ["^IXIC", "^GSPC"],
+        "rule": DOUBLE_INDEX_PRESSURE_RULE,
+        "blockedDates": [],
+    }
+    strategy_modes = {
+        "original": build_chart_strategy_scenario(trades, equity_curve, "原策略持仓"),
+    }
+    if market == "us":
+        pressure_context = double_index_pressure_context(bars[0].date, bars[-1].date)
+        if pressure_context["available"]:
+            pressure_trades, pressure_curve = backtest(
+                **backtest_options,
+                entry_blocked_dates=set(pressure_context["blockedDates"]),
+            )
+            pressure_scenario = build_chart_strategy_scenario(pressure_trades, pressure_curve, "纳指+标普受压过滤持仓")
+            pressure_scenario.update(
+                {"description": DOUBLE_INDEX_PRESSURE_RULE, "blockedDays": len(pressure_context["blockedDates"])}
+            )
+            strategy_modes["double_index_pressure"] = pressure_scenario
     execution_markers = [
         {
             "time": str(row.get("date", "")),
@@ -8163,6 +8264,7 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
         for trade in trades
     ]
     signal_markers: list[dict[str, object]] = []
+    context_markers: list[dict[str, object]] = []
     markers = list(execution_markers)
     holding_periods: list[dict[str, str]] = []
     holding_start = ""
@@ -8205,6 +8307,7 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
                 "text": marker_text,
             }
         )
+        context_markers.append(dict(markers[-1]))
         display_event = dict(event)
         display_event["marker_time"] = marker_time
         event_by_time.setdefault(marker_time, []).append(display_event)
@@ -8295,6 +8398,8 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
             "require_ma5_rising": require_ma5_rising,
             "require_5ma_gt_20ma": require_5ma_gt_20ma,
             "b1_require_20ma_gt_50ma": b1_require_20ma_gt_50ma,
+            "secondary_big_red_b1": secondary_big_red_b1,
+            "secondary_above_ma5_3d": secondary_above_ma5_3d,
         },
         "kdjK": k_points,
         "kdjD": d_points,
@@ -8307,6 +8412,9 @@ def watchlist_chart_payload(params: dict[str, list[str]]) -> dict[str, object]:
         "executionMarkers": sorted(execution_markers, key=lambda item: str(item["time"])),
         "signalMarkers": sorted(signal_markers, key=lambda item: str(item["time"])),
         "holdingPeriods": holding_periods,
+        "contextMarkers": sorted(context_markers, key=lambda item: str(item["time"])),
+        "strategyModes": strategy_modes,
+        "marketPressure": pressure_context,
         "rows": rows,
         "divergenceEvents": symbol_events,
     }
